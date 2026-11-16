@@ -1,0 +1,15 @@
+[package]
+name = "guard-dog"
+description = "Guard Dog: a local-first security watchdog for self-hosted Bitcoin and Nostr infrastructure."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+clap.workspace = true

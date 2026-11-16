@@ -1,0 +1,14 @@
+error[E0599]: `Untrusted<String>` doesn't implement `std::fmt::Display`
+ --> tests/ui/no_to_string.rs:6:31
+  |
+6 |     let _plain: String = name.to_string();
+  |                               ^^^^^^^^^ method cannot be called on `Untrusted<String>` due to unsatisfied trait bounds
+  |
+ ::: src/untrusted.rs
+  |
+  | pub struct Untrusted<T>(T);
+  | ----------------------- doesn't satisfy `Untrusted<String>: ToString` or `Untrusted<String>: std::fmt::Display`
+  |
+  = note: the following trait bounds were not satisfied:
+          `Untrusted<String>: std::fmt::Display`
+          which is required by `Untrusted<String>: ToString`
