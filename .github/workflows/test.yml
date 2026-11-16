@@ -1,0 +1,131 @@
+# The merge gate: every pull request and every push to main runs these jobs.
+# The job names below (fmt, clippy, test, test-aarch64, deny) are what the
+# `main` branch ruleset lists as required checks. Rename one and the ruleset
+# has to change with it.
+#
+# Nightly (nightly.yml) calls this file as a reusable workflow, so the two
+# can't drift apart.
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+# Read-only. No job here writes to the repository, packages or checks.
+permissions:
+  contents: read
+
+# A new push to a pull request cancels the older run of the same PR.
+# Runs on main and runs called from nightly are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Current rustup does not install the toolchain by itself; with no
+      # arguments this reads rust-toolchain.toml (exact version, components).
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+      - name: cargo build
+        run: cargo build --locked
+      - name: cargo test
+        run: cargo test --locked
+
+  # The Pi-class target: 64-bit ARM. GitHub's standard arm64 Linux runners are
+  # free for public repositories.
+  test-aarch64:
+    name: test-aarch64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+      - name: cargo build
+        run: cargo build --locked
+      - name: cargo test
+        run: cargo test --locked
+
+  deny:
+    name: deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Official release from github.com/EmbarkStudios/cargo-deny, downloaded
+      # and checked against a SHA-256 written here. To update: change the
+      # version, download the asset yourself, hash it, compare with the
+      # project's .sha256 file, and paste the hash.
+      CARGO_DENY_VERSION: "0.21.0"
+      CARGO_DENY_SHA256: a2170b854ff697e79e39c4c538981c9c1bdd803addbae6719a4cb66b4585a903
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # cargo-deny asks cargo for the dependency list, so cargo has to work.
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+      - name: Install cargo-deny (checked download)
+        run: |
+          set -euo pipefail
+          name="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
+          mkdir -p "${RUNNER_TEMP}/cargo-deny"
+          cd "${RUNNER_TEMP}/cargo-deny"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --output "${name}.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${name}.tar.gz"
+          echo "${CARGO_DENY_SHA256}  ${name}.tar.gz" | sha256sum -c -
+          tar -xzf "${name}.tar.gz"
+          echo "${RUNNER_TEMP}/cargo-deny/${name}" >> "${GITHUB_PATH}"
+      - name: cargo deny
+        run: cargo deny check
