@@ -23,3 +23,6 @@ __pycache__/
 .idea/
 .vscode/
 *.swp
+
+# Personal Claude Code instructions for this project (never committed)
+CLAUDE.local.md
