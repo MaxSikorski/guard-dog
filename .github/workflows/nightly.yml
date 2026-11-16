@@ -1,0 +1,126 @@
+# Nightly: everything the merge gate runs, plus the checks that are too slow
+# or too noisy for every pull request. Also runnable by hand (Actions tab).
+name: nightly
+
+on:
+  schedule:
+    # Once a day, 04:17 UTC. An odd minute, because the top of the hour is busy.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Both reproducibility builds bake in the same commit id.
+env:
+  CARGO_INCREMENTAL: "0"
+  GD_GIT_COMMIT: ${{ github.sha }}
+
+# One nightly run at a time; a manual run waits for a running one to finish.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  # Everything in test.yml (fmt, clippy, test, test-aarch64, deny).
+  gate:
+    uses: ./.github/workflows/test.yml
+    permissions:
+      contents: read
+
+  # There is no separate advisories job: `gate / deny` above runs the full
+  # `cargo deny --locked check`, which includes the RustSec advisory check, so
+  # new advisories against an unchanged Cargo.lock still turn the nightly red.
+
+  # TODO(Phase 0.8): the lab judges go here once the regtest lab exists
+  # (lab/up.sh, then the judges, then lab/down.sh). No placeholder job yet.
+
+  # Reproducible builds: the same source built on two different runners should
+  # give the same bytes. Each build reports the SHA-256 of the binary.
+  build-repro-2404:
+    name: build-repro-2404
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      sha256: ${{ steps.hash.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        timeout-minutes: 10
+        run: |
+          rustup toolchain install --no-self-update
+          rustup show active-toolchain
+      - name: cargo build --release
+        run: cargo build --locked --release
+      - name: Hash the binary
+        id: hash
+        run: |
+          set -euo pipefail
+          sum="$(sha256sum target/release/guard-dog | cut -d' ' -f1)"
+          echo "${sum}  target/release/guard-dog"
+          echo "sha256=${sum}" >> "${GITHUB_OUTPUT}"
+
+  build-repro-2204:
+    name: build-repro-2204
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    outputs:
+      sha256: ${{ steps.hash.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        timeout-minutes: 10
+        run: |
+          rustup toolchain install --no-self-update
+          rustup show active-toolchain
+      - name: cargo build --release
+        run: cargo build --locked --release
+      - name: Hash the binary
+        id: hash
+        run: |
+          set -euo pipefail
+          sum="$(sha256sum target/release/guard-dog | cut -d' ' -f1)"
+          echo "${sum}  target/release/guard-dog"
+          echo "sha256=${sum}" >> "${GITHUB_OUTPUT}"
+
+  reproducible:
+    name: reproducible
+    needs: [build-repro-2404, build-repro-2204]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # Expected to be RED until Phase 4.6 (reproducible builds). The result is
+    # recorded on every run, but it must not block anything. Remove this line
+    # when the two hashes start to match.
+    continue-on-error: true
+    env:
+      SHA_2404: ${{ needs.build-repro-2404.outputs.sha256 }}
+      SHA_2204: ${{ needs.build-repro-2204.outputs.sha256 }}
+    steps:
+      - name: Compare the two hashes
+        run: |
+          echo "ubuntu-24.04: ${SHA_2404}"
+          echo "ubuntu-22.04:  ${SHA_2204}"
+          if [ -z "${SHA_2404}" ] || [ "${SHA_2404}" != "${SHA_2204}" ]; then
+            verdict="DIFFERENT (expected until Phase 4.6)"
+          else
+            verdict="byte-identical"
+          fi
+          {
+            echo "### Reproducibility"
+            echo ""
+            echo "| Runner | SHA-256 of target/release/guard-dog |"
+            echo "|---|---|"
+            echo "| ubuntu-24.04 | \`${SHA_2404}\` |"
+            echo "| ubuntu-22.04 | \`${SHA_2204}\` |"
+            echo ""
+            echo "Verdict: ${verdict}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if [ "${verdict}" != "byte-identical" ]; then
+            echo "::error::The two builds differ (expected until Phase 4.6)."
+            exit 1
+          fi
+          echo "The two builds are byte-identical."
