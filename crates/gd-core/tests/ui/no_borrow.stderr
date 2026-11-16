@@ -1,0 +1,10 @@
+error[E0308]: mismatched types
+ --> tests/ui/no_borrow.rs:7:24
+  |
+7 |     let _plain: &str = name.borrow();
+  |                 ----   ^^^^^^^^^^^^^ expected `&str`, found `&Untrusted<String>`
+  |                 |
+  |                 expected due to this
+  |
+  = note: expected reference `&str`
+             found reference `&Untrusted<String>`

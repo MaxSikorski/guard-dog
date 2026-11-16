@@ -16,7 +16,7 @@ This file is for AI coding agents working **on this repository**. If someone ask
 - Plain English in docs and pull requests: what changed, why, how you tested it, and what you didn't test.
 
 ## Commands
-From the repository root (rustup installs the pinned toolchain from `rust-toolchain.toml`): `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo build --locked`, `cargo test --locked`, `cargo deny check`. Every test is listed in [tests/README.md](tests/README.md).
+From the repository root (rustup installs the pinned toolchain from `rust-toolchain.toml`): `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo build --locked`, `cargo test --locked`, `cargo deny --locked check`. Every test is listed in [tests/README.md](tests/README.md).
 
 ## When you need to…
 | Task | Read |

@@ -39,14 +39,12 @@ unused-allowed-license = "allow"
 # rule is that no GPL or non-commercial code enters the repository at all.
 include-dev = true
 
-[licenses.private]
-# Our own crates are not published; their license (Apache-2.0) is in LICENSE.
-ignore = true
-
 [bans]
 multiple-versions = "warn"
 # A `*` version requirement would let any future release in.
 wildcards = "deny"
+# Except our own crates depending on each other by path inside this workspace.
+allow-wildcard-paths = true
 deny = [
     # TLS goes through rustls: OpenSSL complicates static, reproducible and ARM builds.
     { crate = "openssl-sys", reason = "use rustls instead" },

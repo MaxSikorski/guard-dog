@@ -1,13 +1,13 @@
 //! The `guard-dog` command. Pre-alpha: for now it answers `--version` and
-//! `--help`; scanning arrives in Phase 1.
+//! `--help`; scanning comes next.
 
 use clap::Parser;
 
-/// The release number and the exact source commit it was built from.
+/// The release number, and the exact source commit for release builds.
 const VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
-    " (commit ",
-    env!("GD_GIT_COMMIT"),
+    " (",
+    env!("GD_BUILD_SOURCE"),
     ")"
 );
 

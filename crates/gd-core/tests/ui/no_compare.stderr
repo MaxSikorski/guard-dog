@@ -1,0 +1,13 @@
+error[E0369]: binary operation `==` cannot be applied to type `Untrusted<String>`
+ --> tests/ui/no_compare.rs:6:14
+  |
+6 |     if label == Untrusted::new(String::from("trusted")) {
+  |        ----- ^^ --------------------------------------- Untrusted<String>
+  |        |
+  |        Untrusted<String>
+  |
+note: `Untrusted<String>` does not implement `PartialEq`
+ --> src/untrusted.rs
+  |
+  | pub struct Untrusted<T>(T);
+  | ^^^^^^^^^^^^^^^^^^^^^^^ `Untrusted<String>` is defined in another crate
