@@ -39,4 +39,6 @@ The judges measure outcomes from outside the code. They arrive next, each with a
 - **Judge A, recorded real setups:** does Guard Dog find every service and its version?
 - **Judge B, historical advisories:** does it report every advisory that applies, and nothing that doesn't?
 - **Judge C, egress capture:** does anything leave the box that shouldn't, including planted canary secrets?
-- **Judge D, injection corpus:** can hostile text in any channel make Guard Dog do or show anything?
+- **Judge D, injection corpus:** can hostile text in any channel make Guard Dog do or show anything? Running since Phase 0.7 (see below).
+
+**Judge D** (`crates/gd-core/tests/judge_d_injection.rs`, corpus in `fixtures/injection/`, index and generator there): baseline 2026-11-16: 48 payloads (12 per family, 10 channels), 48 of 48 pass all seven checks (terminal and HTML output free of control characters and line breaks, no HTML-special characters, no invisible character from the Unicode 16 table and no leading combining mark, both round-trip). Not yet applicable, counted and not passed: family a, no action proposed 12 and no untrusted bytes in a privileged prompt 12; family d, display-width truncation 3 and bidi isolation 2. Teeth: against a naive renderer (text returned unchanged) 36 of 48 fail (a 4, b 12, c 11, d 9). Family a fails only incidentally, on its newlines and markup. Family d's 100 KB text, Hebrew-beside-versions and padding payloads still pass naive; they need the later renderers.
