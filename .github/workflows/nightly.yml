@@ -39,7 +39,7 @@ jobs:
           persist-credentials: false
       - name: Install the pinned toolchain
         run: |
-          rustup toolchain install
+          rustup toolchain install --no-self-update
           rustup show active-toolchain
       - name: Install cargo-deny (checked download)
         run: |
@@ -54,7 +54,7 @@ jobs:
           tar -xzf "${name}.tar.gz"
           echo "${RUNNER_TEMP}/cargo-deny/${name}" >> "${GITHUB_PATH}"
       - name: cargo deny check advisories
-        run: cargo deny check advisories
+        run: cargo deny --locked check advisories
 
   # TODO(Phase 0.8): the lab judges go here once the regtest lab exists
   # (lab/up.sh, then the judges, then lab/down.sh). No placeholder job yet.
@@ -73,7 +73,7 @@ jobs:
           persist-credentials: false
       - name: Install the pinned toolchain
         run: |
-          rustup toolchain install
+          rustup toolchain install --no-self-update
           rustup show active-toolchain
       - name: cargo build --release
         run: cargo build --locked --release
@@ -97,7 +97,7 @@ jobs:
           persist-credentials: false
       - name: Install the pinned toolchain
         run: |
-          rustup toolchain install
+          rustup toolchain install --no-self-update
           rustup show active-toolchain
       - name: cargo build --release
         run: cargo build --locked --release

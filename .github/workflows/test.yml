@@ -25,6 +25,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Compiler warnings fail every job, not just clippy (so the ARM job too).
+  RUSTFLAGS: "-D warnings"
 
 jobs:
   fmt:
@@ -39,7 +41,7 @@ jobs:
       # arguments this reads rust-toolchain.toml (exact version, components).
       - name: Install the pinned toolchain
         run: |
-          rustup toolchain install
+          rustup toolchain install --no-self-update
           rustup show active-toolchain
       - name: cargo fmt
         run: cargo fmt --all --check
@@ -54,7 +56,7 @@ jobs:
           persist-credentials: false
       - name: Install the pinned toolchain
         run: |
-          rustup toolchain install
+          rustup toolchain install --no-self-update
           rustup show active-toolchain
       - name: cargo clippy
         run: cargo clippy --locked --all-targets -- -D warnings
@@ -69,7 +71,7 @@ jobs:
           persist-credentials: false
       - name: Install the pinned toolchain
         run: |
-          rustup toolchain install
+          rustup toolchain install --no-self-update
           rustup show active-toolchain
       - name: cargo build
         run: cargo build --locked
@@ -88,7 +90,7 @@ jobs:
           persist-credentials: false
       - name: Install the pinned toolchain
         run: |
-          rustup toolchain install
+          rustup toolchain install --no-self-update
           rustup show active-toolchain
       - name: cargo build
         run: cargo build --locked
@@ -113,7 +115,7 @@ jobs:
       # cargo-deny asks cargo for the dependency list, so cargo has to work.
       - name: Install the pinned toolchain
         run: |
-          rustup toolchain install
+          rustup toolchain install --no-self-update
           rustup show active-toolchain
       - name: Install cargo-deny (checked download)
         run: |
@@ -128,4 +130,4 @@ jobs:
           tar -xzf "${name}.tar.gz"
           echo "${RUNNER_TEMP}/cargo-deny/${name}" >> "${GITHUB_PATH}"
       - name: cargo deny
-        run: cargo deny check
+        run: cargo deny --locked check
