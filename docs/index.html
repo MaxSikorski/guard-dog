@@ -8,8 +8,9 @@
     <meta name="theme-color" content="#000000">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐕</text></svg>">
+    <link rel="icon" id="favicon" type="image/svg+xml" href="favicon-dark.svg">
     <script>(function(){var d;try{var s=localStorage.getItem("theme");d=s?s==="dark":matchMedia("(prefers-color-scheme: dark)").matches}catch(e){d=true}document.documentElement.setAttribute("data-theme",d?"dark":"light")})();</script>
+    <script>/* Favicon follows the theme: black mark in light mode, white mark in dark mode; the inside stays transparent. */(function(){var f=document.getElementById("favicon");if(f)f.href=document.documentElement.getAttribute("data-theme")==="light"?"favicon-light.svg":"favicon-dark.svg"})();</script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         /* Sikorski Design System. Colour is used only for meaning (Max, 2026-11-16):
@@ -34,6 +35,7 @@
             --btn-sec-hover: rgba(255, 255, 255, 0.1);
             --divider: rgba(255, 255, 255, 0.08);
             --text-muted: rgba(255, 255, 255, 0.5);
+            --glass-bg: rgba(0, 0, 0, 0.72);
 
             /* meaning only */
             --critical: #ff453a; --high: #ff9f0a; --medium: #ffd60a; --ok: #30d158;
@@ -55,6 +57,7 @@
             --btn-sec-hover: rgba(0, 0, 0, 0.05);
             --divider: rgba(0, 0, 0, 0.08);
             --text-muted: rgba(0, 0, 0, 0.5);
+            --glass-bg: rgba(245, 245, 247, 0.78);
 
             --critical: #d70015; --high: #c93400; --medium: #a05a00; --ok: #248a3d;
             --bitcoin: #d9730a; --lightning: #c96a00; --ecash: #d30f45; --nostr: #8944ab;
@@ -82,42 +85,44 @@
         a { color: inherit; }
 
         /* 4.1 Navigation */
+        /* Fixed, always-frosted header, the same as the weekly slide decks (Max, 2026-09-10 and 2026-11-16):
+           anything scrolling underneath stays legible behind the bar instead of colliding with the nav text. */
         .header-nav {
             position: fixed; top: 0; left: 0; width: 100%;
             padding: 30px 50px;
             display: flex; justify-content: space-between; align-items: center;
             z-index: 100;
-        }
-        /* Extension: once the page scrolls, the floating header gets the glass treatment so it never sits on top of text. */
-        .header-nav { transition: background-color 0.3s ease, padding 0.3s ease; }
-        .header-nav.scrolled {
-            padding-top: 18px; padding-bottom: 18px;
-            background: var(--card-bg);
-            backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
+            transition: padding 0.3s ease;
+            background: var(--glass-bg);
+            backdrop-filter: blur(14px);
+            -webkit-backdrop-filter: blur(14px);
             border-bottom: 1px solid var(--divider);
         }
         .logo {
             color: var(--text-color); text-decoration: none;
             font-size: 1rem; font-weight: 600; letter-spacing: -0.02em;
             transition: color 0.5s ease;
+            display: inline-flex; align-items: center; gap: 10px; white-space: nowrap;
         }
-        .nav-right { display: flex; align-items: center; gap: 32px; }
-        .nav-links { display: flex; gap: 32px; align-items: center; }
+        .logo svg { width: 24px; height: 24px; flex-shrink: 0; }
+        .nav-right { display: flex; align-items: center; gap: 16px; position: relative; }
+        .nav-links { display: flex; align-items: center; }
         .nav-link {
-            color: var(--text-color); text-decoration: none;
-            font-size: 0.9rem; font-weight: 400; opacity: 0.7;
-            transition: opacity 0.3s ease;
+            font-size: 0.95rem; font-weight: 500; color: var(--text-color); text-decoration: none;
+            opacity: 0.7; transition: opacity 0.3s ease; margin-right: 18px; white-space: nowrap;
         }
         .nav-link:hover { opacity: 1; }
-        .theme-toggle, .menu-toggle {
+        .theme-toggle, .nav-menu-toggle {
             background: none; border: none; color: var(--text-color); cursor: pointer;
             width: 28px; height: 28px; padding: 0;
             display: flex; align-items: center; justify-content: center;
             transition: color 0.5s ease; position: relative;
         }
-        .theme-toggle::after, .menu-toggle::after { content: ""; position: absolute; inset: -8px; } /* 44px touch target */
-        .theme-toggle svg, .menu-toggle svg { width: 22px; height: 22px; }
-        .menu-toggle { display: none; }
+        .theme-toggle::after, .nav-menu-toggle::after { content: ""; position: absolute; inset: -8px; } /* 44px touch target */
+        .theme-toggle svg, .nav-menu-toggle svg { width: 22px; height: 22px; }
+        .nav-menu-toggle, .nav-menu { display: none; }
+        section[id] { scroll-margin-top: 110px; }
+        .hero-mark { width: 72px; height: 72px; margin: 0 auto 20px; display: block; opacity: 0; transform: translateY(30px); }
 
         /* 4.2 Hero */
         .hero-section {
@@ -223,19 +228,29 @@
         .footer { text-align: center; font-size: 0.8rem; font-weight: 500; opacity: 0.3; padding: 60px 0 40px; }
 
         /* 7. Mobile */
+        /* Phone nav menu, the same as the decks: text links collapse into a dropdown.
+           Guard Dog has four links, so they collapse a little earlier (860px) to keep words from crowding. */
+        @media (max-width: 860px) {
+            .header-nav .nav-right .nav-links { display: none; }
+            .nav-menu-toggle { display: flex; }
+            .nav-menu:not([hidden]) {
+                display: flex; flex-direction: column;
+                position: absolute; top: calc(100% + 8px); right: 0;
+                min-width: 210px; padding: 8px;
+                background: var(--bg-color);
+                border: 1px solid var(--card-border);
+                box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
+                border-radius: 16px;
+            }
+            .nav-menu-link {
+                padding: 12px 14px; border-radius: 10px;
+                font-size: 1rem; font-weight: 500; color: var(--text-color); text-decoration: none;
+            }
+            .nav-menu-link:hover, .nav-menu-link:focus-visible { background: var(--card-hover); }
+        }
         @media (max-width: 768px) {
             .header-nav { padding: 20px; }
             .content-section { padding: 0 20px 60px; }
-            .nav-links {
-                display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100vh;
-                background: var(--card-bg); backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
-                flex-direction: column; justify-content: center; align-items: center; gap: 24px; z-index: 99;
-            }
-            .nav-links.open { display: flex; }
-            .nav-link { font-size: 1.5rem; font-weight: 600; opacity: 0.85; }
-            .menu-toggle { display: flex; z-index: 101; }
-            .theme-toggle { z-index: 101; }
-            .nav-right { gap: 20px; }
         }
         @media (max-width: 380px) {
             .hero-title { font-size: 2rem; }
@@ -244,20 +259,26 @@
 </head>
 <body>
     <nav class="header-nav">
-        <a href="#" class="logo" id="logo-refresh" title="Reload">Guard Dog</a>
+        <a href="#" class="logo" id="logo-refresh" title="Reload"><svg viewBox="0 0 64 64" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" d="M32 4 8 12v17c0 14 9 25 24 31 15-6 24-17 24-31V12L32 4Zm0 6 18 6v13c0 11-6 20-18 25-12-5-18-14-18-25V16l18-6Z"/><path fill="currentColor" fill-rule="evenodd" d="M20 18c0-1 1-1 2 0l7 7h6l7-7c1-1 2-1 2 0v16c0 8-5 13-12 16-7-3-12-8-12-16V18Zm4 14v4h5v-4h-5Zm11 0v4h5v-4h-5Zm-7 9 4 5 4-5h-8Z"/></svg>Guard Dog</a>
         <div class="nav-right">
-            <div class="nav-links" id="nav-links">
+            <div class="nav-links">
                 <a href="#watches" class="nav-link">What it watches</a>
                 <a href="#how" class="nav-link">How it works</a>
                 <a href="#never" class="nav-link">Promises</a>
                 <a href="https://github.com/MaxSikorski/guard-dog" class="nav-link" target="_blank" rel="noopener">GitHub</a>
             </div>
-            <button id="menu-toggle" class="menu-toggle" aria-label="Menu">
+            <button id="nav-menu-toggle" class="nav-menu-toggle" aria-label="Menu" aria-expanded="false" aria-controls="nav-menu">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                     stroke-linecap="round" stroke-linejoin="round">
                     <path id="menu-icon-path" d="M4 6h16M4 12h16M4 18h16"/>
                 </svg>
             </button>
+            <div class="nav-menu" id="nav-menu" hidden>
+                <a href="#watches" class="nav-menu-link">What it watches</a>
+                <a href="#how" class="nav-menu-link">How it works</a>
+                <a href="#never" class="nav-menu-link">Promises</a>
+                <a href="https://github.com/MaxSikorski/guard-dog" class="nav-menu-link" target="_blank" rel="noopener">GitHub</a>
+            </div>
             <button id="theme-toggle" class="theme-toggle" aria-label="Toggle Theme">
                 <svg id="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -271,6 +292,7 @@
 
     <section class="hero-section">
         <div class="hero-content">
+            <svg class="hero-mark" viewBox="0 0 64 64" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" d="M32 4 8 12v17c0 14 9 25 24 31 15-6 24-17 24-31V12L32 4Zm0 6 18 6v13c0 11-6 20-18 25-12-5-18-14-18-25V16l18-6Z"/><path fill="currentColor" fill-rule="evenodd" d="M20 18c0-1 1-1 2 0l7 7h6l7-7c1-1 2-1 2 0v16c0 8-5 13-12 16-7-3-12-8-12-16V18Zm4 14v4h5v-4h-5Zm11 0v4h5v-4h-5Zm-7 9 4 5 4-5h-8Z"/></svg>
             <h1 class="hero-title">Guard Dog</h1>
             <p class="hero-subtitle">A self-hosted watchdog for your Bitcoin and Nostr stack. It knows what you run, notices the moment something turns dangerous, and tells you exactly what to do.</p>
             <div class="hero-cta">
@@ -357,7 +379,7 @@ Checked 3 min ago · 5 blind spots · No known issues is not the same as secure.
     <script>
         // Without GSAP (offline, blocked CDN) show everything instead of leaving it hidden.
         if (typeof gsap === "undefined") {
-            document.querySelectorAll(".hero-title, .hero-subtitle, .hero-cta, .status").forEach(function (el) { el.style.opacity = 1; el.style.transform = "none"; });
+            document.querySelectorAll(".hero-mark, .hero-title, .hero-subtitle, .hero-cta, .status").forEach(function (el) { el.style.opacity = 1; el.style.transform = "none"; });
             window.gsap = { set: function () {}, to: function () {}, fromTo: function () {}, timeline: function () { return { to: function () { return this; }, restart: function () {} }; } };
         }
 
@@ -405,6 +427,9 @@ Checked 3 min ago · 5 blind spots · No known issues is not the same as secure.
             const pathNode = themeIcon.querySelector("path");
             pathNode.setAttribute("d", dark ? sunPath : moonPath);
 
+            const favicon = document.getElementById("favicon");
+            if (favicon) favicon.href = dark ? "favicon-dark.svg" : "favicon-light.svg";
+
             if (animate) {
                 gsap.fromTo(themeIcon,
                     { rotation: 0, scale: 0.8 },
@@ -418,37 +443,30 @@ Checked 3 min ago · 5 blind spots · No known issues is not the same as secure.
         themeBtn.addEventListener("click", () => { isDark = !isDark; applyTheme(isDark); });
         prefersDark.addEventListener("change", (e) => { isDark = e.matches; applyTheme(isDark, true); });
 
-        // 4.1 Hamburger menu
-        const menuToggle = document.getElementById("menu-toggle");
-        const navLinks = document.getElementById("nav-links");
+        // Phone nav menu (the weekly decks' dropdown): links collapse behind the menu button
+        const menuToggle = document.getElementById("nav-menu-toggle");
+        const navMenu = document.getElementById("nav-menu");
         const menuIconPath = document.getElementById("menu-icon-path");
         const hamburgerPath = "M4 6h16M4 12h16M4 18h16";
         const closePath = "M6 6l12 12M6 18L18 6";
-        if (menuToggle && navLinks) {
-            menuToggle.addEventListener("click", () => {
-                const isOpen = navLinks.classList.toggle("open");
-                menuIconPath.setAttribute("d", isOpen ? closePath : hamburgerPath);
-                if (isOpen) {
-                    gsap.fromTo(navLinks, { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power2.out" });
-                    gsap.fromTo(".nav-links .nav-link", { opacity: 0, y: 20 },
-                        { opacity: 0.85, y: 0, duration: 0.5, ease: "power4.out", stagger: 0.08 });
-                }
-            });
-            navLinks.querySelectorAll(".nav-link").forEach((a) => a.addEventListener("click", () => {
-                if (navLinks.classList.contains("open")) { navLinks.classList.remove("open"); menuIconPath.setAttribute("d", hamburgerPath); }
-            }));
+        const setMenu = (open) => {
+            navMenu.hidden = !open;
+            menuToggle.setAttribute("aria-expanded", String(open));
+            menuIconPath.setAttribute("d", open ? closePath : hamburgerPath);
+            if (open) gsap.fromTo(navMenu, { opacity: 0, y: -6 }, { opacity: 1, y: 0, duration: 0.3, ease: "power2.out" });
+        };
+        if (menuToggle && navMenu) {
+            menuToggle.addEventListener("click", (e) => { e.stopPropagation(); setMenu(navMenu.hidden); });
+            navMenu.querySelectorAll(".nav-menu-link").forEach((a) => a.addEventListener("click", () => setMenu(false)));
+            document.addEventListener("click", (e) => { if (!navMenu.hidden && !navMenu.contains(e.target)) setMenu(false); });
+            document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !navMenu.hidden) { setMenu(false); menuToggle.focus(); } });
         }
-
-        // Glass header once scrolled (see the CSS note)
-        const headerNav = document.querySelector(".header-nav");
-        const markScrolled = () => headerNav.classList.toggle("scrolled", window.scrollY > 10);
-        window.addEventListener("scroll", markScrolled, { passive: true });
-        markScrolled();
 
         // 5.1 Hero entrance
         const tl = gsap.timeline({ defaults: { ease: "power4.out", duration: 1.2 } });
-        gsap.set(".hero-title, .hero-subtitle, .hero-cta, .status", { opacity: 0, y: 30 });
-        tl.to(".hero-title", { opacity: 1, y: 0, delay: 0.2 })
+        gsap.set(".hero-mark, .hero-title, .hero-subtitle, .hero-cta, .status", { opacity: 0, y: 30 });
+        tl.to(".hero-mark", { opacity: 1, y: 0, delay: 0.2 })
+          .to(".hero-title", { opacity: 1, y: 0 }, "-=0.95")
           .to(".hero-subtitle", { opacity: 1, y: 0 }, "-=0.9")
           .to(".hero-cta", { opacity: 1, y: 0 }, "-=0.9")
           .to(".status", { opacity: 1, y: 0 }, "-=0.9");
