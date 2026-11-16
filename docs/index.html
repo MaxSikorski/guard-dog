@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Guard Dog</title>
+    <meta name="description" content="A self-hosted, local-first security watchdog for people whose money and identity run on Bitcoin and Nostr.">
+    <meta name="theme-color" content="#000000">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="icon" id="favicon" type="image/svg+xml" href="favicon-dark.svg">
+    <script>(function(){var d;try{var s=localStorage.getItem("theme");d=s?s==="dark":matchMedia("(prefers-color-scheme: dark)").matches}catch(e){d=true}document.documentElement.setAttribute("data-theme",d?"dark":"light")})();</script>
+    <script>/* Favicon follows the theme: black mark in light mode, white mark in dark mode; the inside stays transparent. */(function(){var f=document.getElementById("favicon");if(f)f.href=document.documentElement.getAttribute("data-theme")==="light"?"favicon-light.svg":"favicon-dark.svg"})();</script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        /* Sikorski Design System. Colour is used only for meaning (Max, 2026-11-16):
+           urgency (red, orange, yellow, green) and categories (Bitcoin, Lightning, Ecash, Nostr). */
+        :root {
+            --theme-black: #000000;
+            --theme-dark-gray: #1c1c1e;
+            --theme-light-gray: #f5f5f7;
+            --theme-white: #ffffff;
+
+            --bg-color: var(--theme-black);
+            --text-color: var(--theme-white);
+            --card-bg: rgba(28, 28, 30, 0.7);
+            --card-border: rgba(255, 255, 255, 0.1);
+            --card-hover: rgba(44, 44, 46, 0.8);
+            --btn-bg: var(--theme-white);
+            --btn-text: var(--theme-black);
+            --btn-hover: #e0e0e0;
+            --btn-sec-bg: transparent;
+            --btn-sec-border: var(--theme-white);
+            --btn-sec-text: var(--theme-white);
+            --btn-sec-hover: rgba(255, 255, 255, 0.1);
+            --divider: rgba(255, 255, 255, 0.08);
+            --text-muted: rgba(255, 255, 255, 0.5);
+            --glass-bg: rgba(0, 0, 0, 0.72);
+
+            /* meaning only */
+            --critical: #ff453a; --high: #ff9f0a; --medium: #ffd60a; --ok: #30d158;
+            --bitcoin: #f7931a; --lightning: #ffb340; --ecash: #ff375f; --nostr: #bf5af2;
+        }
+
+        [data-theme="light"] {
+            --bg-color: var(--theme-light-gray);
+            --text-color: var(--theme-black);
+            --card-bg: rgba(255, 255, 255, 0.7);
+            --card-border: rgba(0, 0, 0, 0.1);
+            --card-hover: rgba(255, 255, 255, 0.9);
+            --btn-bg: var(--theme-black);
+            --btn-text: var(--theme-white);
+            --btn-hover: #333333;
+            --btn-sec-bg: transparent;
+            --btn-sec-border: var(--theme-black);
+            --btn-sec-text: var(--theme-black);
+            --btn-sec-hover: rgba(0, 0, 0, 0.05);
+            --divider: rgba(0, 0, 0, 0.08);
+            --text-muted: rgba(0, 0, 0, 0.5);
+            --glass-bg: rgba(245, 245, 247, 0.78);
+
+            --critical: #d70015; --high: #c93400; --medium: #a05a00; --ok: #248a3d;
+            --bitcoin: #d9730a; --lightning: #c96a00; --ecash: #d30f45; --nostr: #8944ab;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        html { scroll-behavior: smooth; }
+
+        @media (prefers-reduced-motion: reduce) {
+            html { scroll-behavior: auto; }
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            transition: background-color 0.5s ease, color 0.5s ease;
+        }
+
+        h1, h2, h3 { letter-spacing: -0.04em; font-weight: 700; }
+        p { line-height: 1.6; color: inherit; opacity: 0.85; }
+        a { color: inherit; }
+
+        /* 4.1 Navigation */
+        /* Fixed, always-frosted header, the same as the weekly slide decks (Max, 2026-09-10 and 2026-11-16):
+           anything scrolling underneath stays legible behind the bar instead of colliding with the nav text. */
+        .header-nav {
+            position: fixed; top: 0; left: 0; width: 100%;
+            padding: 30px 50px;
+            display: flex; justify-content: space-between; align-items: center;
+            z-index: 100;
+            transition: padding 0.3s ease;
+            background: var(--glass-bg);
+            backdrop-filter: blur(14px);
+            -webkit-backdrop-filter: blur(14px);
+            border-bottom: 1px solid var(--divider);
+        }
+        .logo {
+            color: var(--text-color); text-decoration: none;
+            font-size: 1rem; font-weight: 600; letter-spacing: -0.02em;
+            transition: color 0.5s ease;
+            display: inline-flex; align-items: center; gap: 10px; white-space: nowrap;
+        }
+        .logo svg { width: 24px; height: 24px; flex-shrink: 0; }
+        .nav-right { display: flex; align-items: center; gap: 16px; position: relative; }
+        .nav-links { display: flex; align-items: center; }
+        .nav-link {
+            font-size: 0.95rem; font-weight: 500; color: var(--text-color); text-decoration: none;
+            opacity: 0.7; transition: opacity 0.3s ease; margin-right: 18px; white-space: nowrap;
+        }
+        .nav-link:hover { opacity: 1; }
+        .theme-toggle, .nav-menu-toggle {
+            background: none; border: none; color: var(--text-color); cursor: pointer;
+            width: 28px; height: 28px; padding: 0;
+            display: flex; align-items: center; justify-content: center;
+            transition: color 0.5s ease; position: relative;
+        }
+        .theme-toggle::after, .nav-menu-toggle::after { content: ""; position: absolute; inset: -8px; } /* 44px touch target */
+        .theme-toggle svg, .nav-menu-toggle svg { width: 22px; height: 22px; }
+        .nav-menu-toggle, .nav-menu { display: none; }
+        section[id] { scroll-margin-top: 110px; }
+        .hero-mark { width: 72px; height: 72px; margin: 0 auto 20px; display: block; opacity: 0; transform: translateY(30px); }
+
+        /* 4.2 Hero */
+        .hero-section {
+            min-height: 100vh;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            text-align: center; padding: 0 20px;
+        }
+        .hero-content { max-width: 680px; width: 100%; }
+        .hero-title {
+            font-size: clamp(3rem, 8vw, 6rem); line-height: 1.1; margin-bottom: 16px;
+            opacity: 0; transform: translateY(30px);
+        }
+        .hero-subtitle {
+            font-size: clamp(1rem, 2vw, 1.25rem); max-width: 520px; margin: 0 auto 40px;
+            opacity: 0; transform: translateY(30px);
+        }
+        .hero-cta {
+            display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;
+            opacity: 0; transform: translateY(30px);
+        }
+        .status {
+            margin-top: 28px; font-size: 0.8rem; font-weight: 500; color: var(--text-muted);
+            display: inline-flex; align-items: center; gap: 8px;
+            opacity: 0; transform: translateY(30px);
+        }
+
+        /* 4.3 Buttons */
+        .btn {
+            padding: 14px 28px; border-radius: 30px; font-family: inherit; font-weight: 500; font-size: 1rem;
+            cursor: pointer; transition: all 0.3s ease; text-decoration: none; display: inline-block;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .primary-btn { background-color: var(--btn-bg); color: var(--btn-text); border: none; }
+        .primary-btn:hover { background-color: var(--btn-hover); }
+        .primary-btn:active { transform: scale(0.97); }
+        .secondary-btn { background-color: var(--btn-sec-bg); color: var(--btn-sec-text); border: 1px solid var(--btn-sec-border); }
+        .secondary-btn:hover { background-color: var(--btn-sec-hover); }
+        .secondary-btn:active { transform: scale(0.97); }
+
+        /* 4.7 Content section (widened for a two-column grid) */
+        .content-section { max-width: 800px; width: 100%; margin: 0 auto; padding: 0 28px 80px; }
+        .section { padding-top: 40px; }
+        .section-label {
+            font-size: 0.75rem; font-weight: 500; color: var(--text-muted);
+            text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 20px;
+        }
+        .section-title { font-size: clamp(2rem, 4vw, 3rem); line-height: 1.1; margin-bottom: 16px; }
+        .lead { font-size: 1.05rem; margin-bottom: 28px; max-width: 640px; }
+        .divider { width: 100%; height: 1px; background: var(--divider); margin: 48px 0 32px; }
+
+        /* 4.4 Cards (glassmorphism) */
+        .projects { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-bottom: 16px; }
+        .card {
+            display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start;
+            padding: 24px;
+            background: var(--card-bg);
+            backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
+            border: 1px solid var(--card-border); border-radius: 20px;
+            text-decoration: none; color: inherit; transition: all 0.3s ease;
+        }
+        .card-title { font-size: 1.05rem; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 6px; display: flex; align-items: center; gap: 10px; }
+        .card-desc { font-size: 0.85rem; font-weight: 400; opacity: 0.6; line-height: 1.5; }
+
+        /* meaning-only colour */
+        .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; display: inline-block; }
+        .dot.bitcoin { background: var(--bitcoin); } .dot.lightning { background: var(--lightning); }
+        .dot.ecash { background: var(--ecash); } .dot.nostr { background: var(--nostr); }
+        .dot.base { background: var(--text-muted); } .dot.yours { background: transparent; border: 1px solid var(--text-color); }
+        .sev { display: inline-flex; align-items: center; gap: 6px; font-size: 0.75rem; font-weight: 600; padding: 4px 10px; border-radius: 30px; border: 1px solid currentColor; }
+        .sev::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+        .sev.critical { color: var(--critical); } .sev.high { color: var(--high); } .sev.medium { color: var(--medium); } .sev.ok { color: var(--ok); }
+        .sevs { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0 4px; }
+        .card.urgent { border-color: var(--critical); }
+        .dot.critical-dot { background: var(--critical); }
+        .support-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+        .btn.small { padding: 9px 16px; font-size: 0.85rem; }
+        .btn.is-disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
+        .hero-cta-static { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+
+        /* 4.8 Code block (example alert) */
+        .code-block {
+            background: var(--card-bg);
+            backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
+            border: 1px solid var(--card-border); border-radius: 12px; padding: 20px;
+            font-family: "SF Mono", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+            font-size: 0.85rem; line-height: 1.6; color: var(--text-muted);
+            overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: pre; margin-bottom: 16px;
+        }
+        [data-theme="light"] .code-block { background: rgba(20, 20, 20, 0.95); color: #a1a1a6; border-color: rgba(255, 255, 255, 0.1); }
+        .code-block .c { color: #ff453a; font-weight: 600; }
+        .code-block .w { color: #f5f5f7; }
+
+        /* 4.5 Link rows */
+        .links { display: flex; flex-direction: column; }
+        .link-row {
+            display: flex; align-items: center; justify-content: space-between; gap: 16px;
+            padding: 18px 0; border-bottom: 1px solid var(--divider);
+            text-decoration: none; color: inherit; transition: opacity 0.3s ease;
+        }
+        .link-row:first-child { border-top: 1px solid var(--divider); }
+        a.link-row:hover { opacity: 0.6; }
+        .link-label { font-size: 1rem; font-weight: 400; }
+        .link-sub { display: block; font-size: 0.85rem; opacity: 0.6; margin-top: 2px; }
+        .link-arrow { opacity: 0.3; flex-shrink: 0; }
+        .never { opacity: 0.5; flex-shrink: 0; }
+
+        /* 4.11 Footer */
+        .footer { text-align: center; font-size: 0.8rem; font-weight: 500; opacity: 0.3; padding: 60px 0 40px; }
+
+        /* 7. Mobile */
+        /* Phone nav menu, the same as the decks: text links collapse into a dropdown.
+           Guard Dog has five links, so they collapse a little earlier (980px) to keep words from crowding. */
+        @media (max-width: 980px) {
+            .header-nav .nav-right .nav-links { display: none; }
+            .nav-menu-toggle { display: flex; }
+            .nav-menu:not([hidden]) {
+                display: flex; flex-direction: column;
+                position: absolute; top: calc(100% + 8px); right: 0;
+                min-width: 210px; padding: 8px;
+                background: var(--bg-color);
+                border: 1px solid var(--card-border);
+                box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
+                border-radius: 16px;
+            }
+            .nav-menu-link {
+                padding: 12px 14px; border-radius: 10px;
+                font-size: 1rem; font-weight: 500; color: var(--text-color); text-decoration: none;
+            }
+            .nav-menu-link:hover, .nav-menu-link:focus-visible { background: var(--card-hover); }
+        }
+        @media (max-width: 768px) {
+            .header-nav { padding: 20px; }
+            .content-section { padding: 0 20px 60px; }
+        }
+        @media (max-width: 380px) {
+            .hero-title { font-size: 2rem; }
+        }
+    </style>
+</head>
+<body>
+    <nav class="header-nav">
+        <a href="#" class="logo" id="logo-refresh" title="Reload"><svg viewBox="0 0 64 64" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" d="M32 4 8 12v17c0 14 9 25 24 31 15-6 24-17 24-31V12L32 4Zm0 6 18 6v13c0 11-6 20-18 25-12-5-18-14-18-25V16l18-6Z"/><path fill="currentColor" fill-rule="evenodd" d="M20 18c0-1 1-1 2 0l7 7h6l7-7c1-1 2-1 2 0v16c0 8-5 13-12 16-7-3-12-8-12-16V18Zm4 14v4h5v-4h-5Zm11 0v4h5v-4h-5Zm-7 9 4 5 4-5h-8Z"/></svg>Guard Dog</a>
+        <div class="nav-right">
+            <div class="nav-links">
+                <a href="#watches" class="nav-link">What it watches</a>
+                <a href="#how" class="nav-link">How it works</a>
+                <a href="#contribute" class="nav-link">Help build</a>
+                <a href="#support" class="nav-link">Support</a>
+                <a href="https://github.com/MaxSikorski/guard-dog" class="nav-link" target="_blank" rel="noopener">GitHub</a>
+            </div>
+            <button id="nav-menu-toggle" class="nav-menu-toggle" aria-label="Menu" aria-expanded="false" aria-controls="nav-menu">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <path id="menu-icon-path" d="M4 6h16M4 12h16M4 18h16"/>
+                </svg>
+            </button>
+            <div class="nav-menu" id="nav-menu" hidden>
+                <a href="#watches" class="nav-menu-link">What it watches</a>
+                <a href="#how" class="nav-menu-link">How it works</a>
+                <a href="#never" class="nav-menu-link">Promises</a>
+                <a href="#contribute" class="nav-menu-link">Help build</a>
+                <a href="#support" class="nav-menu-link">Support</a>
+                <a href="https://github.com/MaxSikorski/guard-dog" class="nav-menu-link" target="_blank" rel="noopener">GitHub</a>
+            </div>
+            <button id="theme-toggle" class="theme-toggle" aria-label="Toggle Theme">
+                <svg id="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path class="sun-path"
+                        d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z">
+                    </path>
+                </svg>
+            </button>
+        </div>
+    </nav>
+
+    <section class="hero-section">
+        <div class="hero-content">
+            <svg class="hero-mark" viewBox="0 0 64 64" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" d="M32 4 8 12v17c0 14 9 25 24 31 15-6 24-17 24-31V12L32 4Zm0 6 18 6v13c0 11-6 20-18 25-12-5-18-14-18-25V16l18-6Z"/><path fill="currentColor" fill-rule="evenodd" d="M20 18c0-1 1-1 2 0l7 7h6l7-7c1-1 2-1 2 0v16c0 8-5 13-12 16-7-3-12-8-12-16V18Zm4 14v4h5v-4h-5Zm11 0v4h5v-4h-5Zm-7 9 4 5 4-5h-8Z"/></svg>
+            <h1 class="hero-title">Guard Dog</h1>
+            <p class="hero-subtitle">A self-hosted watchdog for your Bitcoin and Nostr stack. It knows what you run, notices the moment something turns dangerous, and tells you exactly what to do.</p>
+            <div class="hero-cta">
+                <a href="https://github.com/MaxSikorski/guard-dog" class="btn primary-btn" target="_blank" rel="noopener">View on GitHub</a>
+                <a href="#how" class="btn secondary-btn">How it works</a>
+            </div>
+            <div class="status"><span class="dot base"></span>Pre-alpha · nothing to install yet</div>
+        </div>
+    </section>
+
+    <main class="content-section">
+        <section class="section" id="why">
+            <div class="section-label">Why I'm building this</div>
+            <h2 class="section-title">Doing everything right wasn't enough.</h2>
+            <p class="lead">In July 2026 the Coldcard hack drained about $116M from hardware wallets whose firmware had quietly made weak seeds since 2021. The people who got hit were careful self-custodians. A couple of months later, Alby Hub had a wallet-takeover flaw that hit people running old versions open to the internet, even though a fix had been out for about a year. If your money and identity live on your own infrastructure, you're your own security team. Guard Dog is the member of that team that never sleeps.</p>
+        </section>
+
+        <div class="divider"></div>
+
+        <section class="section" id="watches">
+            <div class="section-label">What it watches</div>
+            <div class="projects">
+                <div class="card"><div class="card-title"><span class="dot bitcoin"></span>Bitcoin</div><div class="card-desc">Bitcoin Core and Knots, BTCPay Server, Fulcrum, electrs, mempool.</div></div>
+                <div class="card"><div class="card-title"><span class="dot lightning"></span>Lightning</div><div class="card-desc">LND, Core Lightning, Alby Hub and LDK nodes, plus the dashboards around them.</div></div>
+                <div class="card"><div class="card-title"><span class="dot ecash"></span>Ecash</div><div class="card-desc">Cashu mints and Fedimint guardians and gateways.</div></div>
+                <div class="card"><div class="card-title"><span class="dot nostr"></span>Nostr</div><div class="card-desc">strfry and other relays, Blossom servers, NIP-46 bunkers, NIP-05 and Wallet Connect.</div></div>
+                <div class="card"><div class="card-title"><span class="dot base"></span>Underneath</div><div class="card-desc">Umbrel, StartOS, RaspiBlitz, myNode, nix-bitcoin, Docker, Tor, SSH and your home network.</div></div>
+                <div class="card"><div class="card-title"><span class="dot yours"></span>What you tell it</div><div class="card-desc">Your hardware wallets and apps, and any git repo you paste in, like someone's custom app you run.</div></div>
+            </div>
+        </section>
+
+        <div class="divider"></div>
+
+        <section class="section" id="how">
+            <div class="section-label">How it works</div>
+            <div class="projects">
+                <div class="card"><div class="card-title">Knows what you run</div><div class="card-desc">It finds every service and version on your node, without ever touching your keys.</div></div>
+                <div class="card urgent"><div class="card-title">Tells you when it turns dangerous</div><div class="card-desc">It matches what you run against security advisories, including "only if it's open to the internet", and sends step-by-step fixes.</div>
+                    <div class="sevs"><span class="sev critical">Critical</span><span class="sev high">High</span><span class="sev medium">Medium</span><span class="sev ok">No known issues</span></div></div>
+                <div class="card"><div class="card-title">Sees what an attacker sees</div><div class="card-desc">Open ports, router mappings, Tor and tunnels, plus a probe from a buddy's Guard Dog. Scout, its own network discovery, spots forgotten nodes and attacks like ARP spoofing.</div></div>
+                <div class="card"><div class="card-title">Watches for a break-in</div><div class="card-desc">Watch-only alerts for your wallets, npub and Lightning node, plus decoy tripwires that prove someone got in.</div></div>
+            </div>
+            <div class="section-label" style="margin-top: 40px;">An alert, as it arrives by Nostr DM</div>
+<div class="code-block"><span class="c">GUARD DOG · CRITICAL</span>
+<span class="w">Alby Hub is reachable from the internet and has a wallet-takeover flaw.</span>
+You run 1.18.2 · fixed in 1.19.0 · safest: 1.24.0
+
+What to do:
+1. Cut internet access first: reply YES-7F3K to remove the router mapping.
+2. Update Alby Hub to 1.24.0.
+3. Change the Hub's unlock password.
+
+Checked 3 min ago · 5 blind spots · No known issues is not the same as secure.</div>
+            <p style="font-size: 0.85rem; opacity: 0.6;">Example. Alerts can also go out by ntfy, Signal, Telegram or email. AI is optional: it works with your own local models, and everything important works without it.</p>
+        </section>
+
+        <div class="divider"></div>
+
+        <section class="section" id="never">
+            <div class="section-label">What it will never do</div>
+            <div class="links">
+                <div class="link-row"><span class="link-label">Hold your keys or move your funds</span><svg class="never" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M6 18L18 6"/></svg></div>
+                <div class="link-row"><span class="link-label">Send your setup's details anywhere you didn't choose</span><svg class="never" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M6 18L18 6"/></svg></div>
+                <div class="link-row"><span class="link-label">Change anything without your one-tap approval</span><svg class="never" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M6 18L18 6"/></svg></div>
+                <div class="link-row"><span class="link-label">Tell you you're "secure"<span class="link-sub">Only "no known issues found", with when it checked and what it couldn't see.</span></span><svg class="never" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M6 18L18 6"/></svg></div>
+                <div class="link-row"><span class="link-label">Scan anybody else's machines</span><svg class="never" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M6 18L18 6"/></svg></div>
+            </div>
+        </section>
+
+        <div class="divider"></div>
+
+        <section class="section" id="contribute">
+            <div class="section-label">Help build it</div>
+            <h2 class="section-title">I know I'm missing things.</h2>
+            <p class="lead">If you run your own node, relay or mint, you already know something Guard Dog needs to know. Guard Dog is open source and pre-alpha, so now's the best time to shape it. Pick whatever fits you:</p>
+            <div class="projects">
+                <div class="card"><div class="card-title">Test it on your setup</div><div class="card-desc">Umbrel, StartOS, RaspiBlitz, myNode, nix-bitcoin or plain Docker. Tell me what it found, what it missed and what confused you.</div></div>
+                <div class="card"><div class="card-title"><span class="dot bitcoin"></span>Teach it a service</div><div class="card-desc">Every service Guard Dog knows is a small data file. Add the one you run, or fix how it reads a version.</div></div>
+                <div class="card"><div class="card-title"><span class="dot critical-dot"></span>Curate advisories</div><div class="card-desc">Turn a project's security notice into a clear advisory with plain-English steps to fix it.</div></div>
+                <div class="card"><div class="card-title"><span class="dot nostr"></span>Break it, white hat</div><div class="card-desc">Try to attack Guard Dog itself: prompt injection, privileges, the alerts. Report it privately and get credit.</div></div>
+                <div class="card"><div class="card-title">Write code</div><div class="card-desc">A Rust core and a vanilla HTML, CSS and JavaScript interface. No frameworks.</div></div>
+                <div class="card"><div class="card-title">Design, docs and translations</div><div class="card-desc">Make it clearer for the next person who runs their own stack for the first time.</div></div>
+            </div>
+            <div class="hero-cta-static">
+                <a href="https://github.com/MaxSikorski/guard-dog/blob/main/CONTRIBUTING.md" class="btn primary-btn" target="_blank" rel="noopener">Read the contributing guide</a>
+                <a href="https://github.com/MaxSikorski/guard-dog/issues/new" class="btn secondary-btn" target="_blank" rel="noopener">Open an issue</a>
+            </div>
+            <div class="links" style="margin-top: 28px;">
+                <a class="link-row" href="https://github.com/MaxSikorski/guard-dog/blob/main/SECURITY.md" target="_blank" rel="noopener"><span class="link-label">Found a vulnerability in Guard Dog?<span class="link-sub">Please report it privately, never in a public issue.</span></span><svg class="link-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M17 7H7M17 7v10"/></svg></a>
+            </div>
+        </section>
+
+        <div class="divider"></div>
+
+        <section class="section" id="support">
+            <div class="section-label">Support Guard Dog</div>
+            <h2 class="section-title">Free, open source, always.</h2>
+            <p class="lead">Guard Dog will never have a subscription or ads. If it helps you sleep better, here's how you can help me keep building it.</p>
+            <div class="projects">
+                <div class="card">
+                    <div class="card-title">Sponsor Guard Dog</div>
+                    <div class="card-desc">One-time or monthly through GitHub Sponsors. It pays for the hours and the test hardware behind every release. A Lightning address is coming.</div>
+                    <div class="support-actions">
+                        <a class="btn primary-btn small" data-link="donatePage" target="_blank" rel="noopener">Sponsor on GitHub</a>
+                        <button type="button" class="btn secondary-btn small" data-copy="lightningAddress" data-label="Copy Lightning address">Copy Lightning address</button>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-title"><span class="dot nostr"></span>Post about it on Nostr</div>
+                    <div class="card-desc">Copy a ready-made note that tags me and paste it into any Nostr app, or follow along as I build.</div>
+                    <div class="support-actions">
+                        <button type="button" class="btn secondary-btn small" data-copy="nostrNote" data-label="Copy a note">Copy a note</button>
+                        <a class="btn secondary-btn small" data-link="nostrProfile" target="_blank" rel="noopener">Follow me on Nostr</a>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Share it on X</div>
+                    <div class="card-desc">One tap opens a post with a short description and the link.</div>
+                    <div class="support-actions">
+                        <a class="btn secondary-btn small" data-link="xShare" target="_blank" rel="noopener">Post on X</a>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Star and watch the repo</div>
+                    <div class="card-desc">It helps other people find Guard Dog, and you'll hear about the first release.</div>
+                    <div class="support-actions">
+                        <a class="btn secondary-btn small" href="https://github.com/MaxSikorski/guard-dog" target="_blank" rel="noopener">Open on GitHub</a>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <footer class="footer">Guard Dog · Apache-2.0 · Max Sikorski<br>No known issues is not the same as secure.</footer>
+    </main>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+    <script>
+        // Without GSAP (offline, blocked CDN) show everything instead of leaving it hidden.
+        if (typeof gsap === "undefined") {
+            document.querySelectorAll(".hero-mark, .hero-title, .hero-subtitle, .hero-cta, .status").forEach(function (el) { el.style.opacity = 1; el.style.transform = "none"; });
+            window.gsap = { set: function () {}, to: function () {}, fromTo: function () {}, timeline: function () { return { to: function () { return this; }, restart: function () {} }; } };
+        }
+
+        // ===== Support links: paste each one between the quotes. =====
+        // Any link left empty shows as a disabled "coming soon" button instead of a dead link.
+        const SUPPORT_LINKS = {
+            lightningAddress: "",   // none yet (Max, 2026-11-16); e.g. "you@yourwallet.com", copied to the clipboard
+            donatePage: "https://github.com/sponsors/MaxSikorski",
+            nostrProfile: "https://njump.me/npub18rxdd7k5ayly50965a9rv8r7qrqmxn3tjsdp348xg205msrwyc9sacjx70"
+        };
+        const SITE_URL = "https://maxsikorski.github.io/guard-dog/";
+        const SHARE_TEXT = "Guard Dog: a self-hosted watchdog for your Bitcoin and Nostr stack. It knows what you run and tells you the moment something turns dangerous. Open source and local-first.";
+        const NPUB = "npub18rxdd7k5ayly50965a9rv8r7qrqmxn3tjsdp348xg205msrwyc9sacjx70";
+        const COPY_TEXT = { nostrNote: SHARE_TEXT + "\n\nBuilt by nostr:" + NPUB + "\n" + SITE_URL + "\n\n#bitcoin #nostr #selfhosted", lightningAddress: SUPPORT_LINKS.lightningAddress };
+        const LINKS = Object.assign({}, SUPPORT_LINKS, {
+            xShare: "https://x.com/intent/tweet?text=" + encodeURIComponent(SHARE_TEXT) + "&url=" + encodeURIComponent(SITE_URL)
+        });
+        document.querySelectorAll("[data-link]").forEach((a) => {
+            const url = LINKS[a.dataset.link];
+            if (url) { a.href = url; } else { a.removeAttribute("href"); a.classList.add("is-disabled"); a.setAttribute("aria-disabled", "true"); a.textContent += " (coming soon)"; }
+        });
+        document.querySelectorAll("[data-copy]").forEach((b) => {
+            const text = COPY_TEXT[b.dataset.copy];
+            if (!text) { b.disabled = true; b.classList.add("is-disabled"); b.textContent += " (coming soon)"; return; }
+            b.addEventListener("click", async () => {
+                try { await navigator.clipboard.writeText(text); }
+                catch (e) { const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove(); }
+                b.textContent = "Copied ✓";
+                setTimeout(() => { b.textContent = b.dataset.label; }, 2000);
+            });
+        });
+
+        // 4.1 The logo is the refresh control
+        (function () {
+            var l = document.getElementById("logo-refresh");
+            if (l) l.addEventListener("click", function (e) {
+                e.preventDefault();
+                try { sessionStorage.setItem("logo-refresh-top", "1") } catch (x) {}
+                if (window.scrollY < 2) { location.reload(); return }
+                window.scrollTo({ top: 0, behavior: "smooth" });
+                var waited = 0, iv = setInterval(function () {
+                    waited += 50;
+                    if (window.scrollY < 2 || waited > 1500) { clearInterval(iv); location.reload() }
+                }, 50);
+            });
+            try {
+                if (sessionStorage.getItem("logo-refresh-top")) {
+                    sessionStorage.removeItem("logo-refresh-top");
+                    if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+                    window.scrollTo(0, 0);
+                    setTimeout(function () { window.scrollTo(0, 0); history.scrollRestoration = "auto" }, 0);
+                }
+            } catch (x) {}
+        })();
+
+        // 6. Dark/light toggle
+        const themeBtn = document.getElementById("theme-toggle");
+        const themeIcon = document.getElementById("theme-icon");
+
+        const sunPath = "M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z";
+        const moonPath = "M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z";
+
+        const prefersDark = window.matchMedia("(prefers-color-scheme: dark)");
+        const savedTheme = localStorage.getItem("theme");
+        let isDark = savedTheme ? savedTheme === "dark" : prefersDark.matches;
+
+        const applyTheme = (dark, animate = true) => {
+            document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+            localStorage.setItem("theme", dark ? "dark" : "light");
+
+            const metaTheme = document.querySelector('meta[name="theme-color"]');
+            if (metaTheme) metaTheme.content = dark ? "#000000" : "#f5f5f7";
+
+            const pathNode = themeIcon.querySelector("path");
+            pathNode.setAttribute("d", dark ? sunPath : moonPath);
+
+            const favicon = document.getElementById("favicon");
+            if (favicon) favicon.href = dark ? "favicon-dark.svg" : "favicon-light.svg";
+
+            if (animate) {
+                gsap.fromTo(themeIcon,
+                    { rotation: 0, scale: 0.8 },
+                    { rotation: 360, scale: 1, duration: 0.6, ease: "power2.out" }
+                );
+            }
+        };
+
+        applyTheme(isDark, false);
+
+        themeBtn.addEventListener("click", () => { isDark = !isDark; applyTheme(isDark); });
+        prefersDark.addEventListener("change", (e) => { isDark = e.matches; applyTheme(isDark, true); });
+
+        // Phone nav menu (the weekly decks' dropdown): links collapse behind the menu button
+        const menuToggle = document.getElementById("nav-menu-toggle");
+        const navMenu = document.getElementById("nav-menu");
+        const menuIconPath = document.getElementById("menu-icon-path");
+        const hamburgerPath = "M4 6h16M4 12h16M4 18h16";
+        const closePath = "M6 6l12 12M6 18L18 6";
+        const setMenu = (open) => {
+            navMenu.hidden = !open;
+            menuToggle.setAttribute("aria-expanded", String(open));
+            menuIconPath.setAttribute("d", open ? closePath : hamburgerPath);
+            if (open) gsap.fromTo(navMenu, { opacity: 0, y: -6 }, { opacity: 1, y: 0, duration: 0.3, ease: "power2.out" });
+        };
+        if (menuToggle && navMenu) {
+            menuToggle.addEventListener("click", (e) => { e.stopPropagation(); setMenu(navMenu.hidden); });
+            navMenu.querySelectorAll(".nav-menu-link").forEach((a) => a.addEventListener("click", () => setMenu(false)));
+            document.addEventListener("click", (e) => { if (!navMenu.hidden && !navMenu.contains(e.target)) setMenu(false); });
+            document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !navMenu.hidden) { setMenu(false); menuToggle.focus(); } });
+        }
+
+        // 5.1 Hero entrance
+        const tl = gsap.timeline({ defaults: { ease: "power4.out", duration: 1.2 } });
+        gsap.set(".hero-mark, .hero-title, .hero-subtitle, .hero-cta, .status", { opacity: 0, y: 30 });
+        tl.to(".hero-mark", { opacity: 1, y: 0, delay: 0.2 })
+          .to(".hero-title", { opacity: 1, y: 0 }, "-=0.95")
+          .to(".hero-subtitle", { opacity: 1, y: 0 }, "-=0.9")
+          .to(".hero-cta", { opacity: 1, y: 0 }, "-=0.9")
+          .to(".status", { opacity: 1, y: 0 }, "-=0.9");
+
+        // 5.2 Scroll reveals
+        if (typeof IntersectionObserver !== "undefined" && window.gsap && gsap.version) {
+            const cards = document.querySelectorAll(".card");
+            const linkRows = document.querySelectorAll(".link-row");
+            gsap.set(cards, { opacity: 0, y: 20 });
+            gsap.set(linkRows, { opacity: 0, y: 10 });
+            gsap.set(".section-label", { opacity: 0 });
+            const observer = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        const el = entry.target;
+                        if (el.classList.contains("section-label")) {
+                            gsap.to(el, { opacity: 1, duration: 0.6, ease: "power4.out" });
+                        } else if (el.classList.contains("card")) {
+                            gsap.to(el, { opacity: 1, y: 0, duration: 0.8, ease: "power4.out", delay: el.dataset.delay || 0 });
+                        } else if (el.classList.contains("link-row")) {
+                            gsap.to(el, { opacity: 1, y: 0, duration: 0.6, ease: "power4.out", delay: el.dataset.delay || 0 });
+                        }
+                        observer.unobserve(el);
+                    }
+                });
+            }, { threshold: 0.1 });
+            cards.forEach((card, i) => { card.dataset.delay = (i % 4) * 0.1; observer.observe(card); });
+            linkRows.forEach((row, i) => { row.dataset.delay = (i % 5) * 0.08; observer.observe(row); });
+            document.querySelectorAll(".section-label").forEach(el => observer.observe(el));
+        }
+    </script>
+</body>
+</html>

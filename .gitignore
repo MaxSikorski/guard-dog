@@ -1,0 +1,25 @@
+# Rust
+target/
+
+# Local state and databases
+*.db
+*.sqlite
+*.sqlite3
+
+# The regtest lab's data
+lab/.data/
+
+# Secrets and local config (never commit)
+.env
+.env.*
+*.macaroon
+
+# Python (always through uv)
+.venv/
+__pycache__/
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
