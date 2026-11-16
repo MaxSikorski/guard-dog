@@ -1,6 +1,6 @@
 # AGENTS.md — Guard Dog
 
-Guard Dog is a self-hosted, local-first security watchdog for people who run their own Bitcoin and Nostr infrastructure (Apache-2.0). It's pre-alpha: there's no code to build yet.
+Guard Dog is a self-hosted, local-first security watchdog for people who run their own Bitcoin and Nostr infrastructure (Apache-2.0). It's pre-alpha: the Rust workspace builds and tests, but there's nothing to install yet.
 
 This file is for AI coding agents working **on this repository**. If someone asked you to **install or run** Guard Dog for them, read [`INSTALL-WITH-AI.md`](INSTALL-WITH-AI.md) instead.
 
@@ -16,7 +16,7 @@ This file is for AI coding agents working **on this repository**. If someone ask
 - Plain English in docs and pull requests: what changed, why, how you tested it, and what you didn't test.
 
 ## Commands
-They arrive with the code: `cargo build --locked`, `cargo test --locked`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `cargo deny check`.
+From the repository root (rustup installs the pinned toolchain from `rust-toolchain.toml`): `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo build --locked`, `cargo test --locked`, `cargo deny --locked check`. Every test is listed in [tests/README.md](tests/README.md).
 
 ## When you need to…
 | Task | Read |
@@ -30,4 +30,6 @@ They arrive with the code: `cargo build --locked`, `cargo test --locked`, `cargo
 |---|---|
 | `README.md` | What Guard Dog is, what it will and will never do |
 | `docs/` | The website (GitHub Pages) |
-| `crates/`, `catalog/`, `advisories/` | Coming in the first phase: Rust code, services as data, advisories |
+| `crates/` | The Rust code; which crate owns what: [crates/README.md](crates/README.md) |
+| `tests/README.md` | Every test and judge, one line each |
+| `catalog/`, `advisories/` | Coming next: services as data, advisories |

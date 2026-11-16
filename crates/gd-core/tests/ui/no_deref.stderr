@@ -1,0 +1,5 @@
+error[E0599]: no method named `len` found for struct `Untrusted<T>` in the current scope
+ --> tests/ui/no_deref.rs:6:24
+  |
+6 |     let _length = name.len();
+  |                        ^^^ method not found in `Untrusted<String>`

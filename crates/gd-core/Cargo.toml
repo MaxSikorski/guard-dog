@@ -1,0 +1,16 @@
+[package]
+name = "gd-core"
+description = "Guard Dog's core types: facts, findings, advisories, and untrusted text as a type."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+trybuild.workspace = true

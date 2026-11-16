@@ -1,0 +1,8 @@
+# The exact Rust version everyone builds Guard Dog with: the newest stable
+# release that was at least two weeks old when it was pinned (1.99.1, released
+# 2026-10-15; pinned 2026-11-16). Same compiler, same output: this is part of
+# making builds reproducible, and it keeps compile-fail test snapshots stable.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
