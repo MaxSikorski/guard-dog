@@ -22,6 +22,10 @@ cargo fmt --all --check && cargo clippy --locked --all-targets -- -D warnings &&
 | `untrusted_text_cannot_escape_without_saying_so` | `crates/gd-core/tests/compile_fail.rs` with `tests/ui/*.rs` | Code that prints, formats, `to_string()`s, dereferences, `AsRef`s, `Borrow`s, compares with `==`, converts or reads the field of `Untrusted<T>` does not compile (8 cases). The expected compiler errors are in `tests/ui/*.stderr` and depend on the pinned Rust version. |
 | `version_names_the_release_and_its_source` | `crates/guard-dog/tests/version.rs` | `guard-dog --version` prints `guard-dog <version> (commit <full id>)` when the build was given `GD_GIT_COMMIT` (CI sets it), and `(development build)` otherwise. The expected text comes from the build's input, never from the baked-in value. |
 
+### Property-test seed
+
+The property tests use a fixed seed by default, so the same commit gives the same result every run; the seed in use is printed to stderr (`cargo test -- --nocapture` shows it). `GD_PROPTEST_SEED=<number> cargo test --locked -p gd-core` explores a different seed. A failing case is saved under `crates/gd-core/proptest-regressions/` and replayed on every later run; commit that folder when it appears.
+
 ## License and supply-chain guard
 
 | Check | Where | What it proves |

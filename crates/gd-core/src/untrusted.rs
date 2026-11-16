@@ -415,7 +415,28 @@ mod tests {
         c.is_control() || is_hidden(c) && !matches!(c, '\u{FE0E}' | '\u{FE0F}')
     }
 
+    /// The seed every property test uses unless `GD_PROPTEST_SEED` says otherwise.
+    const DEFAULT_PROPTEST_SEED: u64 = 0x6764_5f70_726f_7074;
+
+    /// Property tests run on a fixed seed, so the same commit gives the same result.
+    /// `GD_PROPTEST_SEED=<number>` explores a different one (meant for nightly runs).
+    /// Failing cases are saved under `crates/gd-core/proptest-regressions/`.
+    fn proptest_config() -> ProptestConfig {
+        static ANNOUNCE: std::sync::Once = std::sync::Once::new();
+        let seed = std::env::var("GD_PROPTEST_SEED")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_PROPTEST_SEED);
+        ANNOUNCE.call_once(|| eprintln!("GD_PROPTEST_SEED={seed} (property test seed in use)"));
+        ProptestConfig {
+            rng_seed: proptest::test_runner::RngSeed::Fixed(seed),
+            ..ProptestConfig::default()
+        }
+    }
+
     proptest! {
+        #![proptest_config(proptest_config())]
+
         #[test]
         fn terminal_output_is_safe_and_reversible(text in hostile_text()) {
             let out = untrusted(&text).escape_for_terminal();
