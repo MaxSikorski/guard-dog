@@ -32,7 +32,7 @@ jobs:
   # installed separately.
   advisories:
     name: advisories
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       CARGO_DENY_VERSION: "0.21.0"
@@ -42,6 +42,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the pinned toolchain
+        timeout-minutes: 10
         run: |
           rustup toolchain install --no-self-update
           rustup show active-toolchain
@@ -52,6 +53,7 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/cargo-deny"
           cd "${RUNNER_TEMP}/cargo-deny"
           curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --retry 3 --retry-all-errors --connect-timeout 20 --max-time 120 \
             --output "${name}.tar.gz" \
             "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${name}.tar.gz"
           echo "${CARGO_DENY_SHA256}  ${name}.tar.gz" | sha256sum -c -
@@ -65,9 +67,9 @@ jobs:
 
   # Reproducible builds: the same source built on two different runners should
   # give the same bytes. Each build reports the SHA-256 of the binary.
-  build-repro-latest:
-    name: build-repro-latest
-    runs-on: ubuntu-latest
+  build-repro-2404:
+    name: build-repro-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
       sha256: ${{ steps.hash.outputs.sha256 }}
@@ -76,6 +78,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the pinned toolchain
+        timeout-minutes: 10
         run: |
           rustup toolchain install --no-self-update
           rustup show active-toolchain
@@ -100,6 +103,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the pinned toolchain
+        timeout-minutes: 10
         run: |
           rustup toolchain install --no-self-update
           rustup show active-toolchain
@@ -115,22 +119,22 @@ jobs:
 
   reproducible:
     name: reproducible
-    needs: [build-repro-latest, build-repro-2204]
-    runs-on: ubuntu-latest
+    needs: [build-repro-2404, build-repro-2204]
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     # Expected to be RED until Phase 4.6 (reproducible builds). The result is
     # recorded on every run, but it must not block anything. Remove this line
     # when the two hashes start to match.
     continue-on-error: true
     env:
-      SHA_LATEST: ${{ needs.build-repro-latest.outputs.sha256 }}
+      SHA_2404: ${{ needs.build-repro-2404.outputs.sha256 }}
       SHA_2204: ${{ needs.build-repro-2204.outputs.sha256 }}
     steps:
       - name: Compare the two hashes
         run: |
-          echo "ubuntu-latest: ${SHA_LATEST}"
+          echo "ubuntu-24.04: ${SHA_2404}"
           echo "ubuntu-22.04:  ${SHA_2204}"
-          if [ -z "${SHA_LATEST}" ] || [ "${SHA_LATEST}" != "${SHA_2204}" ]; then
+          if [ -z "${SHA_2404}" ] || [ "${SHA_2404}" != "${SHA_2204}" ]; then
             echo "::error::The two builds differ (expected until Phase 4.6)."
             exit 1
           fi

@@ -21,7 +21,7 @@ concurrency:
 jobs:
   analyze:
     name: analyze (rust)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -31,6 +31,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the pinned toolchain
+        timeout-minutes: 10
         run: |
           rustup toolchain install --no-self-update
           rustup show active-toolchain

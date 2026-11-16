@@ -34,7 +34,7 @@ env:
 jobs:
   fmt:
     name: fmt
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -43,6 +43,7 @@ jobs:
       # Current rustup does not install the toolchain by itself; with no
       # arguments this reads rust-toolchain.toml (exact version, components).
       - name: Install the pinned toolchain
+        timeout-minutes: 10
         run: |
           rustup toolchain install --no-self-update
           rustup show active-toolchain
@@ -51,13 +52,14 @@ jobs:
 
   clippy:
     name: clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install the pinned toolchain
+        timeout-minutes: 10
         run: |
           rustup toolchain install --no-self-update
           rustup show active-toolchain
@@ -66,13 +68,14 @@ jobs:
 
   test:
     name: test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install the pinned toolchain
+        timeout-minutes: 10
         run: |
           rustup toolchain install --no-self-update
           rustup show active-toolchain
@@ -92,6 +95,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the pinned toolchain
+        timeout-minutes: 10
         run: |
           rustup toolchain install --no-self-update
           rustup show active-toolchain
@@ -102,7 +106,7 @@ jobs:
 
   deny:
     name: deny
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       # Official release from github.com/EmbarkStudios/cargo-deny, downloaded
@@ -117,6 +121,7 @@ jobs:
           persist-credentials: false
       # cargo-deny asks cargo for the dependency list, so cargo has to work.
       - name: Install the pinned toolchain
+        timeout-minutes: 10
         run: |
           rustup toolchain install --no-self-update
           rustup show active-toolchain
@@ -127,6 +132,7 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/cargo-deny"
           cd "${RUNNER_TEMP}/cargo-deny"
           curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --retry 3 --retry-all-errors --connect-timeout 20 --max-time 120 \
             --output "${name}.tar.gz" \
             "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${name}.tar.gz"
           echo "${CARGO_DENY_SHA256}  ${name}.tar.gz" | sha256sum -c -
@@ -134,3 +140,25 @@ jobs:
           echo "${RUNNER_TEMP}/cargo-deny/${name}" >> "${GITHUB_PATH}"
       - name: cargo deny
         run: cargo deny --locked check
+
+  # The one check the `main` ruleset requires. GitHub counts a skipped
+  # required job as passing, so this fails unless every job above really
+  # succeeded. Renaming a job above never needs a ruleset change.
+  merge-gate:
+    name: merge-gate
+    if: always()
+    needs: [fmt, clippy, test, test-aarch64, deny]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every job above succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Results: ${RESULTS}"
+          for result in ${RESULTS}; do
+            if [ "${result}" != "success" ]; then
+              echo "A required job did not succeed (${result})."
+              exit 1
+            fi
+          done
