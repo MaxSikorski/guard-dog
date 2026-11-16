@@ -37,9 +37,14 @@ Guard Dog is pre-alpha, so for now your agent will tell you there's nothing to i
 
 ## Why I'm building this
 
-In July 2026, the Coldcard hack drained about $116M from hardware wallets. Their firmware had quietly been making weak seeds since 2021. The people who got hit had done pretty much everything right, and updating wasn't even enough: they needed brand-new seeds. A couple of months later, Alby Hub had a wallet-takeover flaw that hit people running old versions with the Hub open to the internet, even though a fix had been out for about a year.
+AI has made finding holes in software cheap, fast and available to anyone. Swarms of AI agents can comb through open-source code around the clock, and the people attacking our stack have those tools too. 2026 made it clear that doing everything right isn't enough on its own anymore:
 
-If your money and identity live on your own infrastructure, you're your own security team. I want Guard Dog to be the member of that team that never sleeps. It knows everything your setup depends on, notices the moment any of it becomes dangerous, and tells you in plain English exactly what to do.
+- **Coldcard (July):** about $116M was drained from careful self-custodians whose firmware had quietly made weak seeds since 2021. Updating wasn't enough; they needed brand-new seeds. That was the first shot across the bow.
+- **Alby Hub (September):** a wallet-takeover flaw hit people on old versions with the Hub open to the internet, even though a fix had been out for about a year.
+- **LNbits (November):** a wave of attacks hit servers running anything older than 1.7.0. Operators had to rotate their keys and credentials, not just update.
+- **And it keeps coming,** one thing after another, faster than any of us can follow alone.
+
+If your money and identity live on your own infrastructure, you're your own security team. I want Guard Dog to be the member of that team that never sleeps, putting the same kind of AI on *your* side. It knows everything your setup depends on, notices the moment any of it becomes dangerous, and tells you in plain English exactly what to do.
 
 ## What it will do
 
