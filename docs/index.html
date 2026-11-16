@@ -199,7 +199,7 @@
         .dot.bitcoin { background: var(--bitcoin); } .dot.lightning { background: var(--lightning); }
         .dot.ecash { background: var(--ecash); } .dot.nostr { background: var(--nostr); }
         .dot.base { background: var(--text-muted); } .dot.yours { background: transparent; border: 1px solid var(--text-color); }
-        .sev { display: inline-flex; align-items: center; gap: 6px; font-size: 0.75rem; font-weight: 600; padding: 4px 10px; border-radius: 30px; border: 1px solid currentColor; }
+        .sev { display: inline-flex; align-items: center; gap: 6px; font-size: 0.75rem; font-weight: 600; padding: 4px 10px; border-radius: 30px; border: 1px solid currentColor; white-space: nowrap; flex-shrink: 0; }
         .sev::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
         .sev.critical { color: var(--critical); } .sev.high { color: var(--high); } .sev.medium { color: var(--medium); } .sev.ok { color: var(--ok); }
         .sevs { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0 4px; }
@@ -322,8 +322,15 @@
     <main class="content-section">
         <section class="section" id="why">
             <div class="section-label">Why I'm building this</div>
-            <h2 class="section-title">Doing everything right wasn't enough.</h2>
-            <p class="lead">In July 2026 the Coldcard hack drained about $116M from hardware wallets whose firmware had quietly made weak seeds since 2021. The people who got hit were careful self-custodians. A couple of months later, Alby Hub had a wallet-takeover flaw that hit people running old versions open to the internet, even though a fix had been out for about a year. If your money and identity live on your own infrastructure, you're your own security team. Guard Dog is the member of that team that never sleeps.</p>
+            <h2 class="section-title">Doing everything right isn't enough anymore.</h2>
+            <p class="lead">AI has made finding holes in software cheap, fast and available to anyone. Swarms of AI agents can comb through open-source code around the clock, and the people attacking our stack have those tools too. 2026 made it clear:</p>
+            <div class="links">
+                <div class="link-row"><span class="link-label">Coldcard, July<span class="link-sub">About $116M drained from careful self-custodians: weak seeds since 2021, and updating wasn't enough. The first shot across the bow.</span></span><span class="sev critical">Funds lost</span></div>
+                <div class="link-row"><span class="link-label">Alby Hub, September<span class="link-sub">A wallet-takeover flaw hit old versions open to the internet, though a fix had been out for about a year.</span></span><span class="sev critical">Takeover</span></div>
+                <div class="link-row"><span class="link-label">LNbits, November<span class="link-sub">A wave of attacks on servers older than 1.7.0. Operators had to rotate keys and credentials, not just update.</span></span><span class="sev critical">Funds lost</span></div>
+                <div class="link-row"><span class="link-label">And it keeps coming<span class="link-sub">One thing after another, faster than any of us can follow alone.</span></span><span class="sev high">Ongoing</span></div>
+            </div>
+            <p class="lead" style="margin-top: 28px;">If your money and identity live on your own infrastructure, you're your own security team. Guard Dog is the member of that team that never sleeps, putting the same kind of AI on <em>your</em> side.</p>
         </section>
 
         <div class="divider"></div>
