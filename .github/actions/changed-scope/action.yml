@@ -1,6 +1,8 @@
 # Decides whether a run needs the Rust jobs. Output `rust` is "false" only on
-# a pull request whose every changed file is documentation (anything under
-# docs/, or a file ending in .md). Everything else, and any error, is "true":
+# a pull request whose every changed file is documentation: anything under
+# docs/, or a Markdown file at the repository root. Markdown deeper in the tree
+# (crates/, fixtures/) can be compiled in with include_str!, so it runs the full
+# checks. Everything else, and any error, is "true":
 # when in doubt, run the full checks.
 #
 # The checkout of a pull request is GitHub's merge commit, and its first
@@ -31,7 +33,9 @@ runs:
             docs_only=true
             while IFS= read -r -d '' path; do
               case "${path}" in
-                docs/* | *.md) ;;
+                docs/*) ;;
+                */*) docs_only=false ;;
+                *.md) ;;
                 *) docs_only=false ;;
               esac
             done < "${list}"
