@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+# Both reproducibility builds bake in the same commit id.
+env:
+  GD_GIT_COMMIT: ${{ github.sha }}
+
 # One nightly run at a time; a manual run waits for a running one to finish.
 concurrency:
   group: ${{ github.workflow }}

@@ -27,6 +27,9 @@ env:
   CARGO_TERM_COLOR: always
   # Compiler warnings fail every job, not just clippy (so the ARM job too).
   RUSTFLAGS: "-D warnings"
+  # Release-style builds: --version names the exact commit being built, and
+  # the version test checks that path (local builds say "development build").
+  GD_GIT_COMMIT: ${{ github.sha }}
 
 jobs:
   fmt:
