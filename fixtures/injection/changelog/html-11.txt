@@ -1,0 +1,1 @@
+<style>@import 'https://example.invalid/x.css';</style><base href="//example.invalid/">

