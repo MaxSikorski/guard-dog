@@ -38,6 +38,14 @@ If your money and identity live on your own infrastructure, you're your own secu
 - Tell you you're "secure". It says **"no known issues found"**, along with when it checked and what it *couldn't* see.
 - Scan anybody else's machines.
 
+## Help build it
+
+I know I'm missing things. If you run your own node, relay or mint, you already know something Guard Dog needs to know. There's room for testers, people who know a service inside out, advisory curators, white-hat breakers, Rust and web developers, and writers. Start with [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Support
+
+Guard Dog is free and open source, with no subscriptions and no ads. If it helps you, zap it, donate, or share it on Nostr or X. The links are on the [website](https://maxsikorski.github.io/guard-dog/#support).
+
 ## Security
 
 Found a vulnerability in Guard Dog? Please report it privately. See [SECURITY.md](SECURITY.md).

@@ -196,6 +196,11 @@
         .sev.critical { color: var(--critical); } .sev.high { color: var(--high); } .sev.medium { color: var(--medium); } .sev.ok { color: var(--ok); }
         .sevs { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0 4px; }
         .card.urgent { border-color: var(--critical); }
+        .dot.critical-dot { background: var(--critical); }
+        .support-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+        .btn.small { padding: 9px 16px; font-size: 0.85rem; }
+        .btn.is-disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
+        .hero-cta-static { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
 
         /* 4.8 Code block (example alert) */
         .code-block {
@@ -229,8 +234,8 @@
 
         /* 7. Mobile */
         /* Phone nav menu, the same as the decks: text links collapse into a dropdown.
-           Guard Dog has four links, so they collapse a little earlier (860px) to keep words from crowding. */
-        @media (max-width: 860px) {
+           Guard Dog has five links, so they collapse a little earlier (980px) to keep words from crowding. */
+        @media (max-width: 980px) {
             .header-nav .nav-right .nav-links { display: none; }
             .nav-menu-toggle { display: flex; }
             .nav-menu:not([hidden]) {
@@ -264,7 +269,8 @@
             <div class="nav-links">
                 <a href="#watches" class="nav-link">What it watches</a>
                 <a href="#how" class="nav-link">How it works</a>
-                <a href="#never" class="nav-link">Promises</a>
+                <a href="#contribute" class="nav-link">Help build</a>
+                <a href="#support" class="nav-link">Support</a>
                 <a href="https://github.com/MaxSikorski/guard-dog" class="nav-link" target="_blank" rel="noopener">GitHub</a>
             </div>
             <button id="nav-menu-toggle" class="nav-menu-toggle" aria-label="Menu" aria-expanded="false" aria-controls="nav-menu">
@@ -277,6 +283,8 @@
                 <a href="#watches" class="nav-menu-link">What it watches</a>
                 <a href="#how" class="nav-menu-link">How it works</a>
                 <a href="#never" class="nav-menu-link">Promises</a>
+                <a href="#contribute" class="nav-menu-link">Help build</a>
+                <a href="#support" class="nav-menu-link">Support</a>
                 <a href="https://github.com/MaxSikorski/guard-dog" class="nav-menu-link" target="_blank" rel="noopener">GitHub</a>
             </div>
             <button id="theme-toggle" class="theme-toggle" aria-label="Toggle Theme">
@@ -364,11 +372,65 @@ Checked 3 min ago · 5 blind spots · No known issues is not the same as secure.
 
         <div class="divider"></div>
 
-        <section class="section" id="follow">
-            <div class="section-label">Follow along</div>
-            <div class="links">
-                <a class="link-row" href="https://github.com/MaxSikorski/guard-dog" target="_blank" rel="noopener"><span class="link-label">Source code on GitHub<span class="link-sub">Open source, Apache-2.0. Watch the repo for the first release.</span></span><svg class="link-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M17 7H7M17 7v10"/></svg></a>
-                <a class="link-row" href="https://github.com/MaxSikorski/guard-dog/blob/main/SECURITY.md" target="_blank" rel="noopener"><span class="link-label">Report a vulnerability privately</span><svg class="link-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M17 7H7M17 7v10"/></svg></a>
+        <section class="section" id="contribute">
+            <div class="section-label">Help build it</div>
+            <h2 class="section-title">I know I'm missing things.</h2>
+            <p class="lead">If you run your own node, relay or mint, you already know something Guard Dog needs to know. Guard Dog is open source and pre-alpha, so now's the best time to shape it. Pick whatever fits you:</p>
+            <div class="projects">
+                <div class="card"><div class="card-title">Test it on your setup</div><div class="card-desc">Umbrel, StartOS, RaspiBlitz, myNode, nix-bitcoin or plain Docker. Tell me what it found, what it missed and what confused you.</div></div>
+                <div class="card"><div class="card-title"><span class="dot bitcoin"></span>Teach it a service</div><div class="card-desc">Every service Guard Dog knows is a small data file. Add the one you run, or fix how it reads a version.</div></div>
+                <div class="card"><div class="card-title"><span class="dot critical-dot"></span>Curate advisories</div><div class="card-desc">Turn a project's security notice into a clear advisory with plain-English steps to fix it.</div></div>
+                <div class="card"><div class="card-title"><span class="dot nostr"></span>Break it, white hat</div><div class="card-desc">Try to attack Guard Dog itself: prompt injection, privileges, the alerts. Report it privately and get credit.</div></div>
+                <div class="card"><div class="card-title">Write code</div><div class="card-desc">A Rust core and a vanilla HTML, CSS and JavaScript interface. No frameworks.</div></div>
+                <div class="card"><div class="card-title">Design, docs and translations</div><div class="card-desc">Make it clearer for the next person who runs their own stack for the first time.</div></div>
+            </div>
+            <div class="hero-cta-static">
+                <a href="https://github.com/MaxSikorski/guard-dog/blob/main/CONTRIBUTING.md" class="btn primary-btn" target="_blank" rel="noopener">Read the contributing guide</a>
+                <a href="https://github.com/MaxSikorski/guard-dog/issues/new" class="btn secondary-btn" target="_blank" rel="noopener">Open an issue</a>
+            </div>
+            <div class="links" style="margin-top: 28px;">
+                <a class="link-row" href="https://github.com/MaxSikorski/guard-dog/blob/main/SECURITY.md" target="_blank" rel="noopener"><span class="link-label">Found a vulnerability in Guard Dog?<span class="link-sub">Please report it privately, never in a public issue.</span></span><svg class="link-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M17 7H7M17 7v10"/></svg></a>
+            </div>
+        </section>
+
+        <div class="divider"></div>
+
+        <section class="section" id="support">
+            <div class="section-label">Support Guard Dog</div>
+            <h2 class="section-title">Free, open source, always.</h2>
+            <p class="lead">Guard Dog will never have a subscription or ads. If it helps you sleep better, here's how you can help me keep building it.</p>
+            <div class="projects">
+                <div class="card">
+                    <div class="card-title"><span class="dot bitcoin"></span>Zap or donate in bitcoin</div>
+                    <div class="card-desc">Lightning is easiest. Every sat goes into building and testing Guard Dog.</div>
+                    <div class="support-actions">
+                        <button type="button" class="btn secondary-btn small" data-copy="lightningAddress" data-label="Copy Lightning address">Copy Lightning address</button>
+                        <a class="btn secondary-btn small" data-link="donatePage" target="_blank" rel="noopener">Other ways to donate</a>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-title"><span class="dot nostr"></span>Post about it on Nostr</div>
+                    <div class="card-desc">Copy a ready-made note and paste it into any Nostr app. Zaps on it come to me.</div>
+                    <div class="support-actions">
+                        <button type="button" class="btn secondary-btn small" data-copy="nostrNote" data-label="Copy a note">Copy a note</button>
+                        <a class="btn secondary-btn small" data-link="nostrProfile" target="_blank" rel="noopener">Follow me on Nostr</a>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Share it on X</div>
+                    <div class="card-desc">One tap opens a post with a short description and the link.</div>
+                    <div class="support-actions">
+                        <a class="btn secondary-btn small" data-link="xShare" target="_blank" rel="noopener">Post on X</a>
+                        <a class="btn secondary-btn small" data-link="xProfile" target="_blank" rel="noopener">Follow me on X</a>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Star and watch the repo</div>
+                    <div class="card-desc">It helps other people find Guard Dog, and you'll hear about the first release.</div>
+                    <div class="support-actions">
+                        <a class="btn secondary-btn small" href="https://github.com/MaxSikorski/guard-dog" target="_blank" rel="noopener">Open on GitHub</a>
+                    </div>
+                </div>
             </div>
         </section>
 
@@ -382,6 +444,35 @@ Checked 3 min ago · 5 blind spots · No known issues is not the same as secure.
             document.querySelectorAll(".hero-mark, .hero-title, .hero-subtitle, .hero-cta, .status").forEach(function (el) { el.style.opacity = 1; el.style.transform = "none"; });
             window.gsap = { set: function () {}, to: function () {}, fromTo: function () {}, timeline: function () { return { to: function () { return this; }, restart: function () {} }; } };
         }
+
+        // ===== Support links: paste each one between the quotes. =====
+        // Any link left empty shows as a disabled "coming soon" button instead of a dead link.
+        const SUPPORT_LINKS = {
+            lightningAddress: "",   // e.g. "you@yourwallet.com" (copied to the clipboard)
+            donatePage: "",         // e.g. a Geyser, BTCPay or OpenSats page
+            nostrProfile: "",       // e.g. "https://njump.me/npub1..."
+            xProfile: ""            // e.g. "https://x.com/yourhandle"
+        };
+        const SITE_URL = "https://maxsikorski.github.io/guard-dog/";
+        const SHARE_TEXT = "Guard Dog: a self-hosted watchdog for your Bitcoin and Nostr stack. It knows what you run and tells you the moment something turns dangerous. Open source and local-first.";
+        const COPY_TEXT = { nostrNote: SHARE_TEXT + "\n\n" + SITE_URL + "\n\n#bitcoin #nostr #selfhosted", lightningAddress: SUPPORT_LINKS.lightningAddress };
+        const LINKS = Object.assign({}, SUPPORT_LINKS, {
+            xShare: "https://x.com/intent/tweet?text=" + encodeURIComponent(SHARE_TEXT) + "&url=" + encodeURIComponent(SITE_URL)
+        });
+        document.querySelectorAll("[data-link]").forEach((a) => {
+            const url = LINKS[a.dataset.link];
+            if (url) { a.href = url; } else { a.removeAttribute("href"); a.classList.add("is-disabled"); a.setAttribute("aria-disabled", "true"); a.textContent += " (coming soon)"; }
+        });
+        document.querySelectorAll("[data-copy]").forEach((b) => {
+            const text = COPY_TEXT[b.dataset.copy];
+            if (!text) { b.disabled = true; b.classList.add("is-disabled"); b.textContent += " (coming soon)"; return; }
+            b.addEventListener("click", async () => {
+                try { await navigator.clipboard.writeText(text); }
+                catch (e) { const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove(); }
+                b.textContent = "Copied ✓";
+                setTimeout(() => { b.textContent = b.dataset.label; }, 2000);
+            });
+        });
 
         // 4.1 The logo is the refresh control
         (function () {
