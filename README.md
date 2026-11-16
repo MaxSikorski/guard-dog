@@ -40,6 +40,7 @@ Guard Dog is pre-alpha, so for now your agent will tell you there's nothing to i
 AI has made finding holes in software cheap, fast and available to anyone. Swarms of AI agents can comb through open-source code around the clock, and the people attacking our stack have those tools too. 2026 made it clear that doing everything right isn't enough on its own anymore:
 
 - **Coldcard (July):** about $116M was drained from careful self-custodians whose firmware had quietly made weak seeds since 2021. Updating wasn't enough; they needed brand-new seeds. That was the first shot across the bow.
+- **BTCPay Server (August, and again in November):** first, attackers with no login stole the access files for merchants' Lightning nodes and drained their channels. Then hot wallets on outdated servers were drained, about $1.6M. Operators were told to move to fresh servers and wallets.
 - **Alby Hub (September):** a wallet-takeover flaw hit people on old versions with the Hub open to the internet, even though a fix had been out for about a year.
 - **LNbits (November):** a wave of attacks hit servers running anything older than 1.7.0. Operators had to rotate their keys and credentials, not just update.
 - **And it keeps coming,** one thing after another, faster than any of us can follow alone.
