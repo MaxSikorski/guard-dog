@@ -4,11 +4,13 @@ Hostile text, one file per payload, raw UTF-8 exactly as an attacker would send 
 
 Path: `<channel>/<family>-<NN>.txt`. Families: **a** instructions aimed at an AI (`ai-`), **b** terminal escapes (`terminal-`), **c** HTML and JavaScript (`html-`), **d** structure-breaking text (`structure-`). Hosts are `example.invalid`; commands are `echo` only.
 
-The checks the harness makes on every file: terminal output has no control character, ESC or line break; HTML output has no `<`, `>`, `"`, `'`, control character or line break; neither output shows an invisible character from the Unicode 16 table (one emoji selector after a visible character is allowed) or starts with a combining mark; both outputs undo back to the exact input.
+The checks the harness makes on every file: terminal output has no control character, ESC or line break; HTML output has no `<`, `>`, `"`, `'`, control character or line break; neither output shows an invisible character from the Unicode 16 table (one emoji selector right after a visible character the renderer kept as it is, never after an escape) or starts with a Unicode 16 nonspacing or enclosing mark; both outputs undo back to the exact input.
+
+It also checks the corpus is whole (exactly these ten channel folders, every family numbered 01 to 12 with all four families in every channel, no empty file, `generate.py` plain ASCII) and that the checks have teeth: a naive renderer that returns the text unchanged must fail on every payload except the twelve listed in the harness as `NAIVE_PASSES`.
 
 ## Regenerating
 
-Every payload is written by `generate.py` (fixed order, no randomness). Run it from the repository root and check that `git status` stays clean:
+Every payload is written by `generate.py` (fixed order, no randomness), which also deletes payload files it no longer writes. Its source is plain ASCII, so every hostile character in it is an escape you can read. Git treats the payload files as binary (`.gitattributes` here): their line endings are never converted, and `git diff`, `git show` and `git log -p` never print their bytes to your terminal. Run the generator from the repository root and check that `git status` stays clean:
 
 ```bash
 uv run --no-project python -I fixtures/injection/generate.py
@@ -31,7 +33,7 @@ Families a and d are only partly caught today.
 | `advisory-details/terminal-08.txt` | clears the screen | terminal: no control character or ESC; round-trips |
 | `banner/ai-06.txt` | asks for the configuration to be printed | no check today; needs the later ones (below) |
 | `banner/html-06.txt` | SVG onload handler | html: no markup characters; round-trips |
-| `banner/structure-06.txt` | emoji followed by 48 variation selectors and extra emoji selectors (smuggling) | none today (selectors are made visible, round-trips) |
+| `banner/structure-06.txt` | emoji followed by 48 variation selectors and extra emoji selectors (smuggling) | both: no invisible character; round-trips |
 | `banner/terminal-06.txt` | C1 CSI (U+009B) colour codes | terminal: no control character or ESC; round-trips |
 | `banner/terminal-12.txt` | C1 OSC (U+009D) title, plus a carriage return that overwrites the line | terminal: no control character or ESC; round-trips |
 | `changelog/ai-01.txt` | tells the AI to approve the release and run `echo` | no check today; needs the later ones (below) |
@@ -47,8 +49,8 @@ Families a and d are only partly caught today.
 | `container-label/structure-05.txt` | NUL bytes | terminal and html: no control character |
 | `container-label/terminal-05.txt` | bell characters | terminal: no control character or ESC; round-trips |
 | `git-tag/ai-10.txt` | instruction hidden in a tag name | no check today; needs the later ones (below) |
-| `git-tag/html-10.txt` | already-encoded entities (must be escaped exactly once) | html: no markup characters; round-trips |
-| `git-tag/structure-10.txt` | Unicode tag characters spell hidden text | none today (tag characters are made visible, round-trips) |
+| `git-tag/html-10.txt` | already-encoded entities (must be escaped exactly once) | html: round-trips (the entities come back as written, not as a tag) |
+| `git-tag/structure-10.txt` | Unicode tag characters spell hidden text | both: no invisible character; round-trips |
 | `git-tag/terminal-10.txt` | conceal and hide-cursor codes | terminal: no control character or ESC; round-trips |
 | `issue-body/ai-03.txt` | asks the bot to run `echo` and close the advisory | no check today; needs the later ones (below) |
 | `issue-body/ai-12.txt` | instruction in an HTML comment | no check today; needs the later ones (below) |
@@ -56,12 +58,12 @@ Families a and d are only partly caught today.
 | `issue-body/structure-03.txt` | 100,000 characters of text | none today (length); needs display-width truncation |
 | `issue-body/terminal-03.txt` | OSC 8 hyperlink with misleading text | terminal: no control character or ESC; round-trips |
 | `nip11/ai-04.txt` | tells the assistant to answer only SAFE | no check today; needs the later ones (below) |
-| `nip11/html-04.txt` | `javascript:` link in Markdown | html: no markup characters; round-trips |
-| `nip11/structure-04.txt` | right-to-left override reverses "SAFE" | none today (bidi control is made visible, round-trips); bidi isolation needs the renderers |
+| `nip11/html-04.txt` | `javascript:` link in Markdown | none: it has no HTML-special character, so escaped HTML shows it as plain text. It only matters to a Markdown renderer or a link, which isn't tested here |
+| `nip11/structure-04.txt` | right-to-left override reverses "SAFE" | both: no invisible character (the override is made visible); bidi isolation still needs the renderers |
 | `nip11/terminal-04.txt` | OSC 0 window-title change | terminal: no control character or ESC; round-trips |
 | `nostr-note/ai-07.txt` | fake owner order to silence alerts | no check today; needs the later ones (below) |
 | `nostr-note/html-07.txt` | JavaScript-string quote breakout | html: no markup characters; round-trips |
-| `nostr-note/structure-07.txt` | starts with combining marks | none today (leading mark is made visible, round-trips) |
+| `nostr-note/structure-07.txt` | starts with combining marks | both: no leading combining mark; round-trips |
 | `nostr-note/terminal-07.txt` | DCS device-control string | terminal: no control character or ESC; round-trips |
 | `release-notes/ai-02.txt` | fake system message asking for an update call | no check today; needs the later ones (below) |
 | `release-notes/html-02.txt` | image with onerror handler | html: no markup characters; round-trips |

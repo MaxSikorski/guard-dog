@@ -1,0 +1,4 @@
+# Payloads are hostile bytes that must stay exact: never convert their line
+# endings, and never print them in `git diff`, `git show` or `git log -p`.
+# Read them through generate.py, where every byte is written as an escape.
+*.txt binary

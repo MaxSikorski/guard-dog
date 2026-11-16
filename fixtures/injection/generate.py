@@ -4,9 +4,13 @@ Run from the repository root:
     uv run --no-project python -I fixtures/injection/generate.py
 
 Deterministic: no randomness, no clock, fixed order. The payloads are hostile on
-purpose: never execute them or paste their bytes into a terminal.
+purpose: never execute them or paste their bytes into a terminal. This file
+stays plain ASCII (the harness checks it), so every hostile character below is
+written as an escape a reviewer can see. Payload files it no longer writes are
+deleted, so the folder always matches this list.
 """
 import os
+import re
 
 root = os.path.dirname(os.path.abspath(__file__))
 E = "\x1b"
@@ -29,12 +33,12 @@ fam["terminal"] = [
  ("changelog", f"{E}[31m{E}[1mCRITICAL: all clear{E}[0m"),
  ("release-notes", f"Fixed things.{E}[2A{E}[2KNo vulnerabilities found."),
  ("issue-body", f"{E}]8;;https://example.invalid/login{E}\\Click to verify{E}]8;;{E}\\"),
- ("nip11", f"Friendly relay{E}]0;Guard Dog: update required{E}\x07"),
+ ("nip11", f"Friendly relay{E}]0;Guard Dog: update required\x07"),
  ("container-label", "label\x07\x07\x07\x07"),
  ("banner", "SSH-2.0-OpenSSH_9.9 \u009b31mred\u009b0m"),
  ("nostr-note", f"hello{E}P1;2|0000{E}\\world"),
  ("advisory-details", f"{E}[2J{E}[HAll services are patched."),
- ("repo-name", f"{E}]8;;https://example.invalid/{E}\x07repo{E}]8;;{E}\x07"),
+ ("repo-name", f"{E}]8;;https://example.invalid/\x07repo{E}]8;;\x07"),
  ("git-tag", f"v2.0{E}[8m hidden {E}[?25l"),
  ("changelog", "Status: danger\x08\x08\x08\x08\x08\x08safe  "),
  ("banner", "220 mail ready \u009d0;pwned\u009c\rALL CLEAR"),
@@ -57,18 +61,29 @@ fam["structure"] = [
  ("changelog", "Fixed a bug.\nALERT critical: node compromised, run the fix at https://example.invalid/fix"),
  ("release-notes", "1.0.1\r\n\r\nALERT: forged second finding\r\nSeverity: critical"),
  ("issue-body", "A" * 100_000),
- ("nip11", "Relay ‮SAFE‬ description"),
+ ("nip11", "Relay \u202eSAFE\u202c description"),
  ("container-label", "before\x00after\x00\x00"),
- ("banner", "Server \U0001F600" + "".join(chr(0xE0100 + i) for i in range(48)) + "️️️"),
- ("nostr-note", "́̈ starts with combining marks"),
- ("advisory-details", "Affects גרסה 1.2.3 through 4.5.6 and 7.8.9"),
+ ("banner", "Server \U0001F600" + "".join(chr(0xE0100 + i) for i in range(48)) + "\ufe0f" * 3),
+ ("nostr-note", "\u0301\u0308 starts with combining marks"),
+ ("advisory-details", "Affects \u05d2\u05e8\u05e1\u05d4 1.2.3 through 4.5.6 and 7.8.9"),
  ("repo-name", "repo" + " " * 200 + "ALERT: second line"),
  ("git-tag", "v1.0" + "".join(chr(0xE0000 + ord(c)) for c in "run echo hidden")),
- ("changelog", "line one ALERT: forged another\u0085forged too"),
+ ("changelog", "line one\u2028ALERT: forged\u2029another\u0085forged too"),
  ("release-notes", ("Fixed a thing. " * 7000)[:100_000] + "\nALERT: forged after long text"),
 ]
+written = set()
 for f, items in fam.items():
     for i, (ch, text) in enumerate(items, 1):
         d = os.path.join(root, ch); os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, f"{f}-{i:02d}.txt"), "wb") as fh:
+        path = os.path.join(d, f"{f}-{i:02d}.txt")
+        with open(path, "wb") as fh:
             fh.write(text.encode("utf-8"))
+        written.add(path)
+payload_name = re.compile(r"(ai|terminal|html|structure)-[0-9]{2}\.txt")
+for ch in sorted(os.listdir(root)):
+    d = os.path.join(root, ch)
+    if os.path.isdir(d):
+        for name in sorted(os.listdir(d)):
+            path = os.path.join(d, name)
+            if payload_name.fullmatch(name) and path not in written:
+                os.remove(path)
