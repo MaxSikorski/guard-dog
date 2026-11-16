@@ -11,10 +11,18 @@
     <link rel="icon" id="favicon" type="image/svg+xml" href="favicon-dark.svg">
     <script>(function(){var d;try{var s=localStorage.getItem("theme");d=s?s==="dark":matchMedia("(prefers-color-scheme: dark)").matches}catch(e){d=true}document.documentElement.setAttribute("data-theme",d?"dark":"light")})();</script>
     <script>/* Favicon follows the theme: black mark in light mode, white mark in dark mode; the inside stays transparent. */(function(){var f=document.getElementById("favicon");if(f)f.href=document.documentElement.getAttribute("data-theme")==="light"?"favicon-light.svg":"favicon-dark.svg"})();</script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Everything this page needs ships in this repository: no outside fonts, scripts or trackers (Max, 2026-11-16). -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none'">
     <style>
         /* Sikorski Design System. Colour is used only for meaning (Max, 2026-11-16):
            urgency (red, orange, yellow, green) and categories (Bitcoin, Lightning, Ecash, Nostr). */
+        /* Inter, vendored (SIL Open Font License 1.1, see vendor/fonts/LICENSE) */
+        @font-face { font-family: 'Inter'; font-weight: 300; font-style: normal; font-display: swap; src: url('vendor/fonts/inter-latin-300-normal.woff2') format('woff2'); }
+        @font-face { font-family: 'Inter'; font-weight: 400; font-style: normal; font-display: swap; src: url('vendor/fonts/inter-latin-400-normal.woff2') format('woff2'); }
+        @font-face { font-family: 'Inter'; font-weight: 500; font-style: normal; font-display: swap; src: url('vendor/fonts/inter-latin-500-normal.woff2') format('woff2'); }
+        @font-face { font-family: 'Inter'; font-weight: 600; font-style: normal; font-display: swap; src: url('vendor/fonts/inter-latin-600-normal.woff2') format('woff2'); }
+        @font-face { font-family: 'Inter'; font-weight: 700; font-style: normal; font-display: swap; src: url('vendor/fonts/inter-latin-700-normal.woff2') format('woff2'); }
+
         :root {
             --theme-black: #000000;
             --theme-dark-gray: #1c1c1e;
@@ -424,6 +432,13 @@ Checked 3 min ago · 5 blind spots · No known issues is not the same as secure.
                     </div>
                 </div>
                 <div class="card">
+                    <div class="card-title">Donate AI credits or hardware</div>
+                    <div class="card-desc">I build Guard Dog with AI coding agents and test it on real nodes. API credits, an AI subscription, or a mini PC or Raspberry Pi for the test lab go a long way.</div>
+                    <div class="support-actions">
+                        <a class="btn secondary-btn small" data-link="nostrProfile" target="_blank" rel="noopener">Message me on Nostr</a>
+                    </div>
+                </div>
+                <div class="card">
                     <div class="card-title">Star and watch the repo</div>
                     <div class="card-desc">It helps other people find Guard Dog, and you'll hear about the first release.</div>
                     <div class="support-actions">
@@ -436,7 +451,7 @@ Checked 3 min ago · 5 blind spots · No known issues is not the same as secure.
         <footer class="footer">Guard Dog · Apache-2.0 · Max Sikorski<br>No known issues is not the same as secure.</footer>
     </main>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+    <script src="vendor/gsap/gsap.min.js"></script><!-- GSAP 3.12.5, vendored (see vendor/gsap/LICENSE) -->
     <script>
         // Without GSAP (offline, blocked CDN) show everything instead of leaving it hidden.
         if (typeof gsap === "undefined") {
