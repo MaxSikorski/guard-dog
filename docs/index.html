@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Guard Dog</title>
+    <meta name="description" content="A self-hosted, local-first security watchdog for people whose money and identity run on Bitcoin and Nostr.">
+    <meta name="theme-color" content="#000000">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐕</text></svg>">
+    <script>(function(){var d;try{var s=localStorage.getItem("theme");d=s?s==="dark":matchMedia("(prefers-color-scheme: dark)").matches}catch(e){d=true}document.documentElement.setAttribute("data-theme",d?"dark":"light")})();</script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        /* Sikorski Design System. Colour is used only for meaning (Max, 2026-11-16):
+           urgency (red, orange, yellow, green) and categories (Bitcoin, Lightning, Ecash, Nostr). */
+        :root {
+            --theme-black: #000000;
+            --theme-dark-gray: #1c1c1e;
+            --theme-light-gray: #f5f5f7;
+            --theme-white: #ffffff;
+
+            --bg-color: var(--theme-black);
+            --text-color: var(--theme-white);
+            --card-bg: rgba(28, 28, 30, 0.7);
+            --card-border: rgba(255, 255, 255, 0.1);
+            --card-hover: rgba(44, 44, 46, 0.8);
+            --btn-bg: var(--theme-white);
+            --btn-text: var(--theme-black);
+            --btn-hover: #e0e0e0;
+            --btn-sec-bg: transparent;
+            --btn-sec-border: var(--theme-white);
+            --btn-sec-text: var(--theme-white);
+            --btn-sec-hover: rgba(255, 255, 255, 0.1);
+            --divider: rgba(255, 255, 255, 0.08);
+            --text-muted: rgba(255, 255, 255, 0.5);
+
+            /* meaning only */
+            --critical: #ff453a; --high: #ff9f0a; --medium: #ffd60a; --ok: #30d158;
+            --bitcoin: #f7931a; --lightning: #ffb340; --ecash: #ff375f; --nostr: #bf5af2;
+        }
+
+        [data-theme="light"] {
+            --bg-color: var(--theme-light-gray);
+            --text-color: var(--theme-black);
+            --card-bg: rgba(255, 255, 255, 0.7);
+            --card-border: rgba(0, 0, 0, 0.1);
+            --card-hover: rgba(255, 255, 255, 0.9);
+            --btn-bg: var(--theme-black);
+            --btn-text: var(--theme-white);
+            --btn-hover: #333333;
+            --btn-sec-bg: transparent;
+            --btn-sec-border: var(--theme-black);
+            --btn-sec-text: var(--theme-black);
+            --btn-sec-hover: rgba(0, 0, 0, 0.05);
+            --divider: rgba(0, 0, 0, 0.08);
+            --text-muted: rgba(0, 0, 0, 0.5);
+
+            --critical: #d70015; --high: #c93400; --medium: #a05a00; --ok: #248a3d;
+            --bitcoin: #d9730a; --lightning: #c96a00; --ecash: #d30f45; --nostr: #8944ab;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        html { scroll-behavior: smooth; }
+
+        @media (prefers-reduced-motion: reduce) {
+            html { scroll-behavior: auto; }
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            transition: background-color 0.5s ease, color 0.5s ease;
+        }
+
+        h1, h2, h3 { letter-spacing: -0.04em; font-weight: 700; }
+        p { line-height: 1.6; color: inherit; opacity: 0.85; }
+        a { color: inherit; }
+
+        /* 4.1 Navigation */
+        .header-nav {
+            position: fixed; top: 0; left: 0; width: 100%;
+            padding: 30px 50px;
+            display: flex; justify-content: space-between; align-items: center;
+            z-index: 100;
+        }
+        /* Extension: once the page scrolls, the floating header gets the glass treatment so it never sits on top of text. */
+        .header-nav { transition: background-color 0.3s ease, padding 0.3s ease; }
+        .header-nav.scrolled {
+            padding-top: 18px; padding-bottom: 18px;
+            background: var(--card-bg);
+            backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
+            border-bottom: 1px solid var(--divider);
+        }
+        .logo {
+            color: var(--text-color); text-decoration: none;
+            font-size: 1rem; font-weight: 600; letter-spacing: -0.02em;
+            transition: color 0.5s ease;
+        }
+        .nav-right { display: flex; align-items: center; gap: 32px; }
+        .nav-links { display: flex; gap: 32px; align-items: center; }
+        .nav-link {
+            color: var(--text-color); text-decoration: none;
+            font-size: 0.9rem; font-weight: 400; opacity: 0.7;
+            transition: opacity 0.3s ease;
+        }
+        .nav-link:hover { opacity: 1; }
+        .theme-toggle, .menu-toggle {
+            background: none; border: none; color: var(--text-color); cursor: pointer;
+            width: 28px; height: 28px; padding: 0;
+            display: flex; align-items: center; justify-content: center;
+            transition: color 0.5s ease; position: relative;
+        }
+        .theme-toggle::after, .menu-toggle::after { content: ""; position: absolute; inset: -8px; } /* 44px touch target */
+        .theme-toggle svg, .menu-toggle svg { width: 22px; height: 22px; }
+        .menu-toggle { display: none; }
+
+        /* 4.2 Hero */
+        .hero-section {
+            min-height: 100vh;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            text-align: center; padding: 0 20px;
+        }
+        .hero-content { max-width: 680px; width: 100%; }
+        .hero-title {
+            font-size: clamp(3rem, 8vw, 6rem); line-height: 1.1; margin-bottom: 16px;
+            opacity: 0; transform: translateY(30px);
+        }
+        .hero-subtitle {
+            font-size: clamp(1rem, 2vw, 1.25rem); max-width: 520px; margin: 0 auto 40px;
+            opacity: 0; transform: translateY(30px);
+        }
+        .hero-cta {
+            display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;
+            opacity: 0; transform: translateY(30px);
+        }
+        .status {
+            margin-top: 28px; font-size: 0.8rem; font-weight: 500; color: var(--text-muted);
+            display: inline-flex; align-items: center; gap: 8px;
+            opacity: 0; transform: translateY(30px);
+        }
+
+        /* 4.3 Buttons */
+        .btn {
+            padding: 14px 28px; border-radius: 30px; font-family: inherit; font-weight: 500; font-size: 1rem;
+            cursor: pointer; transition: all 0.3s ease; text-decoration: none; display: inline-block;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .primary-btn { background-color: var(--btn-bg); color: var(--btn-text); border: none; }
+        .primary-btn:hover { background-color: var(--btn-hover); }
+        .primary-btn:active { transform: scale(0.97); }
+        .secondary-btn { background-color: var(--btn-sec-bg); color: var(--btn-sec-text); border: 1px solid var(--btn-sec-border); }
+        .secondary-btn:hover { background-color: var(--btn-sec-hover); }
+        .secondary-btn:active { transform: scale(0.97); }
+
+        /* 4.7 Content section (widened for a two-column grid) */
+        .content-section { max-width: 800px; width: 100%; margin: 0 auto; padding: 0 28px 80px; }
+        .section { padding-top: 40px; }
+        .section-label {
+            font-size: 0.75rem; font-weight: 500; color: var(--text-muted);
+            text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 20px;
+        }
+        .section-title { font-size: clamp(2rem, 4vw, 3rem); line-height: 1.1; margin-bottom: 16px; }
+        .lead { font-size: 1.05rem; margin-bottom: 28px; max-width: 640px; }
+        .divider { width: 100%; height: 1px; background: var(--divider); margin: 48px 0 32px; }
+
+        /* 4.4 Cards (glassmorphism) */
+        .projects { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-bottom: 16px; }
+        .card {
+            display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start;
+            padding: 24px;
+            background: var(--card-bg);
+            backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
+            border: 1px solid var(--card-border); border-radius: 20px;
+            text-decoration: none; color: inherit; transition: all 0.3s ease;
+        }
+        .card-title { font-size: 1.05rem; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 6px; display: flex; align-items: center; gap: 10px; }
+        .card-desc { font-size: 0.85rem; font-weight: 400; opacity: 0.6; line-height: 1.5; }
+
+        /* meaning-only colour */
+        .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; display: inline-block; }
+        .dot.bitcoin { background: var(--bitcoin); } .dot.lightning { background: var(--lightning); }
+        .dot.ecash { background: var(--ecash); } .dot.nostr { background: var(--nostr); }
+        .dot.base { background: var(--text-muted); } .dot.yours { background: transparent; border: 1px solid var(--text-color); }
+        .sev { display: inline-flex; align-items: center; gap: 6px; font-size: 0.75rem; font-weight: 600; padding: 4px 10px; border-radius: 30px; border: 1px solid currentColor; }
+        .sev::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+        .sev.critical { color: var(--critical); } .sev.high { color: var(--high); } .sev.medium { color: var(--medium); } .sev.ok { color: var(--ok); }
+        .sevs { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0 4px; }
+        .card.urgent { border-color: var(--critical); }
+
+        /* 4.8 Code block (example alert) */
+        .code-block {
+            background: var(--card-bg);
+            backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
+            border: 1px solid var(--card-border); border-radius: 12px; padding: 20px;
+            font-family: "SF Mono", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+            font-size: 0.85rem; line-height: 1.6; color: var(--text-muted);
+            overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: pre; margin-bottom: 16px;
+        }
+        [data-theme="light"] .code-block { background: rgba(20, 20, 20, 0.95); color: #a1a1a6; border-color: rgba(255, 255, 255, 0.1); }
+        .code-block .c { color: #ff453a; font-weight: 600; }
+        .code-block .w { color: #f5f5f7; }
+
+        /* 4.5 Link rows */
+        .links { display: flex; flex-direction: column; }
+        .link-row {
+            display: flex; align-items: center; justify-content: space-between; gap: 16px;
+            padding: 18px 0; border-bottom: 1px solid var(--divider);
+            text-decoration: none; color: inherit; transition: opacity 0.3s ease;
+        }
+        .link-row:first-child { border-top: 1px solid var(--divider); }
+        a.link-row:hover { opacity: 0.6; }
+        .link-label { font-size: 1rem; font-weight: 400; }
+        .link-sub { display: block; font-size: 0.85rem; opacity: 0.6; margin-top: 2px; }
+        .link-arrow { opacity: 0.3; flex-shrink: 0; }
+        .never { opacity: 0.5; flex-shrink: 0; }
+
+        /* 4.11 Footer */
+        .footer { text-align: center; font-size: 0.8rem; font-weight: 500; opacity: 0.3; padding: 60px 0 40px; }
+
+        /* 7. Mobile */
+        @media (max-width: 768px) {
+            .header-nav { padding: 20px; }
+            .content-section { padding: 0 20px 60px; }
+            .nav-links {
+                display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100vh;
+                background: var(--card-bg); backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
+                flex-direction: column; justify-content: center; align-items: center; gap: 24px; z-index: 99;
+            }
+            .nav-links.open { display: flex; }
+            .nav-link { font-size: 1.5rem; font-weight: 600; opacity: 0.85; }
+            .menu-toggle { display: flex; z-index: 101; }
+            .theme-toggle { z-index: 101; }
+            .nav-right { gap: 20px; }
+        }
+        @media (max-width: 380px) {
+            .hero-title { font-size: 2rem; }
+        }
+    </style>
+</head>
+<body>
+    <nav class="header-nav">
+        <a href="#" class="logo" id="logo-refresh" title="Reload">Guard Dog</a>
+        <div class="nav-right">
+            <div class="nav-links" id="nav-links">
+                <a href="#watches" class="nav-link">What it watches</a>
+                <a href="#how" class="nav-link">How it works</a>
+                <a href="#never" class="nav-link">Promises</a>
+                <a href="https://github.com/MaxSikorski/guard-dog" class="nav-link" target="_blank" rel="noopener">GitHub</a>
+            </div>
+            <button id="menu-toggle" class="menu-toggle" aria-label="Menu">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <path id="menu-icon-path" d="M4 6h16M4 12h16M4 18h16"/>
+                </svg>
+            </button>
+            <button id="theme-toggle" class="theme-toggle" aria-label="Toggle Theme">
+                <svg id="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path class="sun-path"
+                        d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z">
+                    </path>
+                </svg>
+            </button>
+        </div>
+    </nav>
+
+    <section class="hero-section">
+        <div class="hero-content">
+            <h1 class="hero-title">Guard Dog</h1>
+            <p class="hero-subtitle">A self-hosted watchdog for your Bitcoin and Nostr stack. It knows what you run, notices the moment something turns dangerous, and tells you exactly what to do.</p>
+            <div class="hero-cta">
+                <a href="https://github.com/MaxSikorski/guard-dog" class="btn primary-btn" target="_blank" rel="noopener">View on GitHub</a>
+                <a href="#how" class="btn secondary-btn">How it works</a>
+            </div>
+            <div class="status"><span class="dot base"></span>Pre-alpha · nothing to install yet</div>
+        </div>
+    </section>
+
+    <main class="content-section">
+        <section class="section" id="why">
+            <div class="section-label">Why I'm building this</div>
+            <h2 class="section-title">Doing everything right wasn't enough.</h2>
+            <p class="lead">In July 2026 the Coldcard hack drained about $116M from hardware wallets whose firmware had quietly made weak seeds since 2021. The people who got hit were careful self-custodians. A couple of months later, Alby Hub had a wallet-takeover flaw that hit people running old versions open to the internet, even though a fix had been out for about a year. If your money and identity live on your own infrastructure, you're your own security team. Guard Dog is the member of that team that never sleeps.</p>
+        </section>
+
+        <div class="divider"></div>
+
+        <section class="section" id="watches">
+            <div class="section-label">What it watches</div>
+            <div class="projects">
+                <div class="card"><div class="card-title"><span class="dot bitcoin"></span>Bitcoin</div><div class="card-desc">Bitcoin Core and Knots, BTCPay Server, Fulcrum, electrs, mempool.</div></div>
+                <div class="card"><div class="card-title"><span class="dot lightning"></span>Lightning</div><div class="card-desc">LND, Core Lightning, Alby Hub and LDK nodes, plus the dashboards around them.</div></div>
+                <div class="card"><div class="card-title"><span class="dot ecash"></span>Ecash</div><div class="card-desc">Cashu mints and Fedimint guardians and gateways.</div></div>
+                <div class="card"><div class="card-title"><span class="dot nostr"></span>Nostr</div><div class="card-desc">strfry and other relays, Blossom servers, NIP-46 bunkers, NIP-05 and Wallet Connect.</div></div>
+                <div class="card"><div class="card-title"><span class="dot base"></span>Underneath</div><div class="card-desc">Umbrel, StartOS, RaspiBlitz, myNode, nix-bitcoin, Docker, Tor, SSH and your home network.</div></div>
+                <div class="card"><div class="card-title"><span class="dot yours"></span>What you tell it</div><div class="card-desc">Your hardware wallets and apps, and any git repo you paste in, like someone's custom app you run.</div></div>
+            </div>
+        </section>
+
+        <div class="divider"></div>
+
+        <section class="section" id="how">
+            <div class="section-label">How it works</div>
+            <div class="projects">
+                <div class="card"><div class="card-title">Knows what you run</div><div class="card-desc">It finds every service and version on your node, without ever touching your keys.</div></div>
+                <div class="card urgent"><div class="card-title">Tells you when it turns dangerous</div><div class="card-desc">It matches what you run against security advisories, including "only if it's open to the internet", and sends step-by-step fixes.</div>
+                    <div class="sevs"><span class="sev critical">Critical</span><span class="sev high">High</span><span class="sev medium">Medium</span><span class="sev ok">No known issues</span></div></div>
+                <div class="card"><div class="card-title">Sees what an attacker sees</div><div class="card-desc">Open ports, router mappings, Tor and tunnels, plus a probe from a buddy's Guard Dog. Scout, its own network discovery, spots forgotten nodes and attacks like ARP spoofing.</div></div>
+                <div class="card"><div class="card-title">Watches for a break-in</div><div class="card-desc">Watch-only alerts for your wallets, npub and Lightning node, plus decoy tripwires that prove someone got in.</div></div>
+            </div>
+            <div class="section-label" style="margin-top: 40px;">An alert, as it arrives by Nostr DM</div>
+<div class="code-block"><span class="c">GUARD DOG · CRITICAL</span>
+<span class="w">Alby Hub is reachable from the internet and has a wallet-takeover flaw.</span>
+You run 1.18.2 · fixed in 1.19.0 · safest: 1.24.0
+
+What to do:
+1. Cut internet access first: reply YES-7F3K to remove the router mapping.
+2. Update Alby Hub to 1.24.0.
+3. Change the Hub's unlock password.
+
+Checked 3 min ago · 5 blind spots · No known issues is not the same as secure.</div>
+            <p style="font-size: 0.85rem; opacity: 0.6;">Example. Alerts can also go out by ntfy, Signal, Telegram or email. AI is optional: it works with your own local models, and everything important works without it.</p>
+        </section>
+
+        <div class="divider"></div>
+
+        <section class="section" id="never">
+            <div class="section-label">What it will never do</div>
+            <div class="links">
+                <div class="link-row"><span class="link-label">Hold your keys or move your funds</span><svg class="never" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M6 18L18 6"/></svg></div>
+                <div class="link-row"><span class="link-label">Send your setup's details anywhere you didn't choose</span><svg class="never" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M6 18L18 6"/></svg></div>
+                <div class="link-row"><span class="link-label">Change anything without your one-tap approval</span><svg class="never" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M6 18L18 6"/></svg></div>
+                <div class="link-row"><span class="link-label">Tell you you're "secure"<span class="link-sub">Only "no known issues found", with when it checked and what it couldn't see.</span></span><svg class="never" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M6 18L18 6"/></svg></div>
+                <div class="link-row"><span class="link-label">Scan anybody else's machines</span><svg class="never" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M6 18L18 6"/></svg></div>
+            </div>
+        </section>
+
+        <div class="divider"></div>
+
+        <section class="section" id="follow">
+            <div class="section-label">Follow along</div>
+            <div class="links">
+                <a class="link-row" href="https://github.com/MaxSikorski/guard-dog" target="_blank" rel="noopener"><span class="link-label">Source code on GitHub<span class="link-sub">Open source, Apache-2.0. Watch the repo for the first release.</span></span><svg class="link-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M17 7H7M17 7v10"/></svg></a>
+                <a class="link-row" href="https://github.com/MaxSikorski/guard-dog/blob/main/SECURITY.md" target="_blank" rel="noopener"><span class="link-label">Report a vulnerability privately</span><svg class="link-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M17 7H7M17 7v10"/></svg></a>
+            </div>
+        </section>
+
+        <footer class="footer">Guard Dog · Apache-2.0 · Max Sikorski<br>No known issues is not the same as secure.</footer>
+    </main>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+    <script>
+        // Without GSAP (offline, blocked CDN) show everything instead of leaving it hidden.
+        if (typeof gsap === "undefined") {
+            document.querySelectorAll(".hero-title, .hero-subtitle, .hero-cta, .status").forEach(function (el) { el.style.opacity = 1; el.style.transform = "none"; });
+            window.gsap = { set: function () {}, to: function () {}, fromTo: function () {}, timeline: function () { return { to: function () { return this; }, restart: function () {} }; } };
+        }
+
+        // 4.1 The logo is the refresh control
+        (function () {
+            var l = document.getElementById("logo-refresh");
+            if (l) l.addEventListener("click", function (e) {
+                e.preventDefault();
+                try { sessionStorage.setItem("logo-refresh-top", "1") } catch (x) {}
+                if (window.scrollY < 2) { location.reload(); return }
+                window.scrollTo({ top: 0, behavior: "smooth" });
+                var waited = 0, iv = setInterval(function () {
+                    waited += 50;
+                    if (window.scrollY < 2 || waited > 1500) { clearInterval(iv); location.reload() }
+                }, 50);
+            });
+            try {
+                if (sessionStorage.getItem("logo-refresh-top")) {
+                    sessionStorage.removeItem("logo-refresh-top");
+                    if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+                    window.scrollTo(0, 0);
+                    setTimeout(function () { window.scrollTo(0, 0); history.scrollRestoration = "auto" }, 0);
+                }
+            } catch (x) {}
+        })();
+
+        // 6. Dark/light toggle
+        const themeBtn = document.getElementById("theme-toggle");
+        const themeIcon = document.getElementById("theme-icon");
+
+        const sunPath = "M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z";
+        const moonPath = "M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z";
+
+        const prefersDark = window.matchMedia("(prefers-color-scheme: dark)");
+        const savedTheme = localStorage.getItem("theme");
+        let isDark = savedTheme ? savedTheme === "dark" : prefersDark.matches;
+
+        const applyTheme = (dark, animate = true) => {
+            document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+            localStorage.setItem("theme", dark ? "dark" : "light");
+
+            const metaTheme = document.querySelector('meta[name="theme-color"]');
+            if (metaTheme) metaTheme.content = dark ? "#000000" : "#f5f5f7";
+
+            const pathNode = themeIcon.querySelector("path");
+            pathNode.setAttribute("d", dark ? sunPath : moonPath);
+
+            if (animate) {
+                gsap.fromTo(themeIcon,
+                    { rotation: 0, scale: 0.8 },
+                    { rotation: 360, scale: 1, duration: 0.6, ease: "power2.out" }
+                );
+            }
+        };
+
+        applyTheme(isDark, false);
+
+        themeBtn.addEventListener("click", () => { isDark = !isDark; applyTheme(isDark); });
+        prefersDark.addEventListener("change", (e) => { isDark = e.matches; applyTheme(isDark, true); });
+
+        // 4.1 Hamburger menu
+        const menuToggle = document.getElementById("menu-toggle");
+        const navLinks = document.getElementById("nav-links");
+        const menuIconPath = document.getElementById("menu-icon-path");
+        const hamburgerPath = "M4 6h16M4 12h16M4 18h16";
+        const closePath = "M6 6l12 12M6 18L18 6";
+        if (menuToggle && navLinks) {
+            menuToggle.addEventListener("click", () => {
+                const isOpen = navLinks.classList.toggle("open");
+                menuIconPath.setAttribute("d", isOpen ? closePath : hamburgerPath);
+                if (isOpen) {
+                    gsap.fromTo(navLinks, { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power2.out" });
+                    gsap.fromTo(".nav-links .nav-link", { opacity: 0, y: 20 },
+                        { opacity: 0.85, y: 0, duration: 0.5, ease: "power4.out", stagger: 0.08 });
+                }
+            });
+            navLinks.querySelectorAll(".nav-link").forEach((a) => a.addEventListener("click", () => {
+                if (navLinks.classList.contains("open")) { navLinks.classList.remove("open"); menuIconPath.setAttribute("d", hamburgerPath); }
+            }));
+        }
+
+        // Glass header once scrolled (see the CSS note)
+        const headerNav = document.querySelector(".header-nav");
+        const markScrolled = () => headerNav.classList.toggle("scrolled", window.scrollY > 10);
+        window.addEventListener("scroll", markScrolled, { passive: true });
+        markScrolled();
+
+        // 5.1 Hero entrance
+        const tl = gsap.timeline({ defaults: { ease: "power4.out", duration: 1.2 } });
+        gsap.set(".hero-title, .hero-subtitle, .hero-cta, .status", { opacity: 0, y: 30 });
+        tl.to(".hero-title", { opacity: 1, y: 0, delay: 0.2 })
+          .to(".hero-subtitle", { opacity: 1, y: 0 }, "-=0.9")
+          .to(".hero-cta", { opacity: 1, y: 0 }, "-=0.9")
+          .to(".status", { opacity: 1, y: 0 }, "-=0.9");
+
+        // 5.2 Scroll reveals
+        if (typeof IntersectionObserver !== "undefined" && window.gsap && gsap.version) {
+            const cards = document.querySelectorAll(".card");
+            const linkRows = document.querySelectorAll(".link-row");
+            gsap.set(cards, { opacity: 0, y: 20 });
+            gsap.set(linkRows, { opacity: 0, y: 10 });
+            gsap.set(".section-label", { opacity: 0 });
+            const observer = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        const el = entry.target;
+                        if (el.classList.contains("section-label")) {
+                            gsap.to(el, { opacity: 1, duration: 0.6, ease: "power4.out" });
+                        } else if (el.classList.contains("card")) {
+                            gsap.to(el, { opacity: 1, y: 0, duration: 0.8, ease: "power4.out", delay: el.dataset.delay || 0 });
+                        } else if (el.classList.contains("link-row")) {
+                            gsap.to(el, { opacity: 1, y: 0, duration: 0.6, ease: "power4.out", delay: el.dataset.delay || 0 });
+                        }
+                        observer.unobserve(el);
+                    }
+                });
+            }, { threshold: 0.1 });
+            cards.forEach((card, i) => { card.dataset.delay = (i % 4) * 0.1; observer.observe(card); });
+            linkRows.forEach((row, i) => { row.dataset.delay = (i % 5) * 0.08; observer.observe(row); });
+            document.querySelectorAll(".section-label").forEach(el => observer.observe(el));
+        }
+    </script>
+</body>
+</html>
