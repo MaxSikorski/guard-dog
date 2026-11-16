@@ -13,6 +13,7 @@ permissions:
 
 # Both reproducibility builds bake in the same commit id.
 env:
+  CARGO_INCREMENTAL: "0"
   GD_GIT_COMMIT: ${{ github.sha }}
 
 # One nightly run at a time; a manual run waits for a running one to finish.
@@ -27,40 +28,9 @@ jobs:
     permissions:
       contents: read
 
-  # New RustSec advisories show up against an unchanged Cargo.lock. cargo-deny
-  # reads the same RustSec database as cargo-audit, so cargo-audit is not
-  # installed separately.
-  advisories:
-    name: advisories
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    env:
-      CARGO_DENY_VERSION: "0.21.0"
-      CARGO_DENY_SHA256: a2170b854ff697e79e39c4c538981c9c1bdd803addbae6719a4cb66b4585a903
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install the pinned toolchain
-        timeout-minutes: 10
-        run: |
-          rustup toolchain install --no-self-update
-          rustup show active-toolchain
-      - name: Install cargo-deny (checked download)
-        run: |
-          set -euo pipefail
-          name="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
-          mkdir -p "${RUNNER_TEMP}/cargo-deny"
-          cd "${RUNNER_TEMP}/cargo-deny"
-          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-            --retry 3 --retry-all-errors --connect-timeout 20 --max-time 120 \
-            --output "${name}.tar.gz" \
-            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${name}.tar.gz"
-          echo "${CARGO_DENY_SHA256}  ${name}.tar.gz" | sha256sum -c -
-          tar -xzf "${name}.tar.gz"
-          echo "${RUNNER_TEMP}/cargo-deny/${name}" >> "${GITHUB_PATH}"
-      - name: cargo deny check advisories
-        run: cargo deny --locked check advisories
+  # There is no separate advisories job: `gate / deny` above runs the full
+  # `cargo deny --locked check`, which includes the RustSec advisory check, so
+  # new advisories against an unchanged Cargo.lock still turn the nightly red.
 
   # TODO(Phase 0.8): the lab judges go here once the regtest lab exists
   # (lab/up.sh, then the judges, then lab/down.sh). No placeholder job yet.
@@ -135,6 +105,21 @@ jobs:
           echo "ubuntu-24.04: ${SHA_2404}"
           echo "ubuntu-22.04:  ${SHA_2204}"
           if [ -z "${SHA_2404}" ] || [ "${SHA_2404}" != "${SHA_2204}" ]; then
+            verdict="DIFFERENT (expected until Phase 4.6)"
+          else
+            verdict="byte-identical"
+          fi
+          {
+            echo "### Reproducibility"
+            echo ""
+            echo "| Runner | SHA-256 of target/release/guard-dog |"
+            echo "|---|---|"
+            echo "| ubuntu-24.04 | \`${SHA_2404}\` |"
+            echo "| ubuntu-22.04 | \`${SHA_2204}\` |"
+            echo ""
+            echo "Verdict: ${verdict}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if [ "${verdict}" != "byte-identical" ]; then
             echo "::error::The two builds differ (expected until Phase 4.6)."
             exit 1
           fi
