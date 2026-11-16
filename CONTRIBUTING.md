@@ -32,6 +32,6 @@ Guard Dog is licensed under [Apache-2.0](LICENSE). By contributing, you agree yo
 
 ## Other ways to support it
 
-Zaps, donations and sharing it on Nostr or X all help too. See the **Support** section on the [Guard Dog website](https://maxsikorski.github.io/guard-dog/#support).
+[Sponsoring on GitHub](https://github.com/sponsors/MaxSikorski) and sharing it on Nostr or X help too. See the **Support** section on the [Guard Dog website](https://maxsikorski.github.io/guard-dog/#support).
 
 Thank you!

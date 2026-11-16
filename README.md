@@ -44,7 +44,11 @@ I know I'm missing things. If you run your own node, relay or mint, you already 
 
 ## Support
 
-Guard Dog is free and open source, with no subscriptions and no ads. If it helps you, zap it, donate, or share it on Nostr or X. The links are on the [website](https://maxsikorski.github.io/guard-dog/#support).
+Guard Dog is free and open source, with no subscriptions and no ads. If it helps you:
+
+- **[Sponsor it on GitHub](https://github.com/sponsors/MaxSikorski)**, one-time or monthly.
+- **Follow along on Nostr:** `npub18rxdd7k5ayly50965a9rv8r7qrqmxn3tjsdp348xg205msrwyc9sacjx70`
+- **Share it** on Nostr or X. There's a ready-made note on the [website](https://maxsikorski.github.io/guard-dog/#support).
 
 ## Security
 

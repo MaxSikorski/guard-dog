@@ -401,16 +401,16 @@ Checked 3 min ago · 5 blind spots · No known issues is not the same as secure.
             <p class="lead">Guard Dog will never have a subscription or ads. If it helps you sleep better, here's how you can help me keep building it.</p>
             <div class="projects">
                 <div class="card">
-                    <div class="card-title"><span class="dot bitcoin"></span>Zap or donate in bitcoin</div>
-                    <div class="card-desc">Lightning is easiest. Every sat goes into building and testing Guard Dog.</div>
+                    <div class="card-title">Sponsor Guard Dog</div>
+                    <div class="card-desc">One-time or monthly through GitHub Sponsors. It pays for the hours and the test hardware behind every release. A Lightning address is coming.</div>
                     <div class="support-actions">
+                        <a class="btn primary-btn small" data-link="donatePage" target="_blank" rel="noopener">Sponsor on GitHub</a>
                         <button type="button" class="btn secondary-btn small" data-copy="lightningAddress" data-label="Copy Lightning address">Copy Lightning address</button>
-                        <a class="btn secondary-btn small" data-link="donatePage" target="_blank" rel="noopener">Other ways to donate</a>
                     </div>
                 </div>
                 <div class="card">
                     <div class="card-title"><span class="dot nostr"></span>Post about it on Nostr</div>
-                    <div class="card-desc">Copy a ready-made note and paste it into any Nostr app. Zaps on it come to me.</div>
+                    <div class="card-desc">Copy a ready-made note that tags me and paste it into any Nostr app, or follow along as I build.</div>
                     <div class="support-actions">
                         <button type="button" class="btn secondary-btn small" data-copy="nostrNote" data-label="Copy a note">Copy a note</button>
                         <a class="btn secondary-btn small" data-link="nostrProfile" target="_blank" rel="noopener">Follow me on Nostr</a>
@@ -421,7 +421,6 @@ Checked 3 min ago · 5 blind spots · No known issues is not the same as secure.
                     <div class="card-desc">One tap opens a post with a short description and the link.</div>
                     <div class="support-actions">
                         <a class="btn secondary-btn small" data-link="xShare" target="_blank" rel="noopener">Post on X</a>
-                        <a class="btn secondary-btn small" data-link="xProfile" target="_blank" rel="noopener">Follow me on X</a>
                     </div>
                 </div>
                 <div class="card">
@@ -448,14 +447,14 @@ Checked 3 min ago · 5 blind spots · No known issues is not the same as secure.
         // ===== Support links: paste each one between the quotes. =====
         // Any link left empty shows as a disabled "coming soon" button instead of a dead link.
         const SUPPORT_LINKS = {
-            lightningAddress: "",   // e.g. "you@yourwallet.com" (copied to the clipboard)
-            donatePage: "",         // e.g. a Geyser, BTCPay or OpenSats page
-            nostrProfile: "",       // e.g. "https://njump.me/npub1..."
-            xProfile: ""            // e.g. "https://x.com/yourhandle"
+            lightningAddress: "",   // none yet (Max, 2026-11-16); e.g. "you@yourwallet.com", copied to the clipboard
+            donatePage: "https://github.com/sponsors/MaxSikorski",
+            nostrProfile: "https://njump.me/npub18rxdd7k5ayly50965a9rv8r7qrqmxn3tjsdp348xg205msrwyc9sacjx70"
         };
         const SITE_URL = "https://maxsikorski.github.io/guard-dog/";
         const SHARE_TEXT = "Guard Dog: a self-hosted watchdog for your Bitcoin and Nostr stack. It knows what you run and tells you the moment something turns dangerous. Open source and local-first.";
-        const COPY_TEXT = { nostrNote: SHARE_TEXT + "\n\n" + SITE_URL + "\n\n#bitcoin #nostr #selfhosted", lightningAddress: SUPPORT_LINKS.lightningAddress };
+        const NPUB = "npub18rxdd7k5ayly50965a9rv8r7qrqmxn3tjsdp348xg205msrwyc9sacjx70";
+        const COPY_TEXT = { nostrNote: SHARE_TEXT + "\n\nBuilt by nostr:" + NPUB + "\n" + SITE_URL + "\n\n#bitcoin #nostr #selfhosted", lightningAddress: SUPPORT_LINKS.lightningAddress };
         const LINKS = Object.assign({}, SUPPORT_LINKS, {
             xShare: "https://x.com/intent/tweet?text=" + encodeURIComponent(SHARE_TEXT) + "&url=" + encodeURIComponent(SITE_URL)
         });
