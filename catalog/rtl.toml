@@ -1,0 +1,61 @@
+# Ride The Lightning. Format: catalog/README.md. Checked by crates/gd-core/tests/catalog.rs.
+format = 1
+id = "rtl"
+name = "Ride The Lightning"
+kind = "service"
+aliases = []
+summary = "A web control panel for a Lightning node."
+money = true
+licence = "unknown"
+
+[upstream]
+repo = "https://github.com/Ride-The-Lightning/RTL"
+
+[recognize]
+images = []
+binaries = []
+units = []
+
+[version]
+source = "image-label"
+credential = "none"
+regex = '^(?P<version>0\.\d+\.\d+)$'
+scheme = "semver"
+
+[version.call]
+field = "org.opencontainers.image.version"
+
+[[version.examples]]
+raw = "0.15.12"
+version = "0.15.12"
+source = "advisories/corpus/GHSA-wj92-jhwh-85j5.json"
+source_kind = "advisory"
+
+[advisories]
+osv_packages = ["GIT https://github.com/Ride-The-Lightning/RTL"]
+ghsa = true
+feeds = []
+blind_spot = "GitHub advisories only: the one known item has no CVE and is not in OSV as of 2026-11-16; no feed a machine can read has been checked."
+
+[signing]
+level = "unknown"
+
+[review]
+last_reviewed = 2026-11-17
+sources = [
+  "https://github.com/Ride-The-Lightning/RTL/security/advisories/GHSA-wj92-jhwh-85j5",
+]
+todo = [
+  "licence: read the upstream LICENSE file",
+  "summary: from the advisory; confirm the project's own one-liner and which node backends it supports",
+  "money: set true because the advisory shows it can start payments from the node; confirm how a remote-control dashboard is classified",
+  "upstream.website, upstream.release_feed, upstream.security_policy: none recorded in the repo",
+  "images: no image name is recorded; add it with a recorded reply (the version source assumes a container image)",
+  "binaries: RTL is a Node.js application; no executable name is recorded",
+  "units: no systemd unit name is recorded",
+  "ports: no port is named in the repo",
+  "recorded-reply: 0.15.12 is the advisory's fixed version, not a recorded reply; record a real label value",
+  "version.regex: pinned to the 0.x series the advisory shows (a bare x.y.z pattern is refused); older releases are not read; widen it when a real label is recorded",
+  "signing: level, method and keys are not recorded",
+  "platform_map: app ids on UmbrelOS, StartOS, RaspiBlitz and myNode",
+]

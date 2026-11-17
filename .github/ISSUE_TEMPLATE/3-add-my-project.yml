@@ -1,0 +1,124 @@
+name: Add my project to the catalog
+description: Teach Guard Dog about a node, Lightning implementation, relay, mint, wallet, platform or miner.
+title: "Catalog: add "
+labels: ["type: catalog", "area: catalog", "status: needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! A catalog entry is one small data file, `catalog/<id>.toml`. It says what your software looks like when it runs, how to read its version without changing anything, which ports should stay private, and where its security advisories are published.
+
+        Please read [Add my project](https://github.com/MaxSikorski/guard-dog/blob/main/CONTRIBUTING.md#add-my-project) in CONTRIBUTING.md and the format in [catalog/README.md](https://github.com/MaxSikorski/guard-dog/blob/main/catalog/README.md) first. Opening this issue before the pull request means we don't build the same thing twice.
+
+        If you don't know an answer below, say "not sure". Open questions become `todo` lines in the entry, never guesses.
+  - type: checkboxes
+    id: redacted
+    attributes:
+      label: Before you post
+      options:
+        - label: Nothing below contains seeds, keys, tokens, macaroons, passwords, IP addresses or onion addresses.
+          required: true
+        - label: I searched `catalog/` and the open issues, and this product isn't there yet.
+          required: true
+  - type: input
+    id: name
+    attributes:
+      label: Product name
+      placeholder: "e.g. strfry"
+    validations:
+      required: true
+  - type: input
+    id: repo
+    attributes:
+      label: Canonical repository
+      description: The upstream repository, as an https link.
+      placeholder: "https://github.com/owner/repo"
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - service (a node, Lightning implementation, relay, mint, server…)
+        - platform (a node OS like Umbrel or StartOS)
+        - device (a hardware wallet or signer)
+        - app (a phone or desktop wallet or client)
+        - miner
+        - package (a library or package other software depends on)
+    validations:
+      required: true
+  - type: input
+    id: licence
+    attributes:
+      label: Licence
+      description: The SPDX id if you know it. Copyleft licences are welcome; Guard Dog never ships your code.
+      placeholder: "e.g. MIT, Apache-2.0, GPL-3.0, unknown"
+    validations:
+      required: true
+  - type: dropdown
+    id: money
+    attributes:
+      label: Does it hold funds or keys?
+      options:
+        - "Yes"
+        - "No"
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: version
+    attributes:
+      label: How to read its version without changing anything
+      description: |
+        A read-only call: a NIP-11 reply, an HTTP endpoint, an RPC or gRPC method, a container image label, or a command run as the service's own user (never as root). Name the least powerful credential it needs ("none" if none), and paste a real, redacted reply.
+      placeholder: |
+        GET / with Accept: application/nostr+json on port 7777, no credential.
+        Reply: {"software":"git+https://github.com/hoytech/strfry.git","version":"1.0.4"}
+    validations:
+      required: true
+  - type: textarea
+    id: ports
+    attributes:
+      label: Default ports
+      description: Each port, what it's for, and whether it should be never public, LAN only, or OK to expose.
+      placeholder: |
+        7777/tcp  relay websocket  public-ok
+        9000/tcp  admin panel      never-public
+  - type: textarea
+    id: advisories
+    attributes:
+      label: Where security advisories are published
+      description: GitHub Security Advisories, OSV, an Atom or RSS feed, Markdown in a repo, or "only in release notes" or "nowhere yet". All are fine answers; Guard Dog just needs to know.
+    validations:
+      required: true
+  - type: input
+    id: security-contact
+    attributes:
+      label: Security policy or private contact page
+      description: A link to your security page, if you have one. Please don't paste a personal email address here.
+  - type: dropdown
+    id: signing
+    attributes:
+      label: How are releases signed?
+      options:
+        - Signed by several people (multi-signature)
+        - Signed by one person or key
+        - Signed git tags only
+        - Not signed
+        - Not sure
+  - type: dropdown
+    id: who
+    attributes:
+      label: Who will write the entry?
+      options:
+        - I'll open the pull request myself
+        - I'd like help writing it
+    validations:
+      required: true
+  - type: checkboxes
+    id: relationship
+    attributes:
+      label: Your relationship to the project
+      options:
+        - label: I maintain or contribute to this project.

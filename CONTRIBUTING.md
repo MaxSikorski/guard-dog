@@ -20,6 +20,14 @@ The [roadmap](ROADMAP.md) shows what's coming next and lists open questions wher
 1. **Open an issue first** and say what you'd like to do. That way we don't build the same thing twice, and I can point you at the right place.
 2. Keep each pull request to one change, and explain it in plain English: what changed, why, and how you checked it.
 
+## Issues, discussions and labels
+
+- **Issues** are for work: [open one](https://github.com/MaxSikorski/guard-dog/issues/new/choose) and pick the form that fits. There's one for a bug, a false alarm or missed advisory, adding your project to the catalog, a public advisory, a feature and the docs. Each form asks only what I need to act on it and tags the issue for you.
+- **[Discussions](https://github.com/MaxSikorski/guard-dog/discussions)** are for everything else: questions in Q&A, early ideas and answers to the roadmap's open questions in Ideas, your setup in Show and tell, and node platform talk in Node platforms.
+- **Pull requests** use the [template](.github/PULL_REQUEST_TEMPLATE.md): what and why, how you tested it, what you didn't test, and "For #n" instead of "Fixes #n" (an issue closes once a release contains the change).
+- **Labels** are listed with what each one means in [.github/labels.yml](.github/labels.yml). Every issue gets one `type:` label, plus `area:` and `platform:` labels where they help. Looking for a way in? Try [good first issue](https://github.com/MaxSikorski/guard-dog/labels/good%20first%20issue) and [help wanted](https://github.com/MaxSikorski/guard-dog/labels/help%20wanted). A pull request that touches CI, release, signing, privileges or the dependency policy gets `security-sensitive-path` and waits for my review; [GOVERNANCE.md](GOVERNANCE.md) explains why.
+- Everyone here follows the [Code of Conduct](CODE_OF_CONDUCT.md). [SUPPORT.md](SUPPORT.md) says where to ask for help.
+
 ## Ground rules
 
 - **Never post real secrets.** No seed phrases, nsecs, xpubs, macaroons, passwords, IP addresses or onion addresses in issues, pull requests, logs or test files. Redact first. Test data should be made-up regtest values.

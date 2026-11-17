@@ -1,0 +1,53 @@
+name: Feature request
+description: Suggest something Guard Dog should do, or do differently.
+title: "Feature: "
+labels: ["type: feature", "status: needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! Please check the [roadmap](https://github.com/MaxSikorski/guard-dog/blob/main/ROADMAP.md) first; it may already be planned. Early or open-ended ideas fit best in [Discussions: Ideas](https://github.com/MaxSikorski/guard-dog/discussions/categories/ideas).
+
+        Guard Dog will never hold keys, move funds, change a system without the user's approval, send a setup's details anywhere the user didn't choose, or scan machines the user doesn't own. Requests that need any of those can't be accepted.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What happens today, and why it matters to someone running their own node, relay or mint.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like Guard Dog to do
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: What "done" looks like
+      description: How would we know it works? A concrete check is ideal, for example "on the regtest lab, it reports X within a minute".
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Which setups does it matter for?
+      multiple: true
+      options:
+        - umbrelOS
+        - StartOS
+        - RaspiBlitz
+        - myNode
+        - nix-bitcoin
+        - Plain Docker or Docker Compose
+        - Plain Linux
+        - All of them
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Helping out
+      options:
+        - label: I'd like to work on this myself.

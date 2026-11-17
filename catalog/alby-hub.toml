@@ -1,0 +1,62 @@
+# Alby Hub. Format: catalog/README.md. Checked by crates/gd-core/tests/catalog.rs.
+format = 1
+id = "alby-hub"
+name = "Alby Hub"
+kind = "service"
+aliases = []
+summary = "A wallet server with a management web interface that can hold and send funds."
+money = true
+licence = "unknown"
+
+[upstream]
+repo = "https://github.com/getAlby/hub"
+
+[recognize]
+images = []
+binaries = []
+units = []
+
+[version]
+source = "image-label"
+credential = "none"
+regex = '^(?P<version>1\.\d+\.\d+)$'
+scheme = "semver"
+
+[version.call]
+field = "org.opencontainers.image.version"
+
+[[version.examples]]
+raw = "1.19.0"
+version = "1.19.0"
+source = "advisories/corpus/x_alby-hub-2026-09-internet-exposed-takeover.json"
+source_kind = "advisory"
+
+[advisories]
+osv_packages = ["GIT https://github.com/getAlby/hub"]
+ghsa = false
+feeds = []
+blind_spot = "The repo corpus holds one advisory for it, built from a news report; no CVE. Whether the project has GitHub advisories or a feed a machine can read has not been checked."
+
+[signing]
+level = "unknown"
+
+[review]
+last_reviewed = 2026-11-17
+sources = [
+  "https://thehackernews.com/2026/09/alby-hub-critical-flaw-could-let.html",
+  "https://github.com/getAlby/hub",
+]
+todo = [
+  "licence: read the upstream LICENSE file",
+  "summary: from the advisory's wording; confirm the project's own one-liner",
+  "upstream.website, upstream.release_feed, upstream.security_policy: none recorded in the repo",
+  "images: no image name is recorded; add it with a recorded reply (the version source assumes a container image)",
+  "binaries: no executable name is recorded",
+  "units: no systemd unit name is recorded",
+  "ports: the advisory names 8080 as the management web interface and says to keep it off the public internet; add it (never-public) with a recorded reply and a confirmed upstream default",
+  "recorded-reply: 1.19.0 is the advisory's first fixed version, not a recorded reply; record a real label value",
+  "version.regex: pinned to the 1.x series the advisory shows (a bare x.y.z pattern is refused); older releases are not read; widen it when a real label is recorded",
+  "advisories.ghsa: unverified; check the project's Security tab",
+  "signing: level, method and keys are not recorded",
+  "platform_map: app ids on UmbrelOS, StartOS, RaspiBlitz and myNode",
+]

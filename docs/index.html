@@ -151,6 +151,7 @@
             display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;
             opacity: 0; transform: translateY(30px);
         }
+        .hero-cta-note { flex-basis: 100%; margin: -2px 0 6px; font-size: 0.85rem; opacity: 0.6; }
         .status {
             margin-top: 28px; font-size: 0.8rem; font-weight: 500; color: var(--text-muted);
             display: inline-flex; align-items: center; gap: 8px;
@@ -277,6 +278,7 @@
             <div class="nav-links">
                 <a href="#watches" class="nav-link">What it watches</a>
                 <a href="#how" class="nav-link">How it works</a>
+                <a href="preview/" class="nav-link">Try the mock-up</a>
                 <a href="#contribute" class="nav-link">Help build</a>
                 <a href="#support" class="nav-link">Support</a>
                 <a href="https://github.com/MaxSikorski/guard-dog" class="nav-link" target="_blank" rel="noopener">GitHub</a>
@@ -290,6 +292,7 @@
             <div class="nav-menu" id="nav-menu" hidden>
                 <a href="#watches" class="nav-menu-link">What it watches</a>
                 <a href="#how" class="nav-menu-link">How it works</a>
+                <a href="preview/" class="nav-menu-link">Try the mock-up</a>
                 <a href="#never" class="nav-menu-link">Promises</a>
                 <a href="#contribute" class="nav-menu-link">Help build</a>
                 <a href="#support" class="nav-menu-link">Support</a>
@@ -312,7 +315,9 @@
             <h1 class="hero-title">Guard Dog</h1>
             <p class="hero-subtitle">A self-hosted watchdog for your Bitcoin and Nostr stack. It knows what you run, notices the moment something turns dangerous, and tells you exactly what to do.</p>
             <div class="hero-cta">
-                <a href="https://github.com/MaxSikorski/guard-dog" class="btn primary-btn" target="_blank" rel="noopener">View on GitHub</a>
+                <a href="preview/" class="btn primary-btn">Try the live mock-up</a>
+                <p class="hero-cta-note">A clickable preview with made-up regtest data. Nothing to install.</p>
+                <a href="https://github.com/MaxSikorski/guard-dog" class="btn secondary-btn" target="_blank" rel="noopener">View on GitHub</a>
                 <a href="#how" class="btn secondary-btn">How it works</a>
             </div>
             <div class="status"><span class="dot base"></span>Pre-alpha · nothing to install yet</div>
@@ -371,6 +376,8 @@ What to do:
 
 Checked 3 min ago · 5 blind spots · No known issues is not the same as secure.</div>
             <p style="font-size: 0.85rem; opacity: 0.6;">Example. Alerts can also go out by ntfy, Signal, Telegram or email. AI is optional: it works with your own local models, and everything important works without it.</p>
+            <p><a href="preview/" class="btn secondary-btn">Click through how it will work</a></p>
+            <p style="font-size: 0.85rem; opacity: 0.6;">A clickable mock-up of the planned app, with made-up sample data. Nothing in it is built yet.</p>
         </section>
 
         <div class="divider"></div>
