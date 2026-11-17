@@ -60,6 +60,7 @@ The mint uses Nutshell's `FakeWallet` backend: it has no real Lightning connecti
 ## How it's locked down
 
 - **Isolated:** one internal Docker network (`172.29.208.0/24`) with no route out, not even to the internet, and in `isolated` bridge mode so the lab has no address on your machine to reach. No port is published on your machine; `up.sh` works through `docker compose exec`.
+- **Fixed addresses:** the five nodes (bitcoind, lnd, cln, strfry, nutshell) have fixed addresses 172.29.208.10 to .14 in `compose.yml`, so Guard Dog's notifier connects by address from its own table and never asks a resolver (`crates/gd-notify/src/relay.rs` has a test that the two lists match).
 - **Names:** Docker's embedded DNS resolver may still answer names for an internal network. That is a query-only channel, and nothing in the lab looks up outside names. Observed on this Docker (29.8.2, Compose 5.5.0), 2026-11-17: a lookup of an outside name (`example.com`) from the probe got no answer and curl gave up with `Resolving timed out` (exit 28), so nothing was resolved. That is one Docker version, so it stays a statement about what the lab does, not a guarantee about every Docker.
 - **Nothing on disk:** no host folders, no Docker socket, no volumes. All data lives in memory (tmpfs) and is gone when a container stops.
 - **Every container:** a read-only root filesystem, all Linux capabilities dropped, `no-new-privileges`, a non-root user, and limits on memory, swap, CPU and processes.

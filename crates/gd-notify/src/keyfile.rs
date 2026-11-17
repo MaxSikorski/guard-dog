@@ -6,13 +6,23 @@
 //! that is not exactly 0700. The folder and the file must both belong to the
 //! user running Guard Dog, so a key planted by anyone else (root included) is
 //! refused.
+//!
+//! The folders above the state folder are walked the way OpenSSH's
+//! `secure_path` does it: one name at a time from `/`, following each symlink
+//! by hand (at most 40), and every folder passed through must belong to root
+//! or the running user and not be open to others unless it is sticky. On
+//! purpose, a state folder whose parents were made under umask 002 (mode
+//! 0775, group-writable) is refused: another group member could swap it.
 
 use crate::encoding::{hex_encode, hex32_secret};
 use crate::{Entropy, Keys, NotifyError};
+use std::collections::VecDeque;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 /// The key file's name inside the state folder.
@@ -72,44 +82,101 @@ fn check_state_dir(dir: &Path, euid: u32) -> Result<fs::Metadata, NotifyError> {
 }
 
 const ABOVE_UNREADABLE: &str = "cannot look at a folder above the state folder";
+const BAD_PATH: &str =
+    "the state folder must be an absolute path without ., .. or a trailing slash";
+/// The most symlinks followed on the way to the state folder.
+const MAX_LINK_HOPS: u32 = 40;
 
-/// Every folder above the state folder (as written, and as it really is after
-/// symlinks) must belong to root or the running user, and must not be
-/// writable by others unless it is sticky. Otherwise someone else could
-/// rename a folder in the chain and swap the state folder for another one.
-/// A sticky folder such as `/tmp` is safe here because every entry below it in
-/// the chain is itself checked, and in a sticky folder only an entry's owner
-/// can rename it.
-fn check_ancestors(dir: &Path, euid: u32) -> Result<(), NotifyError> {
-    if !dir.is_absolute()
-        || dir
-            .components()
-            .any(|c| matches!(c, Component::CurDir | Component::ParentDir))
-    {
+/// The state path, as raw bytes, must be absolute, must not end in `/` (other
+/// than `/` itself) and must have no `.` or `..` segment. Checked on the bytes,
+/// not on `Path::components`, which quietly drops a trailing `/` and `/.`
+/// and so would hide exactly the forms that make a symlink look like a folder.
+fn check_path_text(dir: &Path) -> Result<(), NotifyError> {
+    let bytes = dir.as_os_str().as_bytes();
+    if bytes.first() != Some(&b'/') || (bytes.len() > 1 && bytes.last() == Some(&b'/')) {
+        return Err(refuse(BAD_PATH));
+    }
+    if bytes.split(|b| *b == b'/').any(|s| s == b"." || s == b"..") {
+        return Err(refuse(BAD_PATH));
+    }
+    Ok(())
+}
+
+/// The non-empty names in a path, in order.
+fn segments(path: &OsStr) -> VecDeque<OsString> {
+    path.as_bytes()
+        .split(|b| *b == b'/')
+        .filter(|s| !s.is_empty())
+        .map(|s| OsString::from_vec(s.to_vec()))
+        .collect()
+}
+
+/// A folder we pass through on the way down: it must belong to root or the
+/// running user, and must not be writable by group or others unless sticky.
+fn check_passed_dir(m: &fs::Metadata, euid: u32) -> Result<(), NotifyError> {
+    if m.uid() != 0 && m.uid() != euid {
         return Err(refuse(
-            "the state folder must be an absolute path without . or ..",
+            "a folder above the state folder belongs to another user",
         ));
     }
-    let real = fs::canonicalize(dir).map_err(|_| refuse(ABOVE_UNREADABLE))?;
-    for p in dir.ancestors().skip(1).chain(real.ancestors().skip(1)) {
-        let m = fs::symlink_metadata(p).map_err(|_| refuse(ABOVE_UNREADABLE))?;
-        if m.uid() != 0 && m.uid() != euid {
-            return Err(refuse(
-                "a folder above the state folder belongs to another user",
-            ));
-        }
-        // A symlink passes once its owner is checked; its target's folders are
-        // covered by the real path's ancestors.
-        if m.file_type().is_symlink() {
+    if m.mode() & 0o022 != 0 && m.mode() & 0o1000 == 0 {
+        return Err(refuse(
+            "a folder above the state folder can be changed by other users",
+        ));
+    }
+    Ok(())
+}
+
+/// Walks to the state folder like OpenSSH's `secure_path`: from `/`, one name
+/// at a time, `lstat` on each. A symlink is read and its target spliced in
+/// front of the names still to come (a relative target starts at the folder
+/// that holds the link, an absolute one at `/`), at most 40 times. Every
+/// folder passed through, including the ones reached through links and the
+/// folder holding each link, must belong to root or the running user and not
+/// be writable by others unless sticky; so must each link's owner. Otherwise
+/// someone else could rename something in the chain and swap the state folder
+/// for another one. A sticky folder such as `/tmp` is fine because only an
+/// entry's owner can rename it there, and every entry below it is checked.
+fn check_ancestors(dir: &Path, euid: u32) -> Result<(), NotifyError> {
+    check_path_text(dir)?;
+    let mut current = PathBuf::from("/");
+    let root = fs::symlink_metadata(&current).map_err(|_| refuse(ABOVE_UNREADABLE))?;
+    check_passed_dir(&root, euid)?;
+    let mut rest = segments(dir.as_os_str());
+    let mut hops = 0u32;
+    while let Some(name) = rest.pop_front() {
+        if name == "." {
             continue;
         }
-        if !m.file_type().is_dir() {
-            return Err(refuse(ABOVE_UNREADABLE));
+        if name == ".." {
+            // Only a link's target can hold this; `current` is already real.
+            current.pop();
+            continue;
         }
-        if m.mode() & 0o022 != 0 && m.mode() & 0o1000 == 0 {
-            return Err(refuse(
-                "a folder above the state folder can be changed by other users",
-            ));
+        let next = current.join(&name);
+        let m = fs::symlink_metadata(&next).map_err(|_| refuse(ABOVE_UNREADABLE))?;
+        if m.file_type().is_symlink() {
+            if m.uid() != 0 && m.uid() != euid {
+                return Err(refuse(
+                    "a folder above the state folder belongs to another user",
+                ));
+            }
+            hops += 1;
+            if hops > MAX_LINK_HOPS {
+                return Err(refuse("too many symlinks on the way to the state folder"));
+            }
+            let target = fs::read_link(&next).map_err(|_| refuse(ABOVE_UNREADABLE))?;
+            if target.is_absolute() {
+                current = PathBuf::from("/");
+            }
+            for part in segments(target.as_os_str()).into_iter().rev() {
+                rest.push_front(part);
+            }
+        } else if m.file_type().is_dir() {
+            check_passed_dir(&m, euid)?;
+            current = next;
+        } else {
+            return Err(refuse(ABOVE_UNREADABLE));
         }
     }
     Ok(())
@@ -215,6 +282,9 @@ fn read_key(path: &Path, euid: u32) -> Result<Keys, NotifyError> {
 /// exist with mode 0700 and belong to the user running Guard Dog, and must be
 /// an absolute path whose folders above it are not open to other users.
 pub fn load_or_create(state_dir: &Path, entropy: &mut dyn Entropy) -> Result<Keys, NotifyError> {
+    // The raw text first: `link/` and `link/.` would make `symlink_metadata`
+    // follow a symlink and report a folder.
+    check_path_text(state_dir)?;
     // Nothing is written until the folder is known to be a real 0700 folder, so
     // a symlink or a loose folder is refused without touching its target.
     check_state_dir_shape(state_dir)?;
@@ -250,7 +320,11 @@ fn load_or_create_as(
         Err(_) => return Err(refuse("cannot look at the key file")),
     }
     let keys = Keys::generate(entropy)?;
-    let mut line = keys.secret_hex();
+    // 64 hex characters and a newline, in a buffer made 65 long up front, so
+    // adding the newline never reallocates (a reallocation would leave a copy
+    // of the secret behind, unwiped). `Zeroizing` wipes it on drop.
+    let mut line = Zeroizing::new(String::with_capacity(65));
+    line.push_str(&keys.secret_hex());
     line.push('\n');
     let mut suffix = [0u8; 8];
     // The key is written and synced in a private temporary file first, then
@@ -609,12 +683,24 @@ mod tests {
     fn a_folder_above_owned_by_another_user_is_refused() {
         let dir = temp_dir("anc2");
         let euid = effective_uid(&dir).unwrap();
-        let err = check_ancestors(&dir, euid.wrapping_add(1)).unwrap_err();
+        // As root every folder here is root's own, so there is no "other user".
+        if euid == 0 {
+            fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        // `dir` is the folder that "belongs to another user": the injected user
+        // id is not ours, and the only folders above `inner` that are not root's
+        // are `dir` and whatever holds it, so this never depends on TMPDIR
+        // (a root-owned sticky /tmp passes, then `dir` is refused).
+        let inner = dir.join("inner");
+        fs::create_dir(&inner).unwrap();
+        fs::set_permissions(&inner, fs::Permissions::from_mode(0o700)).unwrap();
+        let err = check_ancestors(&inner, euid.wrapping_add(1)).unwrap_err();
         assert!(
             matches!(err, NotifyError::KeyFile(m) if m.contains("belongs to another user")),
             "{err}"
         );
-        assert!(check_ancestors(&dir, euid).is_ok());
+        assert!(check_ancestors(&inner, euid).is_ok());
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -622,14 +708,123 @@ mod tests {
     fn a_relative_or_dotted_state_path_is_refused() {
         let dir = temp_dir("anc3");
         let euid = effective_uid(&dir).unwrap();
-        for bad in [Path::new("rel/state").to_path_buf(), dir.join("x/../state")] {
+        let shown = dir.display().to_string();
+        for bad in [
+            Path::new("rel/state").to_path_buf(),
+            dir.join("x/../state"),
+            dir.join("x/./state"),
+            PathBuf::from(format!("{shown}/")),
+            PathBuf::from(format!("{shown}/.")),
+            PathBuf::from(format!("{shown}/..")),
+            PathBuf::new(),
+        ] {
             let err = check_ancestors(&bad, euid).unwrap_err();
             assert!(
                 matches!(err, NotifyError::KeyFile(m) if m.contains("absolute path")),
                 "{err}"
             );
         }
+        assert!(check_path_text(Path::new("/")).is_ok());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_symlink_that_looks_like_a_folder_by_its_spelling_is_refused() {
+        use std::os::unix::fs::symlink;
+        let base = temp_dir("spell");
+        let real = base.join("real");
+        fs::create_dir(&real).unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o700)).unwrap();
+        let link = base.join("link");
+        symlink(&real, &link).unwrap();
+        let a = base.join("a");
+        fs::create_dir(&a).unwrap();
+        fs::set_permissions(&a, fs::Permissions::from_mode(0o700)).unwrap();
+        symlink(&real, a.join("link")).unwrap();
+        let shown = base.display().to_string();
+        for bad in [
+            format!("{shown}/link/"),
+            format!("{shown}/link/."),
+            format!("{shown}/a/./link"),
+        ] {
+            let err = load_or_create(Path::new(&bad), &mut crate::OsEntropy).unwrap_err();
+            assert!(
+                matches!(err, NotifyError::KeyFile(m) if m.contains("absolute path")),
+                "{bad}: {err}"
+            );
+        }
+        // Nothing was written in the folder behind the link.
+        assert_eq!(fs::read_dir(&real).unwrap().count(), 0);
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_symlink_inside_a_folder_others_can_write_is_refused() {
+        use std::os::unix::fs::symlink;
+        let base = temp_dir("l2");
+        let real = base.join("real");
+        fs::create_dir(&real).unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o700)).unwrap();
+        let state = real.join("state");
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        // A 0777 folder that is not sticky holds the link: anyone could
+        // replace `l2`, so the path through it is refused.
+        let open = base.join("open");
+        fs::create_dir(&open).unwrap();
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o777)).unwrap();
+        symlink(&real, open.join("l2")).unwrap();
+        let through = open.join("l2").join("state");
+        let err = load_or_create(&through, &mut crate::OsEntropy).unwrap_err();
+        assert!(
+            matches!(err, NotifyError::KeyFile(m) if m.contains("can be changed by other users")),
+            "{err}"
+        );
+        assert_eq!(fs::read_dir(&state).unwrap().count(), 0);
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn forty_one_symlink_hops_are_refused_and_a_short_chain_is_followed() {
+        use std::os::unix::fs::symlink;
+        let base = temp_dir("hops");
+        let euid = effective_uid(&base).unwrap();
+        let real = base.join("real");
+        fs::create_dir(&real).unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o700)).unwrap();
+        let state = real.join("state");
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        // l0 -> l1 -> ... -> l{n-1} -> real, each a relative link: n hops.
+        let chain = |prefix: &str, n: usize| {
+            for i in 0..n {
+                let target = if i + 1 == n {
+                    "real".to_owned()
+                } else {
+                    format!("{prefix}{}", i + 1)
+                };
+                symlink(target, base.join(format!("{prefix}{i}"))).unwrap();
+            }
+            base.join(format!("{prefix}0")).join("state")
+        };
+        let short = chain("s", 5);
+        assert!(check_ancestors(&short, euid).is_ok());
+        let long = chain("l", 41);
+        let err = check_ancestors(&long, euid).unwrap_err();
+        assert!(
+            matches!(err, NotifyError::KeyFile(m) if m.contains("too many symlinks")),
+            "{err}"
+        );
+        // Through the public entry point it is refused too (by us on Linux,
+        // by the kernel's own limit on macOS), and nothing is written.
+        assert!(load_or_create(&long, &mut crate::OsEntropy).is_err());
+        assert_eq!(fs::read_dir(&state).unwrap().count(), 0);
+        // A long chain under the limit is still followed (not 40: the temp
+        // folder's own path may hold a link or two, as /var does on macOS).
+        let thirty = chain("f", 30);
+        assert!(check_ancestors(&thirty, euid).is_ok());
+        fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! Deterministic by design: no Docker, no network, no clock, nothing random.
 //! `check()` reads `lab/compose.yml` the way Docker does (the file uses no YAML
 //! anchors) and returns every problem it finds, in a stable order. The checker
-//! is itself tested: `every_unsafe_change_is_caught` makes 68 named unsafe
+//! is itself tested: `every_unsafe_change_is_caught` makes 69 named unsafe
 //! edits and requires each one to be refused with its own problem code.
 
 // Test-only crate: its helper functions (not just `#[test]` ones) read files and
@@ -749,8 +749,27 @@ fn check_service(
     }
 
     // Network and limits.
-    if strings(&svc["networks"]).as_deref() != Some(&["lab".to_owned()]) {
-        add("wrong-network", "networks is not [lab]".into());
+    // Either the plain list [lab], or the map form that gives the service a
+    // fixed address inside the lab subnet: {lab: {ipv4_address: 172.29.208.N}}.
+    let plain = strings(&svc["networks"]).as_deref() == Some(&["lab".to_owned()]);
+    let fixed = svc["networks"].as_hash().is_some_and(|h| {
+        h.len() == 1
+            && svc["networks"]["lab"].as_hash().is_some_and(|inner| {
+                inner.len() == 1
+                    && svc["networks"]["lab"]["ipv4_address"]
+                        .as_str()
+                        .is_some_and(|a| {
+                            a.strip_prefix("172.29.208.")
+                                .and_then(|n| n.parse::<u8>().ok())
+                                .is_some_and(|n| (2..=254).contains(&n))
+                        })
+            })
+    });
+    if !plain && !fixed {
+        add(
+            "wrong-network",
+            "networks is not [lab] or lab with an address in the lab subnet".into(),
+        );
     }
     let mem = svc["mem_limit"].as_str();
     if !mem.and_then(mem_mib).is_some_and(|m| m >= MIN_MEM_MIB) {
@@ -1059,7 +1078,7 @@ fn describe(problems: &[Problem]) -> String {
 
 /// Unsafe edits to the real file: (text to find, text to put there, the
 /// problem code that must catch it). An empty `from` appends `to` to the end.
-const MUTATIONS: [(&str, &str, &str); 68] = [
+const MUTATIONS: [(&str, &str, &str); 69] = [
     (
         "    user: \"101:101\"\n",
         "    user: \"101:101\"\n    platform: linux/386\n",
@@ -1285,6 +1304,11 @@ const MUTATIONS: [(&str, &str, &str); 68] = [
         "    networks: [lab]\n",
         "    networks: !reset [lab]\n",
         "yaml-tag",
+    ),
+    (
+        "        ipv4_address: 172.29.208.10\n",
+        "        ipv4_address: 10.0.0.10\n",
+        "wrong-network",
     ),
     (
         "    cap_drop: [ALL]\n",

@@ -176,7 +176,8 @@ fn quote_text(text: &Untrusted<String>, cap: usize) -> String {
 
 /// A bounded single-line value of ours: not empty, at most [`LINE_CAP`]
 /// characters (checked first, so a long input is never escaped), not only
-/// whitespace, and unchanged by gd-core's terminal escape. That last rule
+/// whitespace and variation selectors (U+FE0E and U+FE0F show nothing alone),
+/// and unchanged by gd-core's terminal escape. That last rule
 /// refuses every control character, bidi and other invisible format
 /// character, the fillers and other blank-looking characters on gd-core's
 /// hidden list (U+034F, Hangul fillers, U+2800, variation selectors, tags,
@@ -185,7 +186,9 @@ fn quote_text(text: &Untrusted<String>, cap: usize) -> String {
 fn single_line_ok(text: &str) -> bool {
     !text.is_empty()
         && text.chars().count() <= LINE_CAP
-        && text.chars().any(|c| !c.is_whitespace())
+        && text
+            .chars()
+            .any(|c| !c.is_whitespace() && c != '\u{FE0E}' && c != '\u{FE0F}')
         && Untrusted::new(text).escape_for_terminal() == text
 }
 
@@ -355,7 +358,7 @@ pub fn plan_dms_noting(alerts: &[Alert], dropped_chain: usize) -> Vec<String> {
             "findings"
         };
         lines.push(format!(
-            "{dropped_chain} {noun} not sent because they are about a chain other than regtest or signet, or an unknown one; run guard-dog scan to see them."
+            "{dropped_chain} {noun} not sent because they are about a chain other than regtest or signet, or an unknown one, or a chain the node did not report; run guard-dog scan to see them."
         ));
     }
     if !lines.is_empty() {

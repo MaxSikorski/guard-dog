@@ -496,6 +496,8 @@ fn product_and_blind_spots_must_be_bounded_single_lines() {
         "a\\b",
         "   ",
         "\u{3164}\u{3164}",
+        " \u{FE0F}",
+        "\u{FE0E}",
     ];
     for text in bad.iter().copied().chain([leak("x".repeat(121))]) {
         let mut p = parts();

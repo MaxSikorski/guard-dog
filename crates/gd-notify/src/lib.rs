@@ -88,13 +88,15 @@ use relay::{PublishOutcome, RelayUrl};
 /// Plans the direct messages for `alerts` (policy, cap and summary included),
 /// wraps each for `recipient`, and publishes them to the lab relay.
 ///
-/// Before sending anything it asks the relay for the recipient's kind-10050
-/// inbox list and sends only if the newest validly signed one lists that relay;
-/// otherwise nothing is sent and the error says why.
+/// Only the chain refusals happen before touching the network: it refuses
+/// unless [`notify_allowed`] says the node's chains are regtest or signet
+/// only, and an alert about any other chain (or one the node did not report)
+/// is dropped, never sent, and counted in the summary.
 ///
-/// Refuses, before touching the network, unless [`notify_allowed`] says the
-/// node's chains are regtest or signet only. An alert about any other chain
-/// (or an unknown one) is dropped, never sent, and counted in the summary.
+/// The inbox refusals come after connecting: before sending anything it asks
+/// the relay for the recipient's kind-10050 inbox list and sends only if the
+/// newest validly signed one lists that relay; otherwise nothing is sent and
+/// the error says why.
 pub fn send_alerts(
     relay: &RelayUrl,
     sender: &Keys,

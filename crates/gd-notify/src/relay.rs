@@ -3,8 +3,10 @@
 //! In this version the relay must be `ws://<host>:7777` with `<host>` one of
 //! the regtest lab's own service names. No TLS, no redirects (a non-101 answer
 //! is an error), messages capped at 64 KiB, 5 seconds to connect and 10 in all (a relay that
-//! sends a byte at a time still runs out the same 10 seconds). The name must
-//! resolve only to the lab's own subnet, 172.29.208.0/24.
+//! sends a byte at a time still runs out the same 10 seconds). There is no DNS:
+//! each lab service has one fixed address in the lab subnet, 172.29.208.0/24
+//! (set in `lab/compose.yml`, and a test keeps the two in step), and the name
+//! is looked up in this crate's own table only.
 //!
 //! Before any event is sent, one `REQ` asks the relay for the recipient's
 //! kind-10050 direct-message inbox list on the same connection; nothing is
@@ -12,10 +14,12 @@
 //! send therefore needs a kind-10050 for the test recipient on the lab relay,
 //! which the later lab-check work will publish.
 //!
-//! The relay could hide a list or replay an old one. That can only stop a send,
-//! never redirect one, because the relay is still the allowlisted lab relay.
-//! The lookup shows the recipient's key to that relay, which the wraps' `p`
-//! tag already does.
+//! The relay could hide a list, or replay an old signed list. Hiding or a
+//! list that no longer names this relay can only stop a send, never redirect
+//! one, because the relay is still the allowlisted lab relay. But a relay that
+//! keeps an old signed list can also cause a send after the recipient removed
+//! this relay from it. The lookup also shows the recipient's key to the relay
+//! even when nothing is sent after it.
 
 use crate::NotifyError;
 use crate::encoding::hex_encode;
@@ -23,14 +27,21 @@ use crate::event::Event;
 use gd_core::Untrusted;
 use serde_json::Value;
 use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::mpsc;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 use tungstenite::protocol::WebSocketConfig;
 use tungstenite::{Error as WsError, Message};
 
-/// The only hosts a relay may have in this version: the lab's service names.
-pub const ALLOWED_HOSTS: [&str; 5] = ["bitcoind", "lnd", "cln", "strfry", "nutshell"];
+/// The only hosts a relay may have in this version: the lab's service names,
+/// each with its one fixed address on the lab network (`lab/compose.yml`).
+/// Connecting uses this table and never a name lookup.
+pub const ALLOWED_HOSTS: [(&str, Ipv4Addr); 5] = [
+    ("bitcoind", Ipv4Addr::new(172, 29, 208, 10)),
+    ("lnd", Ipv4Addr::new(172, 29, 208, 11)),
+    ("cln", Ipv4Addr::new(172, 29, 208, 12)),
+    ("strfry", Ipv4Addr::new(172, 29, 208, 13)),
+    ("nutshell", Ipv4Addr::new(172, 29, 208, 14)),
+];
 /// The only relay port.
 pub const RELAY_PORT: u16 = 7777;
 /// Largest WebSocket message, in bytes.
@@ -63,7 +74,7 @@ impl RelayUrl {
         );
         let rest = text.strip_prefix("ws://").ok_or(refused)?;
         let (host, port) = rest.split_once(':').ok_or(refused)?;
-        if port != "7777" || !ALLOWED_HOSTS.contains(&host) {
+        if port != "7777" || !ALLOWED_HOSTS.iter().any(|(name, _)| *name == host) {
             return Err(refused);
         }
         Ok(RelayUrl {
@@ -94,17 +105,6 @@ impl RelayUrl {
             loopback: true,
         }
     }
-
-    fn allow_loopback(&self) -> bool {
-        #[cfg(test)]
-        {
-            self.loopback
-        }
-        #[cfg(not(test))]
-        {
-            false
-        }
-    }
 }
 
 /// True only for the regtest lab's own subnet, 172.29.208.0/24. An IPv4
@@ -121,19 +121,23 @@ fn is_lab_address(ip: IpAddr) -> bool {
     v4.octets().get(..3) == lab.octets().get(..3)
 }
 
-/// Picks the address to connect to from what the name resolved to. Every
-/// address must be in the lab subnet (loopback too, but only when
-/// `allow_loopback`, which only tests can set); one other address refuses the
-/// name, so a tampered lookup, a search domain or mDNS cannot send a message
-/// anywhere but the lab.
-fn addresses_ok(addrs: &[SocketAddr], allow_loopback: bool) -> Result<SocketAddr, NotifyError> {
-    let all_lab = addrs
+/// The address to connect to: the relay's name looked up in the fixed table
+/// (never a resolver), and checked against the lab subnet as a second guard.
+/// Only this crate's tests can ask for the loopback address instead.
+fn relay_address(relay: &RelayUrl) -> Result<SocketAddr, NotifyError> {
+    #[cfg(test)]
+    if relay.loopback {
+        return Ok(SocketAddr::from(([127, 0, 0, 1], relay.port)));
+    }
+    let ip = ALLOWED_HOSTS
         .iter()
-        .all(|a| is_lab_address(a.ip()) || (allow_loopback && a.ip().is_loopback()));
-    match addrs.first() {
-        Some(first) if all_lab => Ok(*first),
-        _ => Err(NotifyError::Refused(
-            "the relay name does not resolve to the lab subnet (172.29.208.0/24)",
+        .find(|(name, _)| *name == relay.host)
+        .map(|(_, ip)| *ip)
+        .filter(|ip| is_lab_address(IpAddr::V4(*ip)));
+    match ip {
+        Some(ip) => Ok(SocketAddr::new(IpAddr::V4(ip), relay.port)),
+        None => Err(NotifyError::Refused(
+            "the relay is not a lab service with an address in the lab subnet (172.29.208.0/24)",
         )),
     }
 }
@@ -172,15 +176,6 @@ impl Write for DeadlineStream {
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
     }
-}
-
-fn system_resolver(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
-    Ok((host, port).to_socket_addrs()?.collect())
-}
-
-#[cfg(test)]
-fn loopback_resolver(_host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
-    Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])
 }
 
 /// The relay's answer to one event. The relay's own message is outside text.
@@ -222,11 +217,7 @@ pub(crate) fn publish(
     recipient: &[u8; 32],
     events: &[Event],
 ) -> Result<Vec<PublishOutcome>, NotifyError> {
-    #[cfg(test)]
-    if relay.loopback {
-        return publish_with(relay, recipient, events, TOTAL_TIMEOUT, &loopback_resolver);
-    }
-    publish_with(relay, recipient, events, TOTAL_TIMEOUT, &system_resolver)
+    publish_with(relay, recipient, events, TOTAL_TIMEOUT)
 }
 
 /// True if `event` is a verified kind-10050 by `recipient_hex` that has a
@@ -266,9 +257,7 @@ fn check_inbox_list(
             && let Ok(Value::Array(fields)) = serde_json::from_str::<Value>(text.as_str())
         {
             match fields.as_slice() {
-                [Value::String(kind), Value::String(sub), ..]
-                    if kind == "EOSE" && sub == INBOX_SUB =>
-                {
+                [Value::String(kind), Value::String(sub)] if kind == "EOSE" && sub == INBOX_SUB => {
                     break;
                 }
                 [Value::String(kind), Value::String(sub), ..]
@@ -297,7 +286,7 @@ fn check_inbox_list(
                 _ => {}
             }
         }
-        // Every frame but the matching EOSE counts toward the limit.
+        // Every frame but exactly ["EOSE", <our sub id>] counts toward the limit.
         *ignored += 1;
         if *ignored > MAX_SKIPPED_MESSAGES {
             return Err(NotifyError::Relay(
@@ -320,20 +309,14 @@ fn check_inbox_list(
     verdict
 }
 
-/// [`publish`] with the name lookup and the total time as parameters (tests
-/// use a fake lookup and a short deadline). The lookup runs in its own thread
-/// and counts against `total`; the address it returns is checked, and that
-/// checked address is the one connected to.
-fn publish_with<R>(
+/// [`publish`] with the total time as a parameter (tests use a short
+/// deadline). The address comes from the fixed table, never from a lookup.
+fn publish_with(
     relay: &RelayUrl,
     recipient: &[u8; 32],
     events: &[Event],
     total: Duration,
-    resolver: &R,
-) -> Result<Vec<PublishOutcome>, NotifyError>
-where
-    R: Fn(&str, u16) -> std::io::Result<Vec<SocketAddr>> + Clone + Send + 'static,
-{
+) -> Result<Vec<PublishOutcome>, NotifyError> {
     let start = Instant::now();
     let remaining = |start: Instant| -> Result<Duration, NotifyError> {
         total
@@ -341,17 +324,7 @@ where
             .filter(|d| !d.is_zero())
             .ok_or(NotifyError::Relay("timed out waiting for the relay"))
     };
-    let (tx, rx) = mpsc::channel();
-    let lookup = resolver.clone();
-    let (host, port) = (relay.host.clone(), relay.port);
-    std::thread::spawn(move || {
-        let _ = tx.send(lookup(&host, port));
-    });
-    let found = rx
-        .recv_timeout(remaining(start)?)
-        .map_err(|_| NotifyError::Relay("timed out looking up the relay"))?
-        .map_err(|_| NotifyError::Relay("cannot find the relay"))?;
-    let addr = addresses_ok(&found, relay.allow_loopback())?;
+    let addr = relay_address(relay)?;
     let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT.min(remaining(start)?))
         .map_err(|_| NotifyError::Relay("cannot connect to the relay"))?;
     let _ = stream.set_nodelay(true);
@@ -534,6 +507,12 @@ mod tests {
         Silent,
         /// Floods notices and never finishes.
         Flood,
+        /// An EOSE with a third field (not ours), then a flood of notices.
+        BadEose,
+        /// Two valid lists with the same time, one naming this relay (first).
+        TieOwnFirst,
+        /// The same two lists, the other order.
+        TieOtherFirst,
     }
 
     const T0: u64 = 1_795_000_000;
@@ -578,7 +557,11 @@ mod tests {
                 make(&recipient, T0 + 10, &own),
                 make(&recipient, T0, &other),
             ],
-            Inbox::Missing | Inbox::Closed | Inbox::Silent | Inbox::Flood => vec![],
+            Inbox::TieOwnFirst => vec![make(&recipient, T0, &own), make(&recipient, T0, &other)],
+            Inbox::TieOtherFirst => vec![make(&recipient, T0, &other), make(&recipient, T0, &own)],
+            Inbox::Missing | Inbox::Closed | Inbox::Silent | Inbox::Flood | Inbox::BadEose => {
+                vec![]
+            }
         }
     }
 
@@ -616,6 +599,14 @@ mod tests {
                         match inbox {
                             Inbox::Silent => {}
                             Inbox::Flood => {
+                                for _ in 0..250 {
+                                    let _ = ws.send(Message::text(r#"["NOTICE","x"]"#));
+                                }
+                            }
+                            Inbox::BadEose => {
+                                let _ = ws.send(Message::text(
+                                    serde_json::json!(["EOSE", sub, null]).to_string(),
+                                ));
                                 for _ in 0..250 {
                                     let _ = ws.send(Message::text(r#"["NOTICE","x"]"#));
                                 }
@@ -922,7 +913,7 @@ mod tests {
         let (_, events) = wraps(1);
         let (port, seen, handle) = fake_relay(Mode::Accept, inbox);
         let result = publish(&RelayUrl::loopback_for_test(port), &rpk(), &events);
-        if matches!(inbox, Inbox::Silent | Inbox::Flood) {
+        if matches!(inbox, Inbox::Silent | Inbox::Flood | Inbox::BadEose) {
             drop(handle);
         } else {
             handle.join().unwrap();
@@ -1012,6 +1003,36 @@ mod tests {
     }
 
     #[test]
+    fn an_eose_with_extra_fields_does_not_end_the_lookup() {
+        let (result, events) = run_with_inbox(Inbox::BadEose);
+        assert!(matches!(result, Err(NotifyError::Relay(m)) if m.contains("too many unrelated")));
+        assert_eq!(events, 0);
+    }
+
+    #[test]
+    fn lists_with_the_same_time_are_decided_by_the_lowest_id() {
+        for inbox in [Inbox::TieOwnFirst, Inbox::TieOtherFirst] {
+            let (_, events) = wraps(1);
+            let (port, seen, handle) = fake_relay(Mode::Accept, inbox);
+            let lists = inbox_events(inbox, port);
+            let own_wins = if matches!(inbox, Inbox::TieOwnFirst) {
+                lists[0].id < lists[1].id
+            } else {
+                lists[1].id < lists[0].id
+            };
+            let result = publish(&RelayUrl::loopback_for_test(port), &rpk(), &events);
+            handle.join().unwrap();
+            if own_wins {
+                assert!(result.is_ok());
+                assert_eq!(event_frames(&seen).len(), 1);
+            } else {
+                assert!(matches!(result, Err(NotifyError::Refused(m)) if m == NOT_LISTED));
+                assert_eq!(event_frames(&seen).len(), 0);
+            }
+        }
+    }
+
+    #[test]
     fn a_flood_during_the_inbox_lookup_hits_the_limit() {
         let (result, events) = run_with_inbox(Inbox::Flood);
         assert!(matches!(result, Err(NotifyError::Relay(m)) if m.contains("too many unrelated")));
@@ -1030,7 +1051,7 @@ mod tests {
             "172.29.208.254",
             "::ffff:172.29.208.9",
         ] {
-            assert!(addresses_ok(&[sock(ok)], false).is_ok(), "{ok}");
+            assert!(is_lab_address(sock(ok).ip()), "{ok}");
         }
         for bad in [
             // Other private ranges are not the lab.
@@ -1054,77 +1075,62 @@ mod tests {
             "::ffff:10.0.0.1",
             "::",
         ] {
-            assert!(addresses_ok(&[sock(bad)], false).is_err(), "{bad}");
+            assert!(!is_lab_address(sock(bad).ip()), "{bad}");
         }
-        // One address outside the lab among lab ones refuses the name.
-        assert!(addresses_ok(&[sock("172.29.208.1"), sock("10.0.0.1")], false).is_err());
-        assert!(addresses_ok(&[sock("172.29.208.1"), sock("8.8.8.8")], false).is_err());
-        assert!(addresses_ok(&[], false).is_err());
-        // Loopback only when the test hook says so.
-        assert!(addresses_ok(&[sock("127.0.0.1")], true).is_ok());
-        assert!(addresses_ok(&[sock("10.0.0.1")], true).is_err());
-        assert_eq!(
-            addresses_ok(&[sock("172.29.208.1"), sock("172.29.208.2")], false).unwrap(),
-            sock("172.29.208.1")
-        );
     }
 
     #[test]
-    fn a_name_that_resolves_to_another_private_address_is_refused_before_connecting() {
-        let (_, events) = wraps(1);
-        // Not the loopback test relay: a real relay value is judged by the subnet.
+    fn every_allowed_host_has_one_fixed_lab_address_and_no_lookup_is_used() {
         let relay = RelayUrl::parse("ws://strfry:7777").unwrap();
-        let resolver = |_: &str, _: u16| -> std::io::Result<Vec<SocketAddr>> {
-            Ok(vec![sock("192.168.1.20")])
-        };
-        let err = publish_with(&relay, &rpk(), &events, TOTAL_TIMEOUT, &resolver).unwrap_err();
-        assert!(matches!(err, NotifyError::Refused(_)), "{err}");
-    }
-
-    #[test]
-    fn a_name_that_resolves_to_a_public_address_is_refused_before_connecting() {
-        let (_, events) = wraps(1);
-        let relay = RelayUrl::loopback_for_test(1);
-        let resolver = |_: &str, _: u16| -> std::io::Result<Vec<SocketAddr>> {
-            Ok(vec![sock("93.184.216.34")])
-        };
-        // The loopback test relay may use loopback, but never a public address.
-        let err = publish_with(&relay, &rpk(), &events, TOTAL_TIMEOUT, &resolver).unwrap_err();
-        assert!(matches!(err, NotifyError::Refused(_)), "{err}");
-    }
-
-    #[test]
-    fn a_slow_lookup_counts_against_the_deadline() {
-        let (_, events) = wraps(1);
-        let relay = RelayUrl::loopback_for_test(1);
-        let resolver = |_: &str, _: u16| -> std::io::Result<Vec<SocketAddr>> {
-            thread::sleep(Duration::from_secs(5));
-            Ok(vec![sock("127.0.0.1")])
-        };
-        let start = Instant::now();
-        let err =
-            publish_with(&relay, &rpk(), &events, Duration::from_secs(1), &resolver).unwrap_err();
-        assert!(matches!(err, NotifyError::Relay(_)), "{err}");
-        assert!(
-            start.elapsed() < Duration::from_secs(3),
-            "{:?}",
-            start.elapsed()
+        assert_eq!(relay_address(&relay).unwrap(), sock("172.29.208.13"));
+        for (name, ip) in ALLOWED_HOSTS {
+            let relay = RelayUrl::parse(&format!("ws://{name}:7777")).unwrap();
+            let addr = relay_address(&relay).unwrap();
+            assert_eq!(addr, SocketAddr::new(IpAddr::V4(ip), 7777), "{name}");
+            assert!(is_lab_address(addr.ip()), "{name}");
+        }
+        // Five different names, five different addresses.
+        let mut ips: Vec<_> = ALLOWED_HOSTS.iter().map(|(_, ip)| *ip).collect();
+        ips.sort();
+        ips.dedup();
+        assert_eq!(ips.len(), ALLOWED_HOSTS.len());
+        // The loopback relay is a test-only value and never comes from parse.
+        assert_eq!(
+            relay_address(&RelayUrl::loopback_for_test(9)).unwrap(),
+            SocketAddr::from(([127, 0, 0, 1], 9))
         );
     }
 
     #[test]
-    fn the_checked_address_is_the_one_connected_to() {
-        let (_, events) = wraps(1);
-        let (port, _seen, handle) = fake_relay(Mode::Accept, Inbox::Listed);
-        let relay = RelayUrl::loopback_for_test(port);
-        let resolver = move |host: &str, p: u16| -> std::io::Result<Vec<SocketAddr>> {
-            assert_eq!(host, "strfry");
-            assert_eq!(p, port);
-            Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])
-        };
-        let out = publish_with(&relay, &rpk(), &events, TOTAL_TIMEOUT, &resolver).unwrap();
-        assert!(out[0].accepted);
-        handle.join().unwrap();
+    fn the_address_table_matches_the_lab_compose_file() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lab/compose.yml");
+        let text = std::fs::read_to_string(path).unwrap();
+        // A small line scan: a two-space service header, then the first
+        // `ipv4_address:` line before the next service header.
+        let mut found: Vec<(String, String)> = Vec::new();
+        let mut service: Option<String> = None;
+        for line in text.lines() {
+            if let Some(name) = line
+                .strip_prefix("  ")
+                .and_then(|l| l.strip_suffix(':'))
+                .filter(|n| !n.is_empty() && !n.starts_with(' ') && !n.starts_with('#'))
+            {
+                service = Some(name.to_owned());
+            } else if !line.starts_with(' ') && !line.is_empty() && !line.starts_with('#') {
+                service = None;
+            } else if let (Some(svc), Some(addr)) =
+                (&service, line.trim().strip_prefix("ipv4_address:"))
+            {
+                found.push((svc.clone(), addr.trim().to_owned()));
+            }
+        }
+        let mut want: Vec<(String, String)> = ALLOWED_HOSTS
+            .iter()
+            .map(|(n, ip)| ((*n).to_owned(), ip.to_string()))
+            .collect();
+        want.sort();
+        found.sort();
+        assert_eq!(found, want);
     }
 
     #[test]
@@ -1341,14 +1347,8 @@ mod tests {
             let port = drip_relay(after_handshake);
             let total = Duration::from_millis(1500);
             let start = Instant::now();
-            let err = publish_with(
-                &RelayUrl::loopback_for_test(port),
-                &rpk(),
-                &events,
-                total,
-                &loopback_resolver,
-            )
-            .unwrap_err();
+            let err = publish_with(&RelayUrl::loopback_for_test(port), &rpk(), &events, total)
+                .unwrap_err();
             let took = start.elapsed();
             assert!(
                 matches!(err, NotifyError::Relay(m) if m.contains("timed out")),
