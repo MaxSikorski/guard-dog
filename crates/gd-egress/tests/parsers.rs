@@ -356,6 +356,18 @@ fn tcp_gaps_and_conflicts_are_reported() {
             .errors
             .contains("tcp-gap")
     );
+    // A stream whose start was never captured (no SYN) cannot be proven complete: a gap.
+    assert!(
+        analyze_frames(&[client_tcp(101, PSH_ACK, b"hello")])
+            .errors
+            .contains("tcp-gap")
+    );
+    // Acknowledgements alone, with no data, hide nothing.
+    assert!(
+        analyze_frames(&[client_tcp(101, 0x10, b"")])
+            .errors
+            .is_empty()
+    );
     // A retransmission with different bytes: both versions are kept for scanning.
     let conflict = analyze_frames(&[
         client_tcp(100, SYN, b""),
@@ -395,6 +407,14 @@ fn dns_queries_with_extra_sections_are_rejected() {
         [("a.example.org".to_string(), 1)],
         "the question is still read"
     );
+    // The OPT record's owner name must be the root; any other name is a place to hide a value.
+    let owned = [3u8, b'a', b'b', b'c', 0, 0, 41, 0x10, 0, 0, 0, 0, 0, 0, 0];
+    let with_owner = support::Scenario::dns_query_bytes("a.example.org", 7, 1, Some(&owned));
+    assert!(pcap::parse_dns(&with_owner).unwrap().unexpected_section);
+    let pointer_owner = [0xC0u8, 12, 0, 41, 0x10, 0, 0, 0, 0, 0, 0, 0];
+    let with_pointer =
+        support::Scenario::dns_query_bytes("a.example.org", 7, 1, Some(&pointer_owner));
+    assert!(pcap::parse_dns(&with_pointer).unwrap().unexpected_section);
     // Any answer or authority record, or two additional records, in a query.
     let record = [0u8, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0];
     for (an, ns, ar) in [(1u8, 0u8, 0u8), (0, 1, 0), (0, 0, 2)] {
@@ -478,4 +498,44 @@ fn every_dns_question_is_read() {
         &ipv4([127, 0, 0, 1], [127, 0, 0, 1], 17, &udp(50_000, 5353, &q)),
     );
     assert_eq!(analyze_frames(&[frame]).dns_questions.len(), 3);
+}
+
+#[test]
+fn a_response_sent_to_the_resolver_is_an_error_and_its_questions_are_still_read() {
+    let mut message = support::Scenario::dns_query_bytes("qr.example.org", 9, 1, None);
+    message[2] = 0x81;
+    message[3] = 0x80;
+    let frame = sll2(
+        LO,
+        0x0800,
+        0,
+        &ipv4(
+            [127, 0, 0, 1],
+            [127, 0, 0, 1],
+            17,
+            &udp(50_010, 5353, &message),
+        ),
+    );
+    let wire = analyze_frames(&[frame]);
+    assert!(
+        wire.errors.contains("dns-client-response"),
+        "{:?}",
+        wire.errors
+    );
+    let names: Vec<&str> = wire.dns_questions.iter().map(|q| q.name.as_str()).collect();
+    assert_eq!(names, ["qr.example.org"]);
+    // The twin: the same message as a query is no error.
+    let query = support::Scenario::dns_query_bytes("qr.example.org", 9, 1, None);
+    let frame = sll2(
+        LO,
+        0x0800,
+        0,
+        &ipv4(
+            [127, 0, 0, 1],
+            [127, 0, 0, 1],
+            17,
+            &udp(50_010, 5353, &query),
+        ),
+    );
+    assert!(analyze_frames(&[frame]).errors.is_empty());
 }

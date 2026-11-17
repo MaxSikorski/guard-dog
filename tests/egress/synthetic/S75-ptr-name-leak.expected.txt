@@ -1,0 +1,6 @@
+Judge C (egress capture): FAIL
+control: dns ok, https ok, wire ok, blocked-path ok
+destinations: 1 unlisted, 0 allowlisted
+F1 unlisted-destination dns <canary:ipv4>
+F2 canary-leaked ipv4 in dns-name to dns
+F2 canary-leaked ipv4 in wire to dns
