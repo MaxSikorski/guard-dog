@@ -7,6 +7,7 @@
 
 mod fact;
 mod json;
+pub mod privilege;
 mod untrusted;
 mod view;
 
