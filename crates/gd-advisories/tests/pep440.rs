@@ -125,7 +125,7 @@ fn service_version(setup: &str, id: &str) -> String {
                 && r.fields.get("id").map(String::as_str) == Some(id)
         })
         .and_then(|r| r.fields.get("version").cloned())
-        .unwrap_or_else(|| panic!("no {id} in setup {setup}"))
+        .unwrap_or_else(|| panic!("a fixture service row is missing"))
 }
 
 fn expected_version(setup: &str, advisory: &str) -> String {
@@ -137,7 +137,7 @@ fn expected_version(setup: &str, advisory: &str) -> String {
                 && r.fields.get("advisory").map(String::as_str) == Some(advisory)
         })
         .and_then(|r| r.fields.get("version").cloned())
-        .unwrap_or_else(|| panic!("no expectation for {setup} / {advisory}"))
+        .unwrap_or_else(|| panic!("a fixture expectation row is missing"))
 }
 
 fn corpus_record(id: &str) -> Advisory {
@@ -153,7 +153,7 @@ fn design_examples_order_as_stated() {
     assert!(p("1.0") == p("1.0.0"));
     let chain = ["1.0.dev1", "1.0a1", "1.0b1", "1.0rc1", "1.0", "1.0.post1"];
     for w in chain.windows(2) {
-        assert_eq!(order(w[0], w[1]), Ordering::Less, "{} < {}", w[0], w[1]);
+        assert_eq!(order(w[0], w[1]), Ordering::Less);
         assert_eq!(order(w[1], w[0]), Ordering::Greater);
     }
     assert_eq!(order("1.0.post1.dev1", "1.0.post1"), Ordering::Less);
@@ -401,7 +401,7 @@ fn refused_inputs() {
         "1.0a1+",
         "1.0rc1.",
     ] {
-        assert_eq!(Pep440.parse(bad), Err(VersionError::Malformed), "{bad:?}");
+        assert_eq!(Pep440.parse(bad), Err(VersionError::Malformed));
     }
 }
 
@@ -652,7 +652,7 @@ fn cashu_boundaries_follow_pep440() {
         "0.17.0.post3",
         "V0.18.0RC2",
     ] {
-        assert_eq!(at(v), "in-range", "{v}");
+        assert_eq!(at(v), "in-range");
     }
     // At or above the fix.
     for v in [
@@ -663,7 +663,7 @@ fn cashu_boundaries_follow_pep440() {
         "1!0.1",
         "0.21.0",
     ] {
-        assert_eq!(at(v), "out-of-range", "{v}");
+        assert_eq!(at(v), "out-of-range");
     }
     // A local build of the fixed release may or may not carry the fix.
     assert_eq!(
@@ -1011,11 +1011,11 @@ proptest! {
     fn spelled_versions_normalize_and_order_like_the_model(a in spec(), b in spec()) {
         let (ta, tb) = (a.text(), b.text());
         let (pa, pb) = (Pep440.parse(&ta), Pep440.parse(&tb));
-        prop_assert!(pa.is_ok(), "{:?}", ta);
-        prop_assert!(pb.is_ok(), "{:?}", tb);
+        prop_assert!(pa.is_ok());
+        prop_assert!(pb.is_ok());
         let (pa, pb) = (pa.unwrap(), pb.unwrap());
-        prop_assert_eq!(pa.to_string(), a.canonical(), "{:?}", ta);
-        prop_assert_eq!(pa.cmp(&pb), a.key().cmp(&b.key()), "{:?} vs {:?}", ta, tb);
+        prop_assert_eq!(pa.to_string(), a.canonical());
+        prop_assert_eq!(pa.cmp(&pb), a.key().cmp(&b.key()));
         prop_assert_eq!(pa == pb, a.key() == b.key());
     }
 
@@ -1070,13 +1070,17 @@ proptest! {
 fn pep_check<S: VersionScheme>(scheme: &S) -> Result<(), String> {
     let lt = |a: &str, b: &str| -> Result<(), String> {
         let (pa, pb) = (
-            scheme.parse(a).map_err(|e| format!("{a}: {e}"))?,
-            scheme.parse(b).map_err(|e| format!("{b}: {e}"))?,
+            scheme
+                .parse(a)
+                .map_err(|e| format!("a test input should parse: {e}"))?,
+            scheme
+                .parse(b)
+                .map_err(|e| format!("a test input should parse: {e}"))?,
         );
         if pa < pb {
             Ok(())
         } else {
-            Err(format!("expected {a} < {b}"))
+            Err("expected a strict ordering".to_string())
         }
     };
     lt("1.0.dev1", "1.0a1")?;
@@ -1144,7 +1148,7 @@ fn mutants_dropping_an_epoch_local_post_or_dev_are_caught() {
     assert_eq!(pep_check(&Pep440), Ok(()));
     for drop in [Part::Epoch, Part::Local, Part::Post, Part::Dev] {
         let err = pep_check(&Mutant(drop)).unwrap_err();
-        assert!(err.starts_with("expected"), "{drop:?}: {err}");
+        assert!(err.starts_with("expected"), "a mutant check failed: {err}");
     }
     // The rebuild itself is faithful when nothing is dropped from a plain version.
     assert_eq!(without(&p("1.0"), Part::Epoch), "1.0");
@@ -1207,7 +1211,7 @@ fn a_local_label_on_a_boundary_is_unreadable() {
         ),
     ] {
         for installed in ["1.0", "1.5", "2.0"] {
-            assert_eq!(reason(&ev(events, installed)), want, "{events} {installed}");
+            assert_eq!(reason(&ev(events, installed)), want);
         }
     }
     // Without a label the same shapes are read.
@@ -1231,11 +1235,7 @@ fn unicode_whitespace_and_case_folding_tricks_are_refused() {
         "1.0+\u{212a}",
         "1.0+a\u{212a}",
     ] {
-        assert_eq!(
-            Pep440.parse(s).err(),
-            Some(VersionError::Malformed),
-            "{s:?}"
-        );
+        assert_eq!(Pep440.parse(s).err(), Some(VersionError::Malformed),);
     }
     // Plain ASCII whitespace is still trimmed.
     assert!(Pep440.parse(" \t1.0\r\n").is_ok());
@@ -1254,7 +1254,6 @@ fn a_local_build_is_an_interval_above_its_public_release() {
         assert_eq!(
             reason(&at_public(events)),
             UnknownReason::CandidateIsAnInterval,
-            "{events}"
         );
     }
     // An interval wholly inside a range is a hit; wholly outside is a miss.
@@ -1325,11 +1324,7 @@ fn a_local_build_at_a_dev0_release_is_never_a_miss_at_its_own_release() {
         ),
         ("1.0+x", r#"[{"introduced":"0"},{"fixed":"1.0.dev0"}]"#),
     ] {
-        assert_eq!(
-            reason(&ev(events, installed)),
-            unknown,
-            "{installed} {events}"
-        );
+        assert_eq!(reason(&ev(events, installed)), unknown,);
     }
     assert_eq!(
         kind(&ev(r#"[{"introduced":"0"},{"fixed":"0.9"}]"#, "1.0.dev0+x")),
@@ -1360,7 +1355,7 @@ fn a_dev_local_build_is_an_interval_over_its_dev_line() {
         r#"[{"introduced":"0"},{"fixed":"1.0.dev0"}]"#,
         r#"[{"introduced":"0"},{"last_affected":"1.0.dev2"}]"#,
     ] {
-        assert_eq!(reason(&ev(events, "1.0.dev3+x")), unknown, "{events}");
+        assert_eq!(reason(&ev(events, "1.0.dev3+x")), unknown);
     }
     assert_eq!(
         kind(&ev(

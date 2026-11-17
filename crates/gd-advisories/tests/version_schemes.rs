@@ -38,13 +38,13 @@ fn root() -> PathBuf {
 fn cln(s: &str) -> ClnVersion {
     Calver
         .parse(s)
-        .unwrap_or_else(|e| panic!("{s:?} should parse: {e}"))
+        .unwrap_or_else(|e| panic!("a calver test input should parse: {e}"))
 }
 
 fn tag(s: &str) -> TagVersion {
     GitDescribe
         .parse(s)
-        .unwrap_or_else(|e| panic!("{s:?} should parse: {e}"))
+        .unwrap_or_else(|e| panic!("a git-describe test input should parse: {e}"))
 }
 
 fn order_cln(a: &str, b: &str) -> Ordering {
@@ -133,7 +133,7 @@ fn service_version(setup: &str, id: &str) -> String {
                 && r.fields.get("id").map(String::as_str) == Some(id)
         })
         .and_then(|r| r.fields.get("version").cloned())
-        .unwrap_or_else(|| panic!("no {id} in setup {setup}"))
+        .unwrap_or_else(|| panic!("a fixture service row is missing"))
 }
 
 fn expected_version(setup: &str, advisory: &str) -> String {
@@ -145,7 +145,7 @@ fn expected_version(setup: &str, advisory: &str) -> String {
                 && r.fields.get("advisory").map(String::as_str) == Some(advisory)
         })
         .and_then(|r| r.fields.get("version").cloned())
-        .unwrap_or_else(|| panic!("no expectation for {setup} / {advisory}"))
+        .unwrap_or_else(|| panic!("a fixture expectation row is missing"))
 }
 
 fn corpus_record(id: &str) -> (Advisory, Value) {
@@ -252,10 +252,10 @@ fn cln_legacy_forms() {
         "v0.0.1",
         "0.7.3",
     ] {
-        assert!(cln(ok).is_legacy(), "{ok}");
+        assert!(cln(ok).is_legacy());
     }
     for ok in ["22.11", "v24.11.1", "00.01", "99.12", "26.06rc1"] {
-        assert!(!cln(ok).is_legacy(), "{ok}");
+        assert!(!cln(ok).is_legacy());
     }
     assert_eq!(order_cln("v0.11.0rc2", "v0.11.0"), Ordering::Less);
     assert_eq!(order_cln("v0.11.0rc2", "v0.11.0rc10"), Ordering::Less);
@@ -280,7 +280,7 @@ fn cln_accepts_the_stated_shapes() {
         "26.06rc0",
         "24.11.18446744073709551616",
     ] {
-        assert!(Calver.parse(ok).is_ok(), "{ok}");
+        assert!(Calver.parse(ok).is_ok());
     }
 }
 
@@ -324,7 +324,7 @@ fn cln_refuses_everything_else() {
         "24.11-dirty",
         "v24.11-modded",
     ] {
-        assert_eq!(Calver.parse(bad), Err(VersionError::Malformed), "{bad:?}");
+        assert_eq!(Calver.parse(bad), Err(VersionError::Malformed));
     }
 }
 
@@ -360,9 +360,9 @@ fn cln_display_is_the_canonical_form() {
         ("00.01", "00.01.0"),
     ] {
         let v = cln(raw);
-        assert_eq!(v.to_string(), canonical, "{raw}");
-        assert_eq!(cln(canonical), v, "{raw}");
-        assert_eq!(cln(canonical).to_string(), canonical, "{raw}");
+        assert_eq!(v.to_string(), canonical);
+        assert_eq!(cln(canonical), v);
+        assert_eq!(cln(canonical).to_string(), canonical);
     }
 }
 
@@ -394,11 +394,7 @@ fn cln_a_describe_or_modded_listed_version_is_never_a_miss() {
     for listed in ["v24.11-0-gabc1234", "v24.11-modded", "v24.11-5-gabc1234"] {
         let adv = git_advisory(json!([]), json!([listed]));
         let e = evaluate_entry(&Calver, &adv, 0, Some("v24.11"));
-        assert_eq!(
-            reason(&e),
-            UnknownReason::UnreadableListedVersion,
-            "{listed}"
-        );
+        assert_eq!(reason(&e), UnknownReason::UnreadableListedVersion,);
     }
     // A readable listed tag that differs is still a clean miss.
     let adv = git_advisory(json!([]), json!(["v24.11.1", "v25.02"]));
@@ -492,8 +488,8 @@ fn cln_describe_hash_rules() {
         "v24.11-1-gabcdef0-modded-modded".to_string(),
         "v24.11-1-gabcdef0-dirty-modded".to_string(),
     ] {
-        assert!(Calver.parse_describe(&bad).is_err(), "{bad}");
-        assert!(Calver.candidate(&bad).is_err(), "{bad}");
+        assert!(Calver.parse_describe(&bad).is_err());
+        assert!(Calver.candidate(&bad).is_err());
     }
 }
 
@@ -506,7 +502,7 @@ fn cln_parse_never_reads_a_describe_string_as_a_version() {
         "v24.11-12-gabc1234-modded",
         "v24.08.2-modded",
     ] {
-        assert_eq!(Calver.parse(s), Err(VersionError::Malformed), "{s}");
+        assert_eq!(Calver.parse(s), Err(VersionError::Malformed));
     }
 }
 
@@ -532,11 +528,7 @@ fn cln_candidate_exact_between_or_nothing() {
         "v24.11-dirty",
         "v24.11-12-gabc1234-dirty",
     ] {
-        assert_eq!(
-            Calver.candidate(dirty),
-            Err(VersionError::Malformed),
-            "{dirty}"
-        );
+        assert_eq!(Calver.candidate(dirty), Err(VersionError::Malformed),);
     }
     assert!(Calver.candidate("v24.13-1-gabc1234").is_err());
 }
@@ -603,11 +595,7 @@ fn describe_tag_refuses_what_semver_refuses() {
         "1.0.0-a_b",
         "1.0.0++a",
     ] {
-        assert_eq!(
-            GitDescribe.parse(bad),
-            Err(VersionError::Malformed),
-            "{bad:?}"
-        );
+        assert_eq!(GitDescribe.parse(bad), Err(VersionError::Malformed),);
     }
     // Numeric prerelease identifiers forbid leading zeros; build metadata allows them.
     assert!(GitDescribe.parse("1.0.0+001").is_ok());
@@ -636,7 +624,7 @@ fn describe_strict_parse_never_reads_a_description_as_a_tag() {
         "1.1.2-148-g",
         "1.1.2-007-g4cd3cf6",
     ] {
-        assert_eq!(GitDescribe.parse(s), Err(VersionError::Malformed), "{s}");
+        assert_eq!(GitDescribe.parse(s), Err(VersionError::Malformed));
     }
     // A plain prerelease tag is still a tag.
     assert!(GitDescribe.parse("1.2.0-rc.1").is_ok());
@@ -696,7 +684,7 @@ fn describe_parse_from_the_right() {
         "1.1.2-148-g4cd3cf6-dirty-dirty",
         "",
     ] {
-        assert!(GitDescribe.parse_describe(bad).is_err(), "{bad}");
+        assert!(GitDescribe.parse_describe(bad).is_err());
     }
     assert!(
         GitDescribe
@@ -736,11 +724,7 @@ fn describe_candidate_is_an_interval_or_nothing() {
         "garbage",
         "",
     ] {
-        assert_eq!(
-            GitDescribe.candidate(bad),
-            Err(VersionError::Malformed),
-            "{bad:?}"
-        );
+        assert_eq!(GitDescribe.candidate(bad), Err(VersionError::Malformed),);
     }
     assert_eq!(
         GitDescribe
@@ -846,11 +830,7 @@ fn describe_dirty_or_unreadable_never_clears() {
         "not a version",
     ] {
         let e = describe_ev(r, installed);
-        assert_eq!(
-            reason(&e),
-            UnknownReason::InstalledVersionUnparseable,
-            "{installed}"
-        );
+        assert_eq!(reason(&e), UnknownReason::InstalledVersionUnparseable,);
     }
     let adv = git_advisory(
         json!([eco(json!([{"introduced": "0"}, {"fixed": "1.0.4"}]))]),
@@ -923,10 +903,10 @@ fn cln_ranges_use_calendar_and_legacy_order() {
         "v26.06.7rc1",
         "26.06.8rc2",
     ] {
-        assert_eq!(kind(&cln_ev(r, inside)), "in-range", "{inside}");
+        assert_eq!(kind(&cln_ev(r, inside)), "in-range");
     }
     for outside in ["26.06.8", "26.06.9", "26.09", "v27.01", "26.06.10"] {
-        assert_eq!(kind(&cln_ev(r, outside)), "out-of-range", "{outside}");
+        assert_eq!(kind(&cln_ev(r, outside)), "out-of-range");
     }
     // A described build is an interval, which only settles when nothing can open
     // or stay open above its tag.
@@ -1141,7 +1121,7 @@ proptest! {
     fn cln_order_follows_the_model(a in cln_spec(), b in cln_spec()) {
         let (ta, tb) = (a.text(), b.text());
         let (pa, pb) = (Calver.parse(&ta).unwrap(), Calver.parse(&tb).unwrap());
-        prop_assert_eq!(pa.cmp(&pb), a.key().cmp(&b.key()), "{} vs {}", ta, tb);
+        prop_assert_eq!(pa.cmp(&pb), a.key().cmp(&b.key()));
         prop_assert_eq!(pa == pb, a.key() == b.key());
     }
 
@@ -1275,7 +1255,7 @@ proptest! {
         // A generated hyphenated identifier can look like a description; skip those.
         prop_assume!(GitDescribe.parse(&ta).is_ok() && GitDescribe.parse(&tb).is_ok());
         let (pa, pb) = (tag(&ta), tag(&tb));
-        prop_assert_eq!(pa.cmp(&pb), a.key().cmp(&b.key()), "{} vs {}", ta, tb);
+        prop_assert_eq!(pa.cmp(&pb), a.key().cmp(&b.key()));
         prop_assert_eq!(pa == pb, a.key() == b.key());
         prop_assert_eq!(pa.cmp(&pb), pb.cmp(&pa).reverse());
     }
@@ -1303,7 +1283,7 @@ proptest! {
         prop_assert_eq!(d.commit.unwrap().hash, hash);
         match GitDescribe.candidate(&s) {
             Ok(Candidate::Between { low, high: None }) => prop_assert!(!dirty && low == tag(&t)),
-            other => prop_assert!(dirty && other.is_err(), "{:?}", other),
+            other => prop_assert!(dirty && other.is_err()),
         }
     }
 
@@ -1413,13 +1393,17 @@ fn mutant_describe_as_semver_is_caught() {
 fn cln_legacy_check<S: VersionScheme>(scheme: &S) -> Result<(), String> {
     let lt = |a: &str, b: &str| -> Result<(), String> {
         let (pa, pb) = (
-            scheme.parse(a).map_err(|e| format!("{a}: {e}"))?,
-            scheme.parse(b).map_err(|e| format!("{b}: {e}"))?,
+            scheme
+                .parse(a)
+                .map_err(|e| format!("a test input should parse: {e}"))?,
+            scheme
+                .parse(b)
+                .map_err(|e| format!("a test input should parse: {e}"))?,
         );
         if pa < pb {
             Ok(())
         } else {
-            Err(format!("expected {a} < {b}"))
+            Err("expected a strict ordering".to_string())
         }
     };
     lt("v0.10.2", "v0.12.1")?;
@@ -1497,10 +1481,7 @@ impl VersionScheme for Lexical {
 fn mutant_cln_legacy_misordered_is_caught() {
     assert_eq!(cln_legacy_check(&Calver), Ok(()));
     let err = cln_legacy_check(&LegacyAbove).unwrap_err();
-    assert!(
-        err.contains("v0.12.1 < v22.11") || err.contains("v0.10.2"),
-        "{err}"
-    );
+    assert!(err.starts_with("expected"), "{err}");
     let err = cln_legacy_check(&Lexical).unwrap_err();
     assert!(err.starts_with("expected"), "{err}");
 }
@@ -1540,14 +1521,14 @@ fn describe_tags_are_read_by_the_semver_scheme() {
         let via_describe = GitDescribe.parse(s).unwrap();
         let via_semver = SemVer.parse(s).unwrap();
         // Same type, same order, and the identity is the raw spelling.
-        assert_eq!(via_describe.cmp(&via_semver), Ordering::Equal, "{s}");
+        assert_eq!(via_describe.cmp(&via_semver), Ordering::Equal);
         assert_eq!(via_describe.identity(), s);
         assert_eq!(via_describe.raw(), s);
     }
     // What SemVer refuses, the tag reader refuses (leading zeros, a `v`).
     for s in ["1.01.2", "v1.1.2", "1.1", "1.1.2.3"] {
-        assert!(GitDescribe.parse(s).is_err(), "{s}");
-        assert!(SemVer.parse(s).is_err(), "{s}");
+        assert!(GitDescribe.parse(s).is_err());
+        assert!(SemVer.parse(s).is_err());
     }
 }
 
@@ -1565,12 +1546,8 @@ fn cln_a_modded_value_through_the_evaluator_is_never_out_of_range() {
             r#"[{"introduced":"24.11"},{"fixed":"25.02"}]"#,
         ] {
             let e = cln_ev(r, installed);
-            assert_eq!(
-                reason(&e),
-                UnknownReason::InstalledVersionUnparseable,
-                "{installed} against {r}"
-            );
-            assert_ne!(kind(&e), "out-of-range", "{installed} against {r}");
+            assert_eq!(reason(&e), UnknownReason::InstalledVersionUnparseable,);
+            assert_ne!(kind(&e), "out-of-range");
         }
     }
 }
@@ -1649,12 +1626,11 @@ fn describe_refuses_the_broken_marker_and_markers_on_either_side_of_metadata() {
         assert_eq!(
             reason(&cln_ev(r#"[{"introduced":"0"},{"fixed":"24.11"}]"#, s)),
             UnknownReason::InstalledVersionUnparseable,
-            "{s}"
         );
     }
     // Still accepted.
     for s in ["1.0.0+a", "1.0.0-alpha.1+b.2"] {
-        assert!(GitDescribe.parse(s).is_ok(), "{s}");
+        assert!(GitDescribe.parse(s).is_ok());
     }
     let d = GitDescribe
         .parse_describe("1.1.2-148-g4cd3cf6-dirty")
@@ -1665,7 +1641,7 @@ fn describe_refuses_the_broken_marker_and_markers_on_either_side_of_metadata() {
 #[test]
 fn cln_legacy_four_part_and_two_part_tags_are_refused_not_cleared() {
     for s in ["v0.7.2.1", "0.7.2.1", "v0.6", "0.6"] {
-        assert!(Calver.parse(s).is_err(), "{s}");
+        assert!(Calver.parse(s).is_err());
     }
     let adv = git_advisory(json!([]), json!(["v0.7.2.1"]));
     assert_eq!(
