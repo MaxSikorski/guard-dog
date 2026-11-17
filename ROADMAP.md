@@ -19,8 +19,8 @@ The order can change as we learn.
 
 What you get from this phase is nothing to run yet, but a way to trust what comes next. Here's where each piece is today:
 
-- **Done:** one command builds and tests everything, from a pinned Rust toolchain, with only permissively licensed dependencies.
-- **Running today: Judge D.** It feeds a corpus of injection attacks (fake changelogs, relay descriptions, banners) through Guard Dog on every pull request, and fails if any of them makes Guard Dog take an action or step outside its fixed set of answers. It's a tripwire, not proof.
+- **Done:** one command builds and tests everything, from a pinned Rust toolchain, with only permissively licensed Rust dependencies.
+- **Running today: Judge D.** It feeds a corpus of injection attacks (fake changelogs, relay descriptions, banners) through Guard Dog on every pull request, and fails if any of them gets past the two renderers that show untrusted text (terminal and HTML). The checks that Guard Dog takes no action and puts no untrusted text in a privileged prompt are counted but not yet applicable; they need code from later phases. It's a tripwire, not proof.
 - **In progress: Judge B.** It checks advisory matching against real historical advisories, with the expected answers written down before any matcher exists. The corpus of 23 past advisories is in, and so are the expected answers for the lab's two setups (#17). The matcher itself comes in the next phase, so today it scores zero by design. More setups come once Judge A lands.
 - **In progress: Judge A.** It will check Guard Dog against snapshots of real setups, with every secret and identifier replaced by made-up values. The recorder is written, but it still has open review findings and isn't merged yet.
 - **In progress: Judge C.** It records outbound network activity and fails on any connection that isn't on the expected list, or that carries one of the planted test secrets, even encoded (on synthetic captures so far). Part 1, the checker, is merged and tested on 61 synthetic captures (#21). Next: decoding compressed bodies, then running it on real captures from the lab.
