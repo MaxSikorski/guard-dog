@@ -976,7 +976,7 @@ fn every_fixture_and_catalog_version_for_cln_and_strfry_parses() {
     for setup in ["lab-old-synthetic", "lab-regtest"] {
         let v = service_version(setup, "core-lightning");
         assert!(Calver.parse(&v).is_ok(), "cln fixture version in {setup}");
-        assert_eq!(Calver.candidate(&v).unwrap(), Candidate::Exact(cln(&v)));
+        assert!(Calver.candidate(&v).unwrap() == Candidate::Exact(cln(&v)));
     }
     let v = service_version("lab-regtest", "strfry");
     assert!(v == FIXTURE_STRFRY, "strfry fixture version");
@@ -1704,4 +1704,42 @@ fn strfry_dirty_marker_inside_the_residual_tag_is_refused() {
             installed.len()
         );
     }
+}
+
+#[test]
+fn strfry_nested_describe_fragment_in_the_residual_tag_is_refused() {
+    let r = r#"[{"introduced":"0"},{"fixed":"2.0.0"}]"#;
+    for installed in [
+        "2.0.0+vendor-1-g-1-gabcd",
+        "2.0.0-1-g-1-gabcd",
+        "2.0.0-1-gabcd-1-gabcd",
+        "2.0.0+vendor-1-gab.x-1-gabcd",
+    ] {
+        assert!(
+            reason(&describe_ev(r, installed)) == UnknownReason::InstalledVersionUnparseable,
+            "strfry nested describe fragment, case {}",
+            installed.len()
+        );
+    }
+}
+
+#[test]
+fn strfry_tag_budget_counts_the_whole_version() {
+    let dots = |s: &str| vec![s; 33].join(".");
+    let listed = format!("1.0.0-{}+{}", dots("a"), dots("b"));
+    assert!(listed.len() <= 256);
+    let adv = git_advisory(json!([]), json!([listed]));
+    assert!(
+        reason(&evaluate_entry(&GitDescribe, &adv, 0, Some("2.0.0")))
+            == UnknownReason::UnreadableListedVersion
+    );
+    // Installed and boundary sides use the same budget.
+    assert!(GitDescribe.parse(&listed).is_err());
+    assert!(GitDescribe.parse_describe(&listed).is_err());
+    let within = format!(
+        "1.0.0-{}+{}",
+        vec!["a"; 30].join("."),
+        vec!["b"; 30].join(".")
+    );
+    assert!(GitDescribe.parse(&within).is_ok());
 }

@@ -12,6 +12,7 @@
 
 use std::fmt;
 
+use super::num::MAX_COMPONENTS;
 use super::semver::{SemVer, SemVerVersion, check_length};
 use super::{Candidate, VersionError, VersionScheme};
 
@@ -122,6 +123,24 @@ fn holds_a_description(s: &str) -> bool {
     })
 }
 
+/// Whether `s` holds a describe fragment `-<digits>-g<hex>*` that ends the text
+/// or is followed by `.`, `+` or `-`, even with an empty or short hash. After
+/// the outer description is stripped, none may remain in the tag.
+fn holds_describe_fragment(s: &str) -> bool {
+    s.match_indices('-').any(|(i, _)| {
+        let after = s.get(i + 1..).unwrap_or("");
+        let rest = after.trim_start_matches(|c: char| c.is_ascii_digit());
+        if rest.len() == after.len() {
+            return false;
+        }
+        let Some(hash_and_more) = rest.strip_prefix("-g") else {
+            return false;
+        };
+        let tail = hash_and_more.trim_start_matches(|c: char| matches!(c, '0'..='9' | 'a'..='f'));
+        tail.is_empty() || tail.starts_with(['.', '+', '-'])
+    })
+}
+
 /// Reads a strfry tag with the SemVer scheme: strict `X.Y.Z[-pre][+meta]`, no
 /// leading `v` (strfry's own tags have none, so a `v1.1.2` tag is refused until
 /// a real strfry record shows otherwise). A description hidden inside the
@@ -130,19 +149,34 @@ fn holds_a_description(s: &str) -> bool {
 /// prerelease.
 fn parse_tag(raw: &str) -> Result<TagVersion, VersionError> {
     let (head, meta) = raw.split_once('+').map_or((raw, ""), |(h, m)| (h, m));
-    let marked = |part: &str| ["-modded", "-broken"].iter().any(|m| part.ends_with(m));
-    let dirty_marked = |part: &str| part.ends_with("-dirty");
+    let marked = |part: &str| {
+        ["-modded", "-broken", "-dirty"]
+            .iter()
+            .any(|m| part.ends_with(m))
+    };
     if holds_a_description(raw)
-        || dirty_marked(raw)
-        || dirty_marked(head)
-        || dirty_marked(meta)
+        || holds_describe_fragment(raw)
         || marked(raw)
         || marked(head)
         || marked(meta)
     {
         return Err(VersionError::Malformed);
     }
-    SemVer.parse(raw)
+    let version = SemVer.parse(raw)?;
+    // One budget for the whole version: release, prerelease and metadata
+    // components together (the same total PEP 440 enforces).
+    let pre = head
+        .split_once('-')
+        .map_or(0, |(_, p)| p.split('.').count());
+    let build = if raw.contains('+') {
+        meta.split('.').count()
+    } else {
+        0
+    };
+    if 3 + pre + build > MAX_COMPONENTS {
+        return Err(VersionError::TooLong);
+    }
+    Ok(version)
 }
 
 /// strfry's version scheme: a SemVer tag plus separate commit evidence.

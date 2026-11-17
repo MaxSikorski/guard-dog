@@ -39,7 +39,7 @@ fn root() -> PathBuf {
 fn p(s: &str) -> Pep440Version {
     Pep440
         .parse(s)
-        .unwrap_or_else(|e| panic!("{s:?} should parse: {e}"))
+        .unwrap_or_else(|e| panic!("a test input should parse: {e}"))
 }
 
 fn order(a: &str, b: &str) -> Ordering {
@@ -494,6 +494,7 @@ fn parse_and_order_agree_with_the_recorded_packaging_vectors() {
 
     let mut readable = 0usize;
     let mut refused = 0usize;
+    let mut parsed: Vec<Option<Pep440Version>> = Vec::with_capacity(inputs.len());
     for (idx, (raw, n)) in inputs.iter().zip(normalized).enumerate() {
         match n.as_str() {
             Some(expected) => {
@@ -505,6 +506,7 @@ fn parse_and_order_agree_with_the_recorded_packaging_vectors() {
                     v.to_string() == expected,
                     "vector {idx} normalizes differently"
                 );
+                parsed.push(Some(v));
             }
             None => {
                 refused += 1;
@@ -513,6 +515,7 @@ fn parse_and_order_agree_with_the_recorded_packaging_vectors() {
                     Pep440.candidate(raw).is_err(),
                     "vector {idx} should be refused"
                 );
+                parsed.push(None);
             }
         }
     }
@@ -531,9 +534,11 @@ fn parse_and_order_agree_with_the_recorded_packaging_vectors() {
             0 => Ordering::Equal,
             _ => Ordering::Greater,
         };
-        let (a, b) = (p(inputs[i]), p(inputs[j]));
-        assert!(a.cmp(&b) == want, "pair {pair_idx} order");
-        assert!(b.cmp(&a) == want.reverse(), "pair {pair_idx} reverse order");
+        let (Some(Some(a)), Some(Some(b))) = (parsed.get(i), parsed.get(j)) else {
+            panic!("pair #{pair_idx} refers to a refused or missing input");
+        };
+        assert!(a.cmp(b) == want, "pair {pair_idx} order");
+        assert!(b.cmp(a) == want.reverse(), "pair {pair_idx} reverse order");
         assert!(
             (a == b) == (want == Ordering::Equal),
             "pair {pair_idx} equality"

@@ -333,9 +333,6 @@ fn parse_version(raw: &str) -> Result<Pep440Version, VersionError> {
             break;
         }
     }
-    if release.len() > MAX_COMPONENTS {
-        return Err(VersionError::TooLong);
-    }
     let mut budget = release.len();
 
     // Pre-release: optional separator, a label, optional separator, optional
@@ -396,9 +393,6 @@ fn parse_version(raw: &str) -> Result<Pep440Version, VersionError> {
             }
         }
         budget += segments.len();
-        if segments.len() > MAX_COMPONENTS {
-            return Err(VersionError::TooLong);
-        }
         local = Some(segments);
     }
 
