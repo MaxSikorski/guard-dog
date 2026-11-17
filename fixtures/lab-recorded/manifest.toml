@@ -5,10 +5,6 @@ platform = "docker"
 source = "lab"
 recorder = "lab/up.sh format 1"
 chain = "regtest"
-# arch, block_storage and exposure are derived from lab/compose.yml, not read
-# from a live run: its images are multi-arch (amd64 and arm64, both 64-bit),
-# every container's data is on tmpfs with a read-only root, and no port is
-# published. The next real lab/up.sh run writes them from docker inspect.
 arch = "64-bit"
 block_storage = "tmpfs"
 exposure = "none"

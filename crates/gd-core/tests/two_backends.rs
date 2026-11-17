@@ -506,6 +506,10 @@ fn compose_images() -> BTreeMap<String, String> {
     let docs = YamlLoader::load_from_str(&read(COMPOSE_FILE)).unwrap();
     let mut out = BTreeMap::new();
     for svc in docs[0]["services"].as_hash().unwrap().values() {
+        // Tool services (probe, scanner) have a compose profile and are not lab products.
+        if !svc["profiles"].is_badvalue() {
+            continue;
+        }
         let id = svc["labels"]["org.guard-dog.lab.id"].as_str().unwrap();
         let image = svc["image"].as_str().unwrap();
         assert!(

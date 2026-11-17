@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/guard-dog", "crates/gd-core", "crates/gd-egress", "crates/gd-advisories"]
+members = ["crates/guard-dog", "crates/gd-core", "crates/gd-egress", "crates/gd-advisories", "crates/gd-demo", "crates/gd-demo-wasm"]
 # Resolver 3 is resolver 2 plus one thing: when picking dependency versions it
 # prefers ones that build with our pinned Rust (`rust-version` below).
 resolver = "3"

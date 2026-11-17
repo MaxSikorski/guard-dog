@@ -87,6 +87,27 @@ If your money and identity live on your own infrastructure, you're your own secu
 
 The details are in [tests/README.md](tests/README.md).
 
+## Watch it catch a leak
+
+**In a terminal, no setup:**
+
+```bash
+cargo run --locked --example watchdog
+```
+
+**In your browser, no install:** [`docs/demo/`](docs/demo/) is the same demo as a web page. It goes live on the site with the next release; until then, open `docs/demo/index.html` from a checkout served by any static file server.
+
+I plant attacks and you watch the real code catch each one:
+1. a fake changelog full of terminal escape codes and a right-to-left trick is shown safely;
+2. a relay description that tries to give an AI orders stays inert text;
+3. a Nostr secret key sent in an HTTP header is caught;
+4. the same key, base64-encoded inside a JSON body, is caught;
+5. a home IP address in a URL is caught.
+
+Everything is fake except the checks: the keys and addresses are generated test values, and there's no network. Add `--fast` to skip the pauses. If a check ever fails to catch its planted case, the demo says **MISSED** and exits with an error. I'd rather it tell on itself than look good.
+
+What's not in yet: a seed hidden in a gzip body and an xpub re-encoded as a zpub (both wait on the next Judge C change), and an affected version flagged (waits on the advisory matcher). The demo lists them as "not in yet", and they don't count in the score. The browser version is the same scenes compiled to WebAssembly (434 KB, no network); `docs/demo/build.sh` rebuilds it from source.
+
 ## For AI agents
 
 Guard Dog is built to work well with AI agents, on both sides:

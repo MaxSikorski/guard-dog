@@ -4,7 +4,7 @@
 //! Deterministic by design: no Docker, no network, no clock, nothing random.
 //! `check()` reads `lab/compose.yml` the way Docker does (the file uses no YAML
 //! anchors) and returns every problem it finds, in a stable order. The checker
-//! is itself tested: `every_unsafe_change_is_caught` makes 55 named unsafe
+//! is itself tested: `every_unsafe_change_is_caught` makes 68 named unsafe
 //! edits and requires each one to be refused with its own problem code.
 
 // Test-only crate: its helper functions (not just `#[test]` ones) read files and
@@ -68,8 +68,26 @@ const EXPECTED: [(&str, &str, &str, &str, &str); 5] = [
         "1000:1000",
     ),
 ];
+/// The two tool services: (compose name, exact image, user, compose profile).
+/// Neither is started by `lab/up.sh` without its profile. `probe` is a pinned
+/// curl image; `scanner` is built locally from `lab/scanner/Dockerfile` and
+/// carries a fixed local tag, so it is built once, not per run.
+const TOOLS: [(&str, &str, &str, &str); 2] = [
+    (
+        "probe",
+        "curlimages/curl@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93",
+        "100:101",
+        "probe",
+    ),
+    ("scanner", "gd-lab-scanner:local", "65532:65532", "scan"),
+];
+/// The two tmpfs entries the scanner may have, in order: its state folder and a temp dir.
+const SCANNER_TMPFS: [&str; 2] = [
+    "/state:uid=65532,gid=65532,mode=0700,size=1m",
+    "/tmp:uid=65532,gid=65532,mode=0700,size=1m",
+];
 /// The only keys a lab service may use.
-const ALLOWED_SERVICE_KEYS: [&str; 20] = [
+const ALLOWED_SERVICE_KEYS: [&str; 21] = [
     "image",
     "labels",
     "user",
@@ -90,9 +108,12 @@ const ALLOWED_SERVICE_KEYS: [&str; 20] = [
     "memswap_limit",
     "cpus",
     "pids_limit",
+    "profiles",
 ];
 /// Keys that have their own problem code, so they never also count as `unknown-key`.
-const SPECIFIC_KEYS: [&str; 13] = [
+const SPECIFIC_KEYS: [&str; 15] = [
+    "build",
+    "pull_policy",
     "platform",
     "ports",
     "expose",
@@ -121,7 +142,9 @@ const SECRET_WORDS: [&str; 7] = [
 const CANARY: &str = "gdlabcanary-";
 
 /// The reviewed `entrypoint` per service; `None` means it must be absent.
-const ENTRYPOINTS: [(&str, Option<&str>); 5] = [
+const ENTRYPOINTS: [(&str, Option<&str>); 7] = [
+    ("probe", Some("curl")),
+    ("scanner", None),
     ("bitcoind", Some("bitcoind")),
     ("cln", None),
     ("lnd", None),
@@ -129,7 +152,9 @@ const ENTRYPOINTS: [(&str, Option<&str>); 5] = [
     ("strfry", None),
 ];
 /// Every tmpfs mount each service must have, and no others.
-const TMPFS_TARGETS: [(&str, &[&str]); 5] = [
+const TMPFS_TARGETS: [(&str, &[&str]); 7] = [
+    ("probe", &[]),
+    ("scanner", &["/state", "/tmp"]),
     ("bitcoind", &["/data", "/home/bitcoin/.bitcoin"]),
     ("cln", &["/data", "/tmp", "/root/.lightning"]),
     ("lnd", &["/data", "/root/.lnd"]),
@@ -423,7 +448,11 @@ fn check(text: &str) -> Vec<Problem> {
     // The set of services.
     let services = &doc["services"];
     let names: BTreeSet<String> = keys(services).into_iter().collect();
-    let want: BTreeSet<String> = EXPECTED.iter().map(|e| e.0.to_owned()).collect();
+    let want: BTreeSet<String> = EXPECTED
+        .iter()
+        .map(|e| e.0.to_owned())
+        .chain(TOOLS.iter().map(|t| t.0.to_owned()))
+        .collect();
     if names != want {
         out.push(problem(
             "unexpected-services",
@@ -439,6 +468,17 @@ fn check(text: &str) -> Vec<Problem> {
             continue;
         }
         check_service(&mut out, name, id, image, version, user, svc);
+        if let Some(m) = svc["mem_limit"].as_str().and_then(mem_mib) {
+            total_mib += m;
+        }
+    }
+    // The tool services, counted in the budget as if they ran with the rest.
+    for (name, image, user, _) in TOOLS {
+        let svc = &services[name];
+        if svc.as_hash().is_none() {
+            continue;
+        }
+        check_service(&mut out, name, "", image, "", user, svc);
         if let Some(m) = svc["mem_limit"].as_str().and_then(mem_mib) {
             total_mib += m;
         }
@@ -536,8 +576,17 @@ fn check_service(
     };
 
     // Image.
+    let tool = TOOLS.iter().find(|t| t.0 == name);
     let found = svc["image"].as_str().unwrap_or("");
-    if !is_pinned(found) {
+    if name == "scanner" {
+        // Built locally: the fixed tag, never a registry name.
+        if found != image {
+            add(
+                "wrong-image",
+                format!("image {found:?} is not the fixed local tag {image:?}"),
+            );
+        }
+    } else if !is_pinned(found) {
         add(
             "unpinned-image",
             format!("image {found:?} is not name@sha256:<64 hex>"),
@@ -551,6 +600,17 @@ fn check_service(
 
     // Labels.
     let labels = &svc["labels"];
+    if tool.is_some() {
+        // A tool has only the service label, so it is never taken for a lab service.
+        if keys(labels) != ["org.guard-dog.lab.service"]
+            || labels["org.guard-dog.lab.service"].as_str() != Some(name)
+        {
+            add(
+                "wrong-labels",
+                "a tool has exactly the label org.guard-dog.lab.service".into(),
+            );
+        }
+    }
     let mut label_keys = keys(labels);
     label_keys.sort();
     let mut want_keys = [
@@ -564,15 +624,61 @@ fn check_service(
     let software_ok = labels["org.guard-dog.lab.software"]
         .as_str()
         .is_some_and(|s| !s.is_empty());
-    if label_keys != want_keys
-        || labels["org.guard-dog.lab.service"].as_str() != Some(name)
-        || labels["org.guard-dog.lab.id"].as_str() != Some(id)
-        || labels["org.guard-dog.lab.expected-version"].as_str() != Some(version)
-        || !software_ok
+    if tool.is_none()
+        && (label_keys != want_keys
+            || labels["org.guard-dog.lab.service"].as_str() != Some(name)
+            || labels["org.guard-dog.lab.id"].as_str() != Some(id)
+            || labels["org.guard-dog.lab.expected-version"].as_str() != Some(version)
+            || !software_ok)
     {
         add(
             "wrong-labels",
             format!("labels must be the four org.guard-dog.lab.* keys for {id} {version}"),
+        );
+    }
+
+    // Profiles: a tool is started only by its own profile; a lab service has none.
+    let profiles = strings(&svc["profiles"]);
+    match tool {
+        Some(t) => {
+            if profiles.as_deref() != Some(&[t.3.to_owned()]) {
+                add("profile", format!("profiles must be exactly [{}]", t.3));
+            }
+        }
+        None => {
+            if !svc["profiles"].is_badvalue() {
+                add("profile", "a lab service must have no profiles".into());
+            }
+        }
+    }
+    // A build is allowed only for the scanner, from the one reviewed Dockerfile.
+    let build = &svc["build"];
+    if name == "scanner" {
+        if keys(build).len() != 2
+            || build["context"].as_str() != Some("..")
+            || build["dockerfile"].as_str() != Some("lab/scanner/Dockerfile")
+        {
+            add(
+                "build",
+                "build must be exactly {context: .., dockerfile: lab/scanner/Dockerfile}".into(),
+            );
+        }
+    } else if !build.is_badvalue() {
+        add("build", "only the scanner may be built".into());
+    }
+    // `pull_policy: build` only on the scanner: it is never pulled from a registry.
+    if name == "scanner" {
+        if svc["pull_policy"].as_str() != Some("build") {
+            add("pull-policy", "the scanner needs pull_policy: build".into());
+        }
+    } else if !svc["pull_policy"].is_badvalue() {
+        add("pull-policy", "only the scanner may set pull_policy".into());
+    }
+    // Credentials never go in a tool's environment: they arrive on stdin.
+    if tool.is_some() && !svc["environment"].is_badvalue() {
+        add(
+            "tool-environment",
+            "a tool has no environment: credentials arrive on stdin".into(),
         );
     }
 
@@ -677,7 +783,12 @@ fn check_service(
         add("no-pids-limit", "pids_limit must be from 1 to 1024".into());
     }
     let mem_cap = svc["mem_limit"].as_str().and_then(mem_mib).unwrap_or(0);
-    let tmpfs_ok = strings(&svc["tmpfs"]).is_some_and(|v| {
+    let tmpfs_list = if svc["tmpfs"].is_badvalue() && name == "probe" {
+        Some(Vec::new())
+    } else {
+        strings(&svc["tmpfs"])
+    };
+    let tmpfs_ok = tmpfs_list.is_some_and(|v| {
         v.iter().all(|t| {
             t.starts_with('/')
                 && t.split_once(':').is_some_and(|(_, opts)| {
@@ -719,6 +830,14 @@ fn check_service(
         add(
             "tmpfs-missing",
             format!("tmpfs targets are {targets:?}, expected {want_targets:?}"),
+        );
+    }
+    if name == "scanner"
+        && strings(&svc["tmpfs"]).as_deref() != Some(&SCANNER_TMPFS.map(str::to_owned))
+    {
+        add(
+            "tmpfs-unbounded",
+            format!("the scanner's tmpfs must be exactly {SCANNER_TMPFS:?}"),
         );
     }
 
@@ -839,6 +958,18 @@ fn check_service(
             }
         }
         "lnd" => {
+            // REST on, on the lab network only: exactly one restlisten, no --norest.
+            let opts = options(&command);
+            let listens: Vec<_> = opts.iter().filter(|(n, _)| n == "restlisten").collect();
+            if listens.len() != 1
+                || listens[0].1.as_deref() != Some("0.0.0.0:8080")
+                || opts.iter().any(|(n, _)| n == "norest")
+            {
+                add(
+                    "rest-options",
+                    "lnd needs exactly --restlisten=0.0.0.0:8080 and no --norest".into(),
+                );
+            }
             let ok = single_regtest_selector(
                 &command,
                 &[
@@ -859,6 +990,22 @@ fn check_service(
             }
         }
         "cln" => {
+            let opts = options(&command);
+            let one = |n: &str, v: &str| {
+                let found: Vec<_> = opts.iter().filter(|(k, _)| k == n).collect();
+                found.len() == 1 && found[0].1.as_deref() == Some(v)
+            };
+            if !one("clnrest-host", "0.0.0.0")
+                || !one("clnrest-port", "3010")
+                || !one("clnrest-protocol", "https")
+                || command.iter().any(|c| c.contains("disable-plugin=clnrest"))
+            {
+                add(
+                    "rest-options",
+                    "cln needs --clnrest-host=0.0.0.0, --clnrest-port=3010 and --clnrest-protocol=https, with clnrest not disabled"
+                        .into(),
+                );
+            }
             let selectors: Vec<_> = options(&command)
                 .into_iter()
                 .filter(|(n, _)| {
@@ -912,7 +1059,7 @@ fn describe(problems: &[Problem]) -> String {
 
 /// Unsafe edits to the real file: (text to find, text to put there, the
 /// problem code that must catch it). An empty `from` appends `to` to the end.
-const MUTATIONS: [(&str, &str, &str); 55] = [
+const MUTATIONS: [(&str, &str, &str); 68] = [
     (
         "    user: \"101:101\"\n",
         "    user: \"101:101\"\n    platform: linux/386\n",
@@ -1164,6 +1311,67 @@ const MUTATIONS: [(&str, &str, &str); 55] = [
         "# comment\r    cap_drop: !reset [ALL]\n",
         "control-char",
     ),
+    // A published REST port: LND's REST must stay on the internal network.
+    (
+        "    image: lightninglabs/lnd@sha256:54b3c87ad0bc3fea3fab8af23ace6421147ea97e6b56bf3911592d7853c185b8\n",
+        "    image: lightninglabs/lnd@sha256:54b3c87ad0bc3fea3fab8af23ace6421147ea97e6b56bf3911592d7853c185b8\n    ports: [\"8080:8080\"]\n",
+        "host-port",
+    ),
+    // The probe without cap_drop.
+    (
+        "    entrypoint: [\"curl\"]\n    networks: [lab]\n    read_only: true\n    cap_drop: [ALL]\n",
+        "    entrypoint: [\"curl\"]\n    networks: [lab]\n    read_only: true\n",
+        "capabilities-not-dropped",
+    ),
+    // The scanner with a volume.
+    (
+        "    profiles: [scan]\n",
+        "    profiles: [scan]\n    volumes: [\"./data:/state\"]\n",
+        "host-mount",
+    ),
+    // The scanner on a network that is not the internal lab one.
+    (
+        "      - /tmp:uid=65532,gid=65532,mode=0700,size=1m\n    networks: [lab]\n",
+        "      - /tmp:uid=65532,gid=65532,mode=0700,size=1m\n    networks: [bridge]\n",
+        "wrong-network",
+    ),
+    // A tool losing its profile (it would start with the lab).
+    ("    profiles: [probe]\n", "", "profile"),
+    // The scanner built from somewhere else.
+    ("      context: ..\n", "      context: .\n", "build"),
+    (
+        "      dockerfile: lab/scanner/Dockerfile\n",
+        "      dockerfile: Dockerfile\n",
+        "build",
+    ),
+    // A tool gaining an environment (credentials arrive on stdin only).
+    (
+        "    profiles: [probe]\n",
+        "    profiles: [probe]\n    environment:\n      HOME: /tmp\n",
+        "tool-environment",
+    ),
+    // The scanner's state folder made bigger.
+    (
+        "      - /state:uid=65532,gid=65532,mode=0700,size=1m\n",
+        "      - /state:uid=65532,gid=65532,mode=0700,size=64m\n",
+        "tmpfs-unbounded",
+    ),
+    // A scanner image tag other than the fixed local one.
+    (
+        "    image: gd-lab-scanner:local\n",
+        "    image: gd-lab-scanner:latest\n",
+        "wrong-image",
+    ),
+    // The scanner without pull_policy: build (it must never be pulled).
+    ("    pull_policy: build\n", "", "pull-policy"),
+    // clnrest without its protocol spelled out.
+    ("      - --clnrest-protocol=https\n", "", "rest-options"),
+    // An unpinned probe image.
+    (
+        "curlimages/curl@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93",
+        "curlimages/curl:8.23.0",
+        "unpinned-image",
+    ),
 ];
 
 /// The real compose file passes every check.
@@ -1220,7 +1428,26 @@ fn lab_readme_lists_every_pinned_image() {
             }
         }
     }
-    for needle in ["GPL-3.0", "lab/up.sh", "lab/down.sh"] {
+    // The two images the scanner is built from, named in the Dockerfile.
+    for line in read("lab/scanner/Dockerfile").lines() {
+        if let Some(from) = line.strip_prefix("FROM ") {
+            let image = from.split_whitespace().next().unwrap_or("");
+            if !readme.contains(image) {
+                missing.push("a FROM image of lab/scanner/Dockerfile");
+            }
+        }
+    }
+    for (_, image, _, _) in TOOLS {
+        if image.contains("@sha256:") && !readme.contains(image) {
+            missing.push(image);
+        }
+    }
+    for needle in [
+        "GPL-3.0",
+        "lab/up.sh",
+        "lab/down.sh",
+        "gd-lab-scanner:local",
+    ] {
         if !readme.contains(needle) {
             missing.push(needle);
         }
@@ -1588,4 +1815,420 @@ fn no_generated_secret_is_committed() {
         ignore.lines().any(|l| l == "lab/.data/"),
         ".gitignore must list lab/.data/"
     );
+}
+
+/// The scanner image: two stages, both pinned by digest, the Rust version of
+/// `rust-toolchain.toml`, a locked release build, only the binary copied over,
+/// a non-root user, and a `.dockerignore` that keeps secrets and state out.
+#[test]
+fn the_scanner_dockerfile_is_pinned_and_minimal() {
+    let docker = read("lab/scanner/Dockerfile");
+    let channel = read("rust-toolchain.toml")
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("channel = \"")?
+                .strip_suffix('"')
+                .map(str::to_owned)
+        })
+        .expect("rust-toolchain.toml has a channel");
+    let froms: Vec<&str> = docker
+        .lines()
+        .filter_map(|l| l.strip_prefix("FROM "))
+        .collect();
+    let mut problems = Vec::new();
+    if froms.len() != 2 {
+        problems.push(format!("{} FROM lines, expected 2", froms.len()));
+    }
+    for (n, from) in froms.iter().enumerate() {
+        let image = from.split_whitespace().next().unwrap_or("");
+        if !is_pinned(image) {
+            problems.push(format!("FROM #{} is not pinned by digest", n + 1));
+        }
+    }
+    let want_build = format!("rust:{channel}-slim-bookworm@sha256:");
+    if !froms
+        .first()
+        .is_some_and(|f| f.starts_with(&want_build) && f.ends_with(" AS build"))
+    {
+        problems.push(format!(
+            "the build stage must start FROM {want_build}... AS build"
+        ));
+    }
+    if !froms
+        .get(1)
+        .is_some_and(|f| f.starts_with("gcr.io/distroless/cc-debian12:nonroot@sha256:"))
+    {
+        problems.push("the runtime stage must be distroless cc-debian12:nonroot".to_owned());
+    }
+    for needle in [
+        "CARGO_BUILD_JOBS=8",
+        "cargo build --locked --release -p guard-dog",
+        "COPY --from=build /src/target/release/guard-dog /usr/local/bin/guard-dog",
+        "USER nonroot",
+        "ENTRYPOINT [\"/usr/local/bin/guard-dog\"]",
+    ] {
+        if !docker.contains(needle) {
+            problems.push(format!("the Dockerfile lacks {needle:?}"));
+        }
+    }
+    if docker.matches("COPY --from=").count() != 1 {
+        problems.push("exactly one COPY --from (the binary) is allowed".to_owned());
+    }
+    for banned in [
+        "\nADD ",
+        "curl ",
+        "wget ",
+        "sudo",
+        "--privileged",
+        "USER root",
+    ] {
+        if docker.contains(banned) {
+            problems.push(format!("the Dockerfile contains {banned:?}"));
+        }
+    }
+    // The only things copied in are the two lock/manifest files and the crates,
+    // and the .dockerignore is an allowlist for exactly those.
+    let copies: Vec<&str> = docker.lines().filter(|l| l.starts_with("COPY ")).collect();
+    let want_copies = [
+        "COPY Cargo.toml Cargo.lock ./",
+        "COPY crates ./crates",
+        "COPY --from=build /src/target/release/guard-dog /usr/local/bin/guard-dog",
+    ];
+    if copies != want_copies {
+        problems.push(format!(
+            "COPY lines are {copies:?}, expected {want_copies:?}"
+        ));
+    }
+    let ignore: Vec<String> = read(".dockerignore")
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_owned)
+        .collect();
+    let want_ignore = ["*", "!Cargo.toml", "!Cargo.lock", "!crates/", "**/target"];
+    if ignore != want_ignore {
+        problems.push(format!(
+            ".dockerignore is {ignore:?}, expected {want_ignore:?}"
+        ));
+    }
+    assert!(problems.is_empty(), "problems:\n{}", problems.join("\n"));
+}
+
+/// Everything wrong with `lab/up.sh` that this test can see in its text. The
+/// live run is the real check; this keeps the rules from being edited away.
+fn up_sh_problems(up: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    for needle in [
+        "WWW-Authenticate: Basic realm=\\\"jsonrpc\\\"",
+        "https://lnd:8080/v1/state",
+        "https://lnd:8080/v2/versioner/version",
+        "https://lnd:8080/v1/balance/blockchain",
+        "https://cln:3010/v1/getinfo",
+        "https://cln:3010/v1/listfunds",
+        "http://nutshell:3338/v1/info",
+        "Accept: application/nostr+json",
+        "-H @-",
+        "Grpc-Metadata-macaroon",
+        "Rune: ",
+        "gdlabcanary-",
+        "lab/.data/replies",
+        "not permitted",
+        "permission denied",
+    ] {
+        if !up.contains(needle) {
+            problems.push(format!("up.sh lacks {needle:?}"));
+        }
+    }
+    // No credential on a command line. The only way a credential variable may
+    // appear is as an argument of `printf` (`printf '..%s..' "$VAR" |` or
+    // `< <(printf ..)`), with no pipe or redirect between the `printf` and the
+    // variable. The exceptions are the loops and tests that only list the
+    // variables, the secret list, and the two calls of the shell function
+    // `rpcauth`, which feeds the password to openssl through printf.
+    let in_printf_args = |prefix: &str| {
+        prefix
+            .rfind("printf ")
+            .is_some_and(|i| !prefix[i..].contains(['|', '>', '<', ';', '&']))
+    };
+    for (n, line) in up.lines().enumerate() {
+        let t = line.trim_start();
+        if t.starts_with('#') {
+            continue;
+        }
+        let n = n + 1;
+        let shell_only = t.starts_with("[[")
+            || t.starts_with("for ")
+            || t.starts_with("REPLY_SECRETS=(")
+            || line.contains("rpcauth gdlab \"$RPC_PASSWORD\"")
+            || line.contains("rpcauth gdwatch \"$WATCH_PASSWORD\"");
+        for tok in ["rune=", "-u ", "--user"] {
+            if line.contains(tok) {
+                problems.push(format!("line {n}: {tok:?} on a command line"));
+            }
+        }
+        for (i, _) in line.match_indices("Authorization:") {
+            if !in_printf_args(&line[..i]) {
+                problems.push(format!("line {n}: \"Authorization:\" outside a printf"));
+            }
+        }
+        for var in [
+            "$RUNE",
+            "${RUNE",
+            "$MAC_HEX",
+            "${MAC_HEX",
+            "$RPC_PASSWORD",
+            "$WATCH_PASSWORD",
+            "$MINT_KEY",
+        ] {
+            for (i, _) in line.match_indices(var) {
+                if !shell_only && !in_printf_args(&line[..i]) {
+                    problems.push(format!("line {n}: {var} on a command line"));
+                }
+            }
+        }
+        // Every https call is pinned, and a pin comes with --insecure (the pin
+        // replaces the certificate chain check, which a self-signed cert fails).
+        if line.contains("https://") {
+            let pinned = ["\"$LND_PIN\"", "\"$CLN_PIN\""]
+                .iter()
+                .any(|v| line.contains(&format!("--insecure --pinnedpubkey {v}")));
+            if !pinned {
+                problems.push(format!(
+                    "line {n}: an https call without --insecure --pinnedpubkey with a pin variable"
+                ));
+            }
+        }
+        if line.contains("--pinnedpubkey") && !line.contains("--insecure") {
+            problems.push(format!("line {n}: --pinnedpubkey without --insecure"));
+        }
+    }
+    for banned in ["--cacert", "-H \"Grpc", "-H 'Grpc", "-H \"Rune", "-H 'Rune"] {
+        if up.contains(banned) {
+            problems.push(format!("up.sh contains {banned:?}"));
+        }
+    }
+    problems
+}
+
+/// `up.sh` proves identification without a credential, then each narrow
+/// credential against the REST ports, and keeps credentials off every command line.
+#[test]
+fn up_sh_proves_rest_identification_and_keeps_credentials_off_the_command_line() {
+    let problems = up_sh_problems(&read("lab/up.sh"));
+    assert!(problems.is_empty(), "problems:\n{}", problems.join("\n"));
+}
+
+/// Each edit to `up.sh` that would break one of those rules is caught.
+#[test]
+fn every_unsafe_edit_to_up_sh_is_caught() {
+    let up = read("lab/up.sh");
+    let cases: [(&str, &str, &str); 9] = [
+        // An https call with no pin, or a pin without --insecure.
+        (
+            "--insecure --pinnedpubkey \"$LND_PIN\" https://lnd:8080/v1/state",
+            "https://lnd:8080/v1/state",
+            "https call without",
+        ),
+        (
+            "--insecure --pinnedpubkey \"$LND_PIN\" https://lnd:8080/v1/state",
+            "--pinnedpubkey \"$LND_PIN\" https://lnd:8080/v1/state",
+            "without --insecure",
+        ),
+        // The rune on a command line, in the ways it could get there.
+        (
+            "printf '%s' \"$RUNE\" > \"$DATA/creds/cln-getinfo.rune\"",
+            "clncli checkrune rune=abc method=getinfo",
+            "\"rune=\" on a command line",
+        ),
+        (
+            "printf '%s' \"$RUNE\" > \"$DATA/creds/cln-getinfo.rune\"",
+            "X=\"$(docker exec cln echo \"$RUNE\")\"",
+            "$RUNE on a command line",
+        ),
+        // A printf that only looks like the stdin form: the password still reaches a command line.
+        (
+            "printf '%s' \"$RUNE\" > \"$DATA/creds/cln-getinfo.rune\"",
+            "printf x | curl -u \"gdwatch:$WATCH_PASSWORD\" http://x",
+            "\"-u \" on a command line",
+        ),
+        // A basic-auth header or user on a command line.
+        (
+            "http://strfry:7777/ </dev/null",
+            "-H \"Authorization: Basic x\" http://strfry:7777/ </dev/null",
+            "\"Authorization:\" outside a printf",
+        ),
+        (
+            "http://nutshell:3338/v1/info </dev/null",
+            "-u gdwatch:$WATCH_PASSWORD http://nutshell:3338/v1/info </dev/null",
+            "\"-u \" on a command line",
+        ),
+        // A macaroon on a command line.
+        (
+            "call http://nutshell:3338/v1/info </dev/null",
+            "call -d $RUNE http://nutshell:3338/v1/info </dev/null",
+            "$RUNE on a command line",
+        ),
+        // A listfunds refusal no longer checked for its text.
+        ("'not permitted'", "'x'", "lacks \"not permitted\""),
+    ];
+    let mut misses = Vec::new();
+    for (n, (from, to, want)) in cases.iter().enumerate() {
+        assert!(up.contains(from), "up.sh case {}: no {from:?}", n + 1);
+        let problems = up_sh_problems(&up.replacen(from, to, 1));
+        if !problems.iter().any(|p| p.contains(want)) {
+            misses.push(format!(
+                "case {}: expected {want:?}, got {problems:?}",
+                n + 1
+            ));
+        }
+    }
+    assert!(misses.is_empty(), "missed:\n{}", misses.join("\n"));
+}
+
+/// Whether a value under a key has the exact shape of a public identifier: a
+/// compressed public key or node id (66 hex digits starting 02 or 03), a block
+/// hash, total work or difficulty target (64 hex digits), a commit (40 hex
+/// digits). Any other value under these keys gets the normal checks.
+fn is_public_id(key: &str, s: &str) -> bool {
+    let hex = |n: usize| s.len() == n && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    match key {
+        "id" | "pubkey" => hex(66) && (s.starts_with("02") || s.starts_with("03")),
+        "bestblockhash" | "chainwork" | "target" => hex(64),
+        "commit_hash" => hex(40),
+        _ => false,
+    }
+}
+
+/// Everything in a recorded reply (JSON text) that must never be committed:
+/// a canary, a macaroon-shaped hex run (64 or more digits), a rune-shaped word
+/// (40 or more of A-Z a-z 0-9 _ - + / =) unless it has the exact shape of a public identifier under its key, and any
+/// public IPv4 or IPv6 address.
+fn reply_problems(text: &str) -> Vec<String> {
+    fn walk(v: &serde_json::Value, key: &str, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::String(s) => check_string(s, key, out),
+            serde_json::Value::Array(a) => a.iter().for_each(|x| walk(x, key, out)),
+            serde_json::Value::Object(m) => {
+                for (k, x) in m {
+                    check_string(k, "(a key)", out);
+                    walk(x, k, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn check_string(s: &str, key: &str, out: &mut Vec<String>) {
+        if s.contains(CANARY) {
+            out.push(format!("{key}: a {CANARY} value"));
+        }
+        let known = is_public_id(key, s);
+        let hexrun = s
+            .split(|c: char| !c.is_ascii_hexdigit())
+            .map(str::len)
+            .max()
+            .unwrap_or(0);
+        if hexrun >= 64 && !known {
+            out.push(format!("{key}: a hex run of {hexrun}, macaroon-shaped"));
+        }
+        let wordrun = s
+            .split(|c: char| !(c.is_ascii_alphanumeric() || "_-+/=".contains(c)))
+            .map(str::len)
+            .max()
+            .unwrap_or(0);
+        if wordrun >= 40 && !known {
+            out.push(format!(
+                "{key}: a word of {wordrun} characters, rune-shaped"
+            ));
+        }
+        // Candidate addresses: runs of digits and dots, runs of hex digits and colons.
+        let v4_tokens = s.split(|c: char| !(c.is_ascii_digit() || c == '.'));
+        let v6_tokens = s.split(|c: char| !(c.is_ascii_hexdigit() || c == '.' || c == ':'));
+        for tok in v4_tokens.chain(v6_tokens) {
+            if let Ok(a) = tok.parse::<std::net::Ipv4Addr>() {
+                if !(a.is_private()
+                    || a.is_loopback()
+                    || a.is_unspecified()
+                    || a.is_documentation()
+                    || a.is_link_local())
+                {
+                    out.push(format!("{key}: a public IPv4 address"));
+                }
+            } else if tok.matches(':').count() >= 2
+                && let Ok(a) = tok.parse::<std::net::Ipv6Addr>()
+            {
+                let first = a.segments()[0];
+                let ula = first & 0xfe00 == 0xfc00;
+                let doc = first == 0x2001 && a.segments()[1] == 0x0db8;
+                if !(a.is_loopback() || a.is_unspecified() || ula || doc) {
+                    out.push(format!("{key}: a public IPv6 address"));
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(v) => walk(&v, "(top)", &mut out),
+        Err(e) => out.push(format!("not JSON: {e}")),
+    }
+    out
+}
+
+/// No committed recorded reply holds a credential or a public address.
+#[test]
+fn recorded_lab_replies_hold_no_credential_or_public_address() {
+    let mut files = Vec::new();
+    walk(&root().join("fixtures/lab-recorded/replies"), &mut files);
+    assert!(
+        files.len() >= 7,
+        "expected the seven recorded replies, found {}",
+        files.len()
+    );
+    for f in files {
+        let text = fs::read_to_string(&f).unwrap();
+        let problems = reply_problems(&text);
+        assert!(problems.is_empty(), "{}: {problems:?}", f.display());
+    }
+}
+
+/// The reply checker catches planted leaks and leaves real-looking ids alone.
+#[test]
+fn the_reply_checker_catches_planted_leaks() {
+    let hex64 = "ab".repeat(32);
+    let rune = "A1b2_C3d4-".repeat(5);
+    for (what, doc) in [
+        ("canary", "{\"x\":\"gdlabcanary-0011\"}".to_owned()),
+        ("macaroon hex", format!("{{\"x\":\"{hex64}\"}}")),
+        ("rune", format!("{{\"x\":\"{rune}\"}}")),
+        ("public ipv4", "{\"address\":\"203.0.114.7\"}".to_owned()),
+        (
+            "public ipv4 in text",
+            "{\"a\":\"seen at 8.8.8.8:9735\"}".to_owned(),
+        ),
+        ("public ipv6", "{\"a\":\"2606:4700::1111\"}".to_owned()),
+        ("macaroon hex under id", format!("{{\"id\":\"{hex64}\"}}")),
+        (
+            "base64 macaroon under pubkey",
+            format!("{{\"pubkey\":\"{}\"}}", "QUJD+/ef".repeat(8)),
+        ),
+        (
+            "base64 macaroon with plus and slash",
+            format!("{{\"x\":\"{}\"}}", "QUJD+/ef".repeat(8)),
+        ),
+        ("not json", "nope".to_owned()),
+    ] {
+        assert!(!reply_problems(&doc).is_empty(), "{what} was not caught");
+    }
+    for doc in [
+        format!("{{\"id\":\"02{hex64}\",\"bestblockhash\":\"{hex64}\"}}"),
+        "{\"binding\":[{\"address\":\"0.0.0.0\"},{\"a\":\"172.29.208.4\"},{\"a\":\"::1\"}]}"
+            .to_owned(),
+        "{\"version\":\"v26.06.9\",\"software\":\"git+https://github.com/hoytech/strfry.git\"}"
+            .to_owned(),
+    ] {
+        assert!(
+            reply_problems(&doc).is_empty(),
+            "{doc}: {:?}",
+            reply_problems(&doc)
+        );
+    }
 }
