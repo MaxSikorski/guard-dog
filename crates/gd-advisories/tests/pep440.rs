@@ -1187,8 +1187,9 @@ fn a_local_label_on_a_boundary_is_unreadable() {
 
 #[test]
 fn unicode_whitespace_and_case_folding_tricks_are_refused() {
-    // `packaging` accepts these (Unicode `strip`, Unicode case folding); this
-    // scheme accepts a strict subset and refuses them.
+    // `packaging` accepts the first five (Unicode `strip`, Unicode case folding
+    // in `post`). It refuses the two Kelvin-sign local labels too, which are also
+    // recorded vectors. This scheme refuses all seven.
     for s in [
         "\u{a0}1.0",
         "1.0\u{a0}",
@@ -1267,4 +1268,120 @@ fn a_local_build_is_an_interval_above_its_public_release() {
         Pep440.candidate("1.0").unwrap(),
         Candidate::Exact(_)
     ));
+}
+
+#[test]
+fn a_local_build_at_a_dev0_release_is_never_a_miss_at_its_own_release() {
+    let unknown = UnknownReason::CandidateIsAnInterval;
+    for (installed, events) in [
+        ("1.0.dev0+x", r#"[{"introduced":"0"},{"fixed":"1.0.dev0"}]"#),
+        (
+            "1.0.dev0+x",
+            r#"[{"introduced":"0"},{"last_affected":"1.0.dev0"}]"#,
+        ),
+        (
+            "1.0.dev0+x",
+            r#"[{"introduced":"1.0.dev0"},{"fixed":"2.0"}]"#,
+        ),
+        (
+            "1.0rc1.dev0+x",
+            r#"[{"introduced":"0"},{"fixed":"1.0rc1.dev0"}]"#,
+        ),
+        (
+            "1.0.post1.dev0+x",
+            r#"[{"introduced":"0"},{"fixed":"1.0.post1.dev0"}]"#,
+        ),
+        ("1.0+x", r#"[{"introduced":"0"},{"fixed":"1.0.dev0"}]"#),
+    ] {
+        assert_eq!(
+            reason(&ev(events, installed)),
+            unknown,
+            "{installed} {events}"
+        );
+    }
+    assert_eq!(
+        kind(&ev(r#"[{"introduced":"0"},{"fixed":"0.9"}]"#, "1.0.dev0+x")),
+        "out-of-range"
+    );
+    assert_eq!(
+        kind(&ev(
+            r#"[{"introduced":"0.9"},{"fixed":"2.0"}]"#,
+            "1.0.dev0+x"
+        )),
+        "in-range"
+    );
+    match Pep440.candidate("1.0.dev0+x").unwrap() {
+        Candidate::Between { low, high: Some(h) } => {
+            assert!(low < p("1.0.dev0"));
+            assert!(low > p("0.9"));
+            assert_eq!(h, p("1.0.dev1"));
+        }
+        other => panic!("expected an interval, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_dev_local_build_is_an_interval_over_its_dev_line() {
+    let unknown = UnknownReason::CandidateIsAnInterval;
+    for events in [
+        r#"[{"introduced":"0"},{"fixed":"1.0.dev3"}]"#,
+        r#"[{"introduced":"0"},{"fixed":"1.0.dev0"}]"#,
+        r#"[{"introduced":"0"},{"last_affected":"1.0.dev2"}]"#,
+    ] {
+        assert_eq!(reason(&ev(events, "1.0.dev3+x")), unknown, "{events}");
+    }
+    assert_eq!(
+        kind(&ev(
+            r#"[{"introduced":"0"},{"fixed":"1.0.dev4"}]"#,
+            "1.0.dev3+x"
+        )),
+        "in-range"
+    );
+    assert_eq!(
+        kind(&ev(
+            r#"[{"introduced":"1.0.dev5"},{"fixed":"2.0"}]"#,
+            "1.0.dev3+x"
+        )),
+        "out-of-range"
+    );
+    assert_eq!(
+        kind(&ev(r#"[{"introduced":"0"},{"fixed":"0.9"}]"#, "1.0.dev3+x")),
+        "out-of-range"
+    );
+    let listed = |v: &str| {
+        let adv = pypi_advisory(json!([]), json!([v]));
+        evaluate_entry(&Pep440, &adv, 0, Some("1.0.dev3+x"))
+    };
+    assert_eq!(
+        reason(&listed("1.0.dev3")),
+        UnknownReason::SameVersionDifferentSpelling
+    );
+    assert_eq!(reason(&listed("1.0.dev1")), unknown);
+    assert_eq!(kind(&listed("1.0.dev4")), "out-of-range");
+    assert_eq!(kind(&listed("1.0.dev3+x")), "in-range");
+    match Pep440.candidate("1.0.dev3+x").unwrap() {
+        Candidate::Between { low, high } => {
+            assert_eq!(high, Some(p("1.0.dev4")));
+            assert!(low < p("1.0.dev0"));
+        }
+        other => panic!("expected an interval, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_local_build_listed_with_another_spelling_is_a_spelling_question() {
+    let listed = |installed: &str, v: &str| {
+        let adv = pypi_advisory(json!([]), json!([v]));
+        evaluate_entry(&Pep440, &adv, 0, Some(installed))
+    };
+    let spelling = UnknownReason::SameVersionDifferentSpelling;
+    assert_eq!(reason(&listed("1.0+x", "1.0.0+x")), spelling);
+    assert_eq!(reason(&listed("1.0.0+x", "1.0+x")), spelling);
+    assert_eq!(kind(&listed("1.0+x", "1.0+X")), "in-range");
+    assert_eq!(reason(&listed("1.0+vendor", "1.0")), spelling);
+    assert_eq!(reason(&listed("1.0.0+vendor", "1.0")), spelling);
+    assert_eq!(
+        reason(&listed("0.16.0+umbrel2", "0.16.0+umbrel1")),
+        UnknownReason::CandidateIsAnInterval
+    );
 }

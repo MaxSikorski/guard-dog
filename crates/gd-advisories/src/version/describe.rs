@@ -2,7 +2,7 @@
 //! (design 2.1, section 2, "Git-describe").
 //!
 //! A description is `<tag>-<distance>-g<hash>`, optionally followed by a dirty
-//! marker. It is parsed from the right, so the tag may hold hyphens itself. The
+//! marker (`-dirty`; git's `-broken` and CLN's `-modded` inside a tag are refused). It is parsed from the right, so the tag may hold hyphens itself. The
 //! tag is a version; the distance and hash are evidence about one build, never a
 //! release: `1.1.2-148-g4cd3cf6` is neither `1.1.2` nor proved below `1.1.3`. Only
 //! the tag, never the whole description, goes to the SemVer scheme, where
@@ -123,10 +123,16 @@ fn holds_a_description(s: &str) -> bool {
 /// Reads a strfry tag with the SemVer scheme: strict `X.Y.Z[-pre][+meta]`, no
 /// leading `v` (strfry's own tags have none, so a `v1.1.2` tag is refused until
 /// a real strfry record shows otherwise). A description hidden inside the
-/// tag, or CLN's `-modded` marker (which is not strfry's), is refused instead of
-/// being read as a prerelease.
+/// tag, or a working-tree marker (`-dirty`, git's `-broken`, CLN's `-modded`,
+/// also when build metadata follows it), is refused instead of being read as a
+/// prerelease.
 fn parse_tag(raw: &str) -> Result<TagVersion, VersionError> {
-    if holds_a_description(raw) || raw.ends_with("-modded") {
+    let head = raw.split_once('+').map_or(raw, |(h, _)| h);
+    if holds_a_description(raw)
+        || ["-modded", "-dirty", "-broken"]
+            .iter()
+            .any(|m| head.ends_with(m))
+    {
         return Err(VersionError::Malformed);
     }
     SemVer.parse(raw)

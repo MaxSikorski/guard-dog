@@ -1538,3 +1538,115 @@ fn describe_tags_are_read_by_the_semver_scheme() {
         assert!(SemVer.parse(s).is_err(), "{s}");
     }
 }
+
+#[test]
+fn cln_a_modded_value_through_the_evaluator_is_never_out_of_range() {
+    for installed in [
+        "24.11-modded",
+        "v24.11-modded",
+        "v24.11-12-gabc1234-modded",
+        "24.11.0-modded",
+    ] {
+        for r in [
+            r#"[{"introduced":"0"},{"fixed":"24.11"}]"#,
+            r#"[{"introduced":"0"},{"fixed":"25.02"}]"#,
+            r#"[{"introduced":"24.11"},{"fixed":"25.02"}]"#,
+        ] {
+            let e = cln_ev(r, installed);
+            assert_eq!(
+                reason(&e),
+                UnknownReason::InstalledVersionUnparseable,
+                "{installed} against {r}"
+            );
+            assert_ne!(kind(&e), "out-of-range", "{installed} against {r}");
+        }
+    }
+}
+
+#[test]
+fn describe_refuses_the_broken_marker_and_markers_before_metadata() {
+    for s in [
+        "2.0.0-broken",
+        "1.1.2-148-g4cd3cf6-broken",
+        "1.1.2-modded+meta",
+        "1.1.2-dirty+meta",
+        "1.1.2-broken+meta",
+        "1.2.0-rc.1-broken",
+        "1.1.2-dirty-dirty",
+    ] {
+        assert!(GitDescribe.parse(s).is_err(), "parse {s}");
+        assert!(GitDescribe.parse_describe(s).is_err(), "parse_describe {s}");
+        assert!(GitDescribe.candidate(s).is_err(), "candidate {s}");
+        assert_eq!(GitDescribe.same_identity(s, s), None, "identity {s}");
+    }
+    // As a boundary.
+    assert_eq!(
+        reason(&describe_ev(
+            r#"[{"introduced":"0"},{"fixed":"2.0.0-broken"}]"#,
+            "2.0.0"
+        )),
+        UnknownReason::UnparseableBoundary
+    );
+    assert_eq!(
+        reason(&describe_ev(
+            r#"[{"introduced":"0"},{"last_affected":"2.0.0-broken"}]"#,
+            "2.0.0"
+        )),
+        UnknownReason::UnparseableBoundary
+    );
+    assert_eq!(
+        reason(&describe_ev(
+            r#"[{"introduced":"0"},{"limit":"2.0.0-broken"}]"#,
+            "2.0.0"
+        )),
+        UnknownReason::UnparseableLimit
+    );
+    // As a list entry.
+    let adv = git_advisory(json!([]), json!(["2.0.0-broken"]));
+    assert_eq!(
+        reason(&evaluate_entry(&GitDescribe, &adv, 0, Some("2.0.0"))),
+        UnknownReason::UnreadableListedVersion
+    );
+    // CLN.
+    for s in ["24.11-broken", "v24.11-12-gabc1234-broken"] {
+        assert!(Calver.parse(s).is_err(), "parse {s}");
+        assert!(Calver.parse_describe(s).is_err(), "parse_describe {s}");
+        assert!(Calver.candidate(s).is_err(), "candidate {s}");
+        assert_eq!(
+            reason(&cln_ev(r#"[{"introduced":"0"},{"fixed":"24.11"}]"#, s)),
+            UnknownReason::InstalledVersionUnparseable,
+            "{s}"
+        );
+    }
+    // Still accepted.
+    for s in ["1.0.0+a", "1.0.0-alpha.1+b.2"] {
+        assert!(GitDescribe.parse(s).is_ok(), "{s}");
+    }
+    let d = GitDescribe
+        .parse_describe("1.1.2-148-g4cd3cf6-dirty")
+        .unwrap();
+    assert!(d.dirty);
+}
+
+#[test]
+fn cln_legacy_four_part_and_two_part_tags_are_refused_not_cleared() {
+    for s in ["v0.7.2.1", "0.7.2.1", "v0.6", "0.6"] {
+        assert!(Calver.parse(s).is_err(), "{s}");
+    }
+    let adv = git_advisory(json!([]), json!(["v0.7.2.1"]));
+    assert_eq!(
+        reason(&evaluate_entry(&Calver, &adv, 0, Some("v0.7.2.1"))),
+        UnknownReason::InstalledVersionUnparseable
+    );
+    assert_eq!(
+        reason(&cln_ev(
+            r#"[{"introduced":"0"},{"fixed":"0.7.2.1"}]"#,
+            "v24.11"
+        )),
+        UnknownReason::UnparseableBoundary
+    );
+    assert_eq!(
+        reason(&cln_ev(r#"[{"introduced":"0"},{"fixed":"24.11"}]"#, "v0.6")),
+        UnknownReason::InstalledVersionUnparseable
+    );
+}

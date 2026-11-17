@@ -72,7 +72,7 @@ pub enum Candidate<V> {
 /// - `same_identity` compares exact identity after only the scheme's documented
 ///   normalization. `None` means the scheme cannot say (a string it cannot read).
 /// - `candidate` reads the installed value (advisory boundaries always go
-///   through `parse`). The default is an exact version; a scheme that can only
+///   through `parse_boundary`, which defaults to `parse`). The default is an exact version; a scheme that can only
 ///   place the installed value in an interval returns `Between`.
 /// - A scheme that has no order at all (opaque, equality only) returns `false`
 ///   from `orders`: every ordered range is then unknown, and only the listed

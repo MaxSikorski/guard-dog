@@ -138,7 +138,9 @@
 "1.0\u00e9",
 "1_0",
 "1.0.dev1.post1",
-"1.0.post1a1"
+"1.0.post1a1",
+"1.0+\u212a",
+"1.0+a\u212a"
 ],
 "normalized": [
 "1.0",
@@ -265,6 +267,8 @@ null,
 null,
 null,
 "1.0.1a0",
+null,
+null,
 null,
 null,
 null,

@@ -70,6 +70,8 @@ INPUTS = [
     "vv1.0", "1.0++a",
     "1.0.post1.post2", "1.0.dev1.dev2", "1.0a1a2", "1.0-a-b", "1.0+a b",
     "1,0", "١.٠", "1.0é", "1_0", "1.0.dev1.post1", "1.0.post1a1",
+    # Kelvin sign in a local label: packaging reads local labels as ASCII only
+    "1.0+\u212a", "1.0+a\u212a",
 ]
 
 

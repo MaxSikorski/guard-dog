@@ -10,8 +10,9 @@
 //!
 //! It accepts a strict subset of what `packaging` accepts: only ASCII whitespace
 //! is trimmed (Python's `strip` also trims Unicode whitespace), and only ASCII
-//! letters match (Python's case-insensitive matching also lets the Kelvin sign
-//! stand for `k` and the long s for `s`). Those inputs are refused, never
+//! letters match (Python's case-insensitive matching also lets some Unicode
+//! letters stand for ASCII ones, such as the long s for the `s` in `post`; local
+//! labels are read as ASCII by `packaging` too). Those inputs are refused, never
 //! guessed; `tests/pep440.rs` holds refusal vectors for them. Every string this
 //! scheme accepts reads the same as in `packaging`.
 
@@ -70,7 +71,8 @@ pub struct Pep440;
 /// One parsed PEP 440 version.
 ///
 /// `Ord` is the specification's order (epoch, release with trailing zeros
-/// ignored, pre, post, dev, local) and `Eq` agrees with it: `1.0` equals
+/// ignored, pre, post, dev, local; then a candidate floor sorts just below its
+/// version) and `Eq` agrees with it: `1.0` equals
 /// `1.0.0`. Equal by order is not the same identity; see
 /// [`Pep440::same_identity`].
 #[derive(Clone, Debug)]
@@ -81,6 +83,12 @@ pub struct Pep440Version {
     post: Option<Num>,
     dev: Option<Num>,
     local: Option<Vec<LocalSegment>>,
+    /// When true, the value stands for "just below this version": it sorts
+    /// below the same version with `floor: false` and above everything that
+    /// version is above. Only `Pep440::candidate` creates one, as the low end of
+    /// a local build's interval. `parse` never produces one, and a floor is never
+    /// printed for identity.
+    floor: bool,
 }
 
 impl Pep440Version {
@@ -163,6 +171,8 @@ impl Ord for Pep440Version {
             // Absent local sorts first; segments compare one by one, a shorter
             // equal prefix first.
             .then_with(|| self.local.cmp(&other.local))
+            // A candidate floor sorts just below its version.
+            .then_with(|| other.floor.cmp(&self.floor))
     }
 }
 
@@ -182,7 +192,8 @@ impl Eq for Pep440Version {}
 
 /// The normalized text, as `packaging` writes it:
 /// `[N!]release[aN|bN|rcN][.postN][.devN][+local]`. Reading it back gives an
-/// equal version, and writing that gives the same text.
+/// equal version, and writing that gives the same text. A floor value (only ever
+/// a candidate's low end) prints as its version.
 impl fmt::Display for Pep440Version {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if !self.epoch.is_zero() {
@@ -399,6 +410,7 @@ fn parse_version(raw: &str) -> Result<Pep440Version, VersionError> {
         post,
         dev,
         local,
+        floor: false,
     })
 }
 
@@ -420,10 +432,12 @@ impl VersionScheme for Pep440 {
     }
 
     /// A public version is exact. A local build (`1.0+x`) is a build of its
-    /// public release, which can sit on either side of a boundary written at that
-    /// release, so it is an interval: from the public release (floored at its
-    /// `.dev0`, inclusive) up to the next public version above it (exclusive).
-    /// Any boundary at the public part then reads as an interval, never a miss.
+    /// public release P, and it may come from any snapshot of P's line. It is an
+    /// interval from just below P's `.dev0` (a floor, so a boundary at the
+    /// `.dev0` itself is inside) up to the next public version above P
+    /// (exclusive). Any boundary from P's `.dev0` up to P, inclusive, therefore
+    /// reads as an interval and never as a hit or a miss. This includes P itself
+    /// when P already ends in `.dev0`.
     fn candidate(&self, raw: &str) -> Result<Candidate<Pep440Version>, VersionError> {
         let v = parse_version(raw)?;
         if v.local.is_none() {
@@ -432,6 +446,7 @@ impl VersionScheme for Pep440 {
         let mut low = v.clone();
         low.local = None;
         low.dev = Some(Num::zero());
+        low.floor = true;
         let mut high = v.clone();
         high.local = None;
         if let Some(d) = &v.dev {
@@ -450,15 +465,17 @@ impl VersionScheme for Pep440 {
     }
 
     /// A local build against a listed version of the same public release: the
-    /// same text is the same build; the same release with another label, or none,
-    /// is a spelling question.
+    /// same text is the same build. The same build spelled another way (`1.0+x`
+    /// and `1.0.0+x`), or the same release with no label, is a spelling question.
     fn interval_list_match(&self, installed: &str, listed: &str) -> Option<bool> {
         let i = parse_version(installed).ok()?;
         let l = parse_version(listed).ok()?;
         if i.to_string() == l.to_string() {
             return Some(true);
         }
-        if i.local.is_some() && l.local.is_none() && self.same_version(&i, listed) == Some(true) {
+        if i.local.is_some()
+            && (l == i || (l.local.is_none() && self.same_version(&i, listed) == Some(true)))
+        {
             return Some(false);
         }
         None
