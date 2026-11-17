@@ -150,3 +150,8 @@ fn zero_and_out_of_range_secrets_are_refused() {
     assert!(Keys::from_secret_hex(&"ff".repeat(32)).is_err());
     assert!(Keys::from_secret_hex("abcd").is_err());
 }
+
+#[test]
+fn zero_and_out_of_range_secrets_are_still_refused() {
+    assert!(Keys::from_secret_hex(&"00".repeat(32)).is_err());
+}

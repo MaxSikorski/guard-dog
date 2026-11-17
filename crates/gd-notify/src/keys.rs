@@ -58,3 +58,16 @@ impl fmt::Debug for Keys {
         f.write_str("Keys(<redacted>)")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_secret_text_is_wiped_when_dropped() {
+        // A compile-time check: `secret_hex` hands back a wiping wrapper.
+        let keys = Keys::from_secret_hex(&"1f".repeat(32)).unwrap_or_else(|_| unreachable!());
+        let text: zeroize::Zeroizing<String> = keys.secret_hex();
+        assert_eq!(text.len(), 64);
+    }
+}

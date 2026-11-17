@@ -482,4 +482,104 @@ mod tests {
         let text = unwrap_dm(&recipient, &event).unwrap().rumor.content;
         assert!(text.contains("sent-one") && !text.contains("held-back"));
     }
+
+    fn sock(ip: &str) -> SocketAddr {
+        SocketAddr::new(ip.parse().unwrap(), 7777)
+    }
+
+    #[test]
+    fn only_private_addresses_are_accepted() {
+        for ok in ["10.1.2.3", "172.16.0.1", "172.29.208.5", "172.31.255.255", "192.168.1.1", "fd12:3456::1", "fc00::1"] {
+            assert!(addresses_ok(&[sock(ok)], false).is_ok(), "{ok}");
+        }
+        for bad in [
+            "8.8.8.8", "172.15.0.1", "172.32.0.1", "192.169.0.1", "127.0.0.1", "169.254.1.1", "0.0.0.0",
+            "100.64.0.1", "::1", "fe80::1", "2001:db8::1", "::ffff:8.8.8.8", "::", "fe00::1",
+        ] {
+            assert!(addresses_ok(&[sock(bad)], false).is_err(), "{bad}");
+        }
+        // One public address among private ones is enough to refuse the name.
+        assert!(addresses_ok(&[sock("10.0.0.1"), sock("8.8.8.8")], false).is_err());
+        assert!(addresses_ok(&[], false).is_err());
+        // Loopback only when the test hook says so.
+        assert!(addresses_ok(&[sock("127.0.0.1")], true).is_ok());
+        assert_eq!(addresses_ok(&[sock("10.0.0.1"), sock("10.0.0.2")], false).unwrap(), sock("10.0.0.1"));
+    }
+
+    #[test]
+    fn a_name_that_resolves_to_a_public_address_is_refused_before_connecting() {
+        let (_, events) = wraps(1);
+        let relay = RelayUrl::loopback_for_test(1);
+        let resolver = |_: &str, _: u16| -> std::io::Result<Vec<SocketAddr>> { Ok(vec![sock("93.184.216.34")]) };
+        // The loopback test relay may use loopback, but never a public address.
+        let err = publish_with(&relay, &events, TOTAL_TIMEOUT, &resolver).unwrap_err();
+        assert!(matches!(err, NotifyError::Refused(_)), "{err}");
+    }
+
+    #[test]
+    fn a_slow_lookup_counts_against_the_deadline() {
+        let (_, events) = wraps(1);
+        let relay = RelayUrl::loopback_for_test(1);
+        let resolver = |_: &str, _: u16| -> std::io::Result<Vec<SocketAddr>> {
+            thread::sleep(Duration::from_secs(5));
+            Ok(vec![sock("127.0.0.1")])
+        };
+        let start = Instant::now();
+        let err = publish_with(&relay, &events, Duration::from_secs(1), &resolver).unwrap_err();
+        assert!(matches!(err, NotifyError::Relay(_)), "{err}");
+        assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn the_checked_address_is_the_one_connected_to() {
+        let (_, events) = wraps(1);
+        let (port, _seen, handle) = fake_relay(Mode::Accept);
+        let relay = RelayUrl::loopback_for_test(port);
+        let resolver = move |host: &str, p: u16| -> std::io::Result<Vec<SocketAddr>> {
+            assert_eq!(host, "strfry");
+            assert_eq!(p, port);
+            Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])
+        };
+        let out = publish_with(&relay, &events, TOTAL_TIMEOUT, &resolver).unwrap();
+        assert!(out[0].accepted);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn an_alert_on_a_chain_that_is_not_allowed_is_refused() {
+        use crate::alert::{Alert, AlertParts, Chain, MatchResult, Severity};
+        let make = |chain| {
+            Alert::new(AlertParts {
+                product: "LND",
+                version: "0.18.4-beta".to_owned(),
+                chain,
+                advisory_id: "a-1".to_owned(),
+                result: MatchResult::Affected,
+                severity: Severity::High,
+                fixed_in: None,
+                summary: Untrusted::new("s".to_owned()),
+                playbook: Untrusted::new("p".to_owned()),
+                question: None,
+                checked_at: 1,
+                blind_spots: vec![],
+            })
+            .unwrap()
+        };
+        let sender = Keys::generate(&mut Seq(1)).unwrap();
+        let relay = RelayUrl::loopback_for_test(1);
+        for chain in [Chain::Mainnet, Chain::Testnet, Chain::Unknown] {
+            // The node set is fine, but this one alert is on another chain.
+            let err = crate::send_alerts(
+                &relay,
+                &sender,
+                &[7u8; 32],
+                &[make(Chain::Regtest), make(chain)],
+                &[Chain::Regtest],
+                &Fixed(1),
+                &mut Seq(3),
+            )
+            .unwrap_err();
+            assert!(matches!(err, NotifyError::Refused(_)), "{chain:?}: {err}");
+        }
+    }
 }

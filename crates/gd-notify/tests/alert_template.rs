@@ -345,3 +345,15 @@ fn debug_hides_the_message() {
         assert!(!shown.contains(needle), "{needle}");
     }
 }
+
+#[test]
+fn an_alert_says_which_chain_it_is_on() {
+    assert_eq!(alert(|_| {}).chain(), Chain::Regtest);
+    assert_eq!(alert(|p| p.chain = Chain::Signet).chain(), Chain::Signet);
+}
+
+#[test]
+fn the_module_explains_why_there_is_no_evidence_section() {
+    let source = include_str!("../src/alert.rs");
+    assert!(source.contains("no \"evidence\" section"), "say why in the module doc");
+}

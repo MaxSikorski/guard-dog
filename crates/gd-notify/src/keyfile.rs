@@ -97,3 +97,59 @@ pub fn load_or_create(state_dir: &Path, entropy: &mut dyn Entropy) -> Result<Key
         Err(_) => Err(refuse("cannot create the key file")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+
+    use super::*;
+    use std::io;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("gd-notify-kf-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir(&p).unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o700)).unwrap();
+        p
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_key_file_behind() {
+        let dir = temp_dir("partial");
+        let path = dir.join(KEY_FILE_NAME);
+        let result = write_new(&path, "ab", |file| {
+            file.write_all(b"half a ke")?;
+            Err(io::Error::other("disk full"))
+        });
+        assert!(result.is_err());
+        assert!(!path.exists(), "a partial key file was left");
+        // And the next run can create one normally.
+        let keys = load_or_create(&dir, &mut crate::OsEntropy).unwrap();
+        assert_eq!(keys.public_hex().len(), 64);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_sync_is_also_cleaned_up() {
+        let dir = temp_dir("sync");
+        let path = dir.join(KEY_FILE_NAME);
+        assert!(write_new(&path, "ab", |_| Err(io::Error::other("sync failed"))).is_err());
+        assert!(!path.exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_key_file_must_belong_to_the_same_user_as_the_folder() {
+        assert!(owners_match(501, 501));
+        assert!(!owners_match(0, 501));
+        assert!(!owners_match(501, 0));
+        // The real files we make belong to the folder's owner.
+        let dir = temp_dir("owner");
+        load_or_create(&dir, &mut crate::OsEntropy).unwrap();
+        let d = fs::metadata(&dir).unwrap().uid();
+        let f = fs::metadata(dir.join(KEY_FILE_NAME)).unwrap().uid();
+        assert!(owners_match(f, d));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+}
