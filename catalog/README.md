@@ -1,6 +1,6 @@
 # The service catalog
 
-One TOML file per product Guard Dog knows about: `catalog/<id>.toml`. It is data, not code. The recognizer, the matcher and the signing checks will all read it from here. Today it holds the five services in the regtest lab (`lab/compose.yml`) and eight more products; more arrive in later pull requests. Catalog pull requests are reviewed by the maintainer before they merge.
+One TOML file per product Guard Dog knows about: `catalog/<id>.toml`. It is data, not code. The scanner reads it through the loader (`gd_core::catalog`); entries are compiled in from `crates/gd-core/src/catalog_files.rs`, which a test keeps equal to this folder (add a line there with each new entry). Today it holds the five services in the regtest lab (`lab/compose.yml`) and eight more products; more arrive in later pull requests. Catalog pull requests are reviewed by the maintainer before they merge.
 
 Every fact in an entry has a source, and anything not confirmed is listed in `[review].todo` instead of being guessed. The test `crates/gd-core/tests/catalog.rs` checks every entry, offline, on every `cargo test --locked`. Entries hold no secrets: no keys, seeds, tokens, private addresses or onion addresses.
 
