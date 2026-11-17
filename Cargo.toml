@@ -21,6 +21,8 @@ jsonschema = { version = "=0.60.2", default-features = false }
 serde_json = "1"
 # TOML reader for the release-profile policy test. Exact version already locked via trybuild.
 toml = { version = "=1.1.8", default-features = false, features = ["parse", "std", "serde"] }
+# YAML parser for the lab compose test. No default features (no encoding_rs).
+yaml-rust2 = { version = "=0.13.0", default-features = false }
 
 [workspace.lints.rust]
 # Guard Dog guards money. No crate of ours may use `unsafe`; a crate that ever

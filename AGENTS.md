@@ -32,4 +32,5 @@ From the repository root (rustup installs the pinned toolchain from `rust-toolch
 | `docs/` | The website (GitHub Pages) |
 | `crates/` | The Rust code; which crate owns what: [crates/README.md](crates/README.md) |
 | `tests/README.md` | Every test and judge, one line each |
+| `lab/` | The regtest lab (`lab/up.sh`, `lab/down.sh`): [lab/README.md](lab/README.md) |
 | `catalog/`, `advisories/` | Coming next: services as data, advisories |

@@ -32,8 +32,76 @@ jobs:
   # `cargo deny --locked check`, which includes the RustSec advisory check, so
   # new advisories against an unchanged Cargo.lock still turn the nightly red.
 
-  # TODO(Phase 0.8): the lab judges go here once the regtest lab exists
-  # (lab/up.sh, then the judges, then lab/down.sh). No placeholder job yet.
+  # The regtest lab (Phase 0.8): start it cold on a clean runner, prove a funded
+  # LND <-> Core Lightning channel, record the versions each service reports,
+  # then remove everything. amd64 here; Max's Mac covers arm64.
+  # - Nothing from lab/.data is uploaded: it holds generated credentials.
+  # - The lab's network needs Docker 28 or later (`gateway_mode_ipv4: isolated`).
+  #   If the runner's Docker is older, this job fails on purpose; the option
+  #   stays, so isolation is never quietly weakened.
+  lab:
+    name: lab
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Show the Docker version and the time; require Docker 28 or later
+        run: |
+          set -euo pipefail
+          date -u +"%Y-%m-%dT%H:%M:%SZ"
+          docker version
+          docker compose version
+          major="$(docker version --format '{{.Server.Version}}' | cut -d. -f1)"
+          case "${major}" in
+            ''|*[!0-9]*) echo "::error::Could not read the Docker server version."; exit 1 ;;
+          esac
+          if ! [ "${major}" -ge 28 ]; then
+            echo "::error::Docker ${major} is too old: the lab's isolated network needs Docker 28 or later. Not weakening isolation; fix the runner."
+            exit 1
+          fi
+      - name: Start the lab cold, fund and open a channel (5 minute limit)
+        run: |
+          set -euo pipefail
+          # The repository is public, so the log is public. All of up.sh's
+          # output goes to a file that is never printed or uploaded (a
+          # malformed reply from a node could echo a credential). Only a fixed
+          # message and the one timing line are shown.
+          out="${RUNNER_TEMP}/lab-up.log"
+          start="$(date +%s)"
+          rc=0
+          GD_LAB_MAX_SECONDS=300 timeout --kill-after=10s 300s lab/up.sh >"${out}" 2>&1 || rc=$?
+          elapsed=$(( $(date +%s) - start ))
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::lab/up.sh failed with exit code ${rc} after ${elapsed}s (124 means the 5 minute limit was hit). Its output is withheld because the log is public; run lab/up.sh by hand to see it."
+            exit 1
+          fi
+          line="$(grep -E -m1 '^gd-lab is up \(regtest\), cold start to funded channel in [0-9]+s$' "${out}" || true)"
+          if [ -z "${line}" ]; then
+            echo "::error::lab/up.sh finished but the funded-channel line was not found."
+            exit 1
+          fi
+          echo "${line}"
+          echo "${line} (wall clock ${elapsed}s)" >> "${GITHUB_STEP_SUMMARY}"
+      - name: Record the lab's manifest (versions only, no secrets)
+        if: always()
+        run: |
+          {
+            echo "### Regtest lab"
+            echo ""
+            echo '```toml'
+            cat lab/.data/manifest.toml 2>/dev/null || echo "(no manifest: lab/up.sh failed before writing it)"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Remove the lab
+        if: always()
+        # Clearing the lock first is only safe because this CI VM is single-use
+        # and runs nothing else: a cancelled or killed up.sh can leave
+        # lab/.lock behind, and down.sh would refuse.
+        run: |
+          lab/down.sh --unlock || true
+          lab/down.sh
 
   # Reproducible builds: the same source built on two different runners should
   # give the same bytes. Each build reports the SHA-256 of the binary.
@@ -145,7 +213,7 @@ jobs:
   # - Any gh error turns this job red, so a broken notice is visible too.
   notify-failure:
     name: notify-failure
-    needs: [gate, build-repro-2404, build-repro-2204]
+    needs: [gate, lab, build-repro-2404, build-repro-2204]
     if: ${{ !cancelled() && github.event_name == 'schedule' && github.repository == 'MaxSikorski/guard-dog' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -157,6 +225,7 @@ jobs:
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       COMMIT_SHA: ${{ github.sha }}
       RESULT_GATE: ${{ needs.gate.result }}
+      RESULT_LAB: ${{ needs.lab.result }}
       RESULT_REPRO_2404: ${{ needs.build-repro-2404.result }}
       RESULT_REPRO_2204: ${{ needs.build-repro-2204.result }}
     steps:
@@ -168,6 +237,7 @@ jobs:
 
           failed=""
           for pair in "gate=${RESULT_GATE}" \
+                      "lab=${RESULT_LAB}" \
                       "build-repro-2404=${RESULT_REPRO_2404}" \
                       "build-repro-2204=${RESULT_REPRO_2204}"; do
             name="${pair%%=*}"
