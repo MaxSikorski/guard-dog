@@ -1083,7 +1083,7 @@ fn every_broken_file_is_refused() {
             "fact evidence naming a local path",
             "lab-old-synthetic",
             "evidence = \"description: ",
-            "evidence = \"/Users/someone/lab: ",
+            "evidence = \"/srv/lab: ",
             "evidence names a local path",
         ),
         (
