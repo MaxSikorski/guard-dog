@@ -18,6 +18,7 @@
 )]
 
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -28,6 +29,9 @@ use gd_advisories::{
 };
 use proptest::prelude::*;
 use serde_json::{Value, json};
+
+/// Count of `[[version.examples]]` in `catalog/lnd.toml`.
+const LND_EXAMPLES: usize = 1;
 
 const SEED: u64 = 0x0000_0000_2026_1117;
 
@@ -974,146 +978,114 @@ fn every_corpus_endpoint_of_core_lnd_lit_and_tapd_parses() {
     assert_eq!(tapd_n, 2, "tapd events");
 }
 
-/// Quoted `key = "value"` lines of a TOML text, in order.
-fn toml_values(text: &str, key: &str) -> Vec<String> {
-    text.lines()
-        .filter_map(|l| {
-            let l = l.trim();
-            let rest = l.strip_prefix(key)?.trim_start().strip_prefix('=')?;
-            Some(rest.trim().trim_matches('"').to_string())
-        })
-        .collect()
-}
-
-/// What a catalog file's `[version]` table says: its `scheme` (the first
-/// `scheme =` line directly under the `[version]` header, before the next
-/// header) and the `version` and `raw` of each `[[version.examples]]`. Lines
-/// inside a multiline string are skipped, so text there never counts.
+/// What a catalog file's `[version]` table says, read with a real TOML parser:
+/// its `scheme` and the `version` and `raw` of each `[[version.examples]]`.
+/// Any missing or wrongly typed field, or a multiline `raw` or `version`, is an
+/// error naming the product and example index only.
 struct CatalogVersion {
-    scheme: Option<String>,
-    examples: Vec<(Option<String>, Option<String>)>,
+    scheme: String,
+    examples: Vec<(String, String)>,
 }
 
-fn catalog_version(text: &str) -> Result<CatalogVersion, String> {
-    let mut out = CatalogVersion {
-        scheme: None,
-        examples: Vec::new(),
-    };
-    let mut in_version = false;
-    let mut in_example = false;
-    // The delimiter of the multiline string being read, if any; only the
-    // same delimiter closes it.
-    let mut open: Option<&str> = None;
-    for line in text.lines() {
-        let l = line.trim();
-        if let Some(d) = open {
-            if l.matches(d).count() % 2 == 1 {
-                open = None;
-            }
-            continue;
-        }
-        // A multiline string opens when a value starts with a triple quote
-        // that is not closed on the same line; a triple quote of the other
-        // kind inside a one-line value is plain text.
-        let value = l.split_once('=').map_or("", |(_, v)| v.trim_start());
-        let opens = ["\"\"\"", "'''"]
-            .into_iter()
-            .find(|d| value.starts_with(d) && value.matches(d).count() % 2 == 1);
-        if opens.is_some()
-            && in_example
-            && (!toml_values(l, "raw").is_empty() || !toml_values(l, "version").is_empty())
-        {
+fn catalog_version(text: &str, product: &str) -> Result<CatalogVersion, String> {
+    let table = text
+        .parse::<toml::Table>()
+        .map_err(|_| format!("{product} catalog is not valid TOML"))?;
+    let version = table
+        .get("version")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| format!("{product} catalog has no [version] table"))?;
+    let scheme = version
+        .get("scheme")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| format!("{product} catalog version.scheme is missing or not a string"))?
+        .to_string();
+    let list = version
+        .get("examples")
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| format!("{product} catalog version.examples is missing or not an array"))?;
+    let mut examples = Vec::new();
+    for (n, item) in list.iter().enumerate() {
+        let t = item
+            .as_table()
+            .ok_or_else(|| format!("{product} catalog example #{n} is not a table"))?;
+        let field = |key: &str| -> Result<String, String> {
+            t.get(key)
+                .and_then(toml::Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    format!("{product} catalog example #{n} {key} is missing or not a string")
+                })
+        };
+        let (v, raw) = (field("version")?, field("raw")?);
+        if v.contains('\n') || raw.contains('\n') {
             return Err(format!(
-                "catalog example #{} raw or version is multiline",
-                out.examples.len().saturating_sub(1)
+                "{product} catalog example #{n} raw or version is multiline"
             ));
         }
-        open = opens;
-        if l.starts_with('[') {
-            in_version = l == "[version]";
-            in_example = l == "[[version.examples]]";
-            if in_example {
-                out.examples.push((None, None));
-            }
-        } else if in_version && out.scheme.is_none() {
-            out.scheme = toml_values(l, "scheme").into_iter().next();
-        } else if in_example && let Some(last) = out.examples.last_mut() {
-            if let Some(v) = toml_values(l, "version").into_iter().next() {
-                last.0 = Some(v);
-            }
-            if let Some(r) = toml_values(l, "raw").into_iter().next() {
-                last.1 = Some(r);
-            }
+        examples.push((v, raw));
+    }
+    Ok(CatalogVersion { scheme, examples })
+}
+
+/// The LND catalog check: the scheme, and each example's version and raw read
+/// by the channel parser.
+fn lnd_catalog_check(text: &str) -> Result<usize, String> {
+    let cat = catalog_version(text, "lnd")?;
+    if cat.scheme != "semver-beta" {
+        return Err("lnd catalog scheme is not semver-beta".to_string());
+    }
+    for (n, (v, raw)) in cat.examples.iter().enumerate() {
+        if ChannelScheme::beta().parse(v).is_err() {
+            return Err(format!("lnd catalog example #{n} version does not parse"));
+        }
+        if ChannelScheme::beta().parse(raw).is_err() {
+            return Err(format!("lnd catalog example #{n} raw does not parse"));
         }
     }
-    Ok(out)
+    Ok(cat.examples.len())
 }
 
 #[test]
 fn catalog_names_and_examples_parse_in_their_schemes() {
     let core_toml = fs::read_to_string(root().join("catalog/bitcoin-core.toml")).unwrap();
-    let core_cat = catalog_version(&core_toml).unwrap();
+    let core_cat = catalog_version(&core_toml, "bitcoin-core").unwrap();
+    assert_eq!(core_cat.scheme, "bitcoin-core", "Core catalog scheme");
+    assert_eq!(core_cat.examples.len(), 1, "Core catalog example count");
     assert!(
-        core_cat.scheme.as_deref() == Some("bitcoin-core"),
-        "Core catalog scheme"
-    );
-    assert!(
-        core_cat
-            .examples
-            .iter()
-            .any(|(v, _)| v.as_deref() == Some("32.1")),
+        core_cat.examples.iter().any(|(v, _)| v == "32.1"),
         "Core catalog lists the 32.1 example"
     );
     for (n, (v, _)) in core_cat.examples.iter().enumerate() {
-        let v = v.as_deref().unwrap_or("");
         assert!(core().parse(v).is_ok(), "Core example #{n}");
     }
     let lnd_toml = fs::read_to_string(root().join("catalog/lnd.toml")).unwrap();
-    let lnd_cat = catalog_version(&lnd_toml).unwrap();
-    assert!(
-        lnd_cat.scheme.as_deref() == Some("semver-beta"),
-        "LND catalog scheme"
+    let lnd_cat = catalog_version(&lnd_toml, "lnd").unwrap();
+    assert_eq!(lnd_cat.scheme, "semver-beta", "LND catalog scheme");
+    assert_eq!(
+        lnd_cat.examples.len(),
+        LND_EXAMPLES,
+        "LND catalog example count"
     );
-    assert!(!lnd_cat.examples.is_empty(), "LND catalog has examples");
-    for (n, (v, raw)) in lnd_cat.examples.iter().enumerate() {
-        let v = v.as_deref().unwrap_or("");
-        assert!(ChannelScheme::beta().parse(v).is_ok(), "LND example #{n}");
-        if let Some(raw) = raw {
-            assert!(ChannelScheme::beta().parse(raw).is_ok(), "LND raw #{n}");
-        }
-    }
+    assert_eq!(lnd_catalog_check(&lnd_toml), Ok(LND_EXAMPLES));
 }
 
 #[test]
-fn a_scheme_line_inside_a_multiline_string_is_not_the_catalog_scheme() {
-    let text = "[upstream]\nnote = \'\'\'\nscheme = \"operator-private-marker\"\n\'\'\'\n\n[version]\nscheme = \"semver-beta\"\n\n[version.call]\nscheme = \"other\"\n";
+fn real_toml_parsing_catches_a_quoted_key_multiline_raw_and_a_commented_decoy() {
+    // A quoted "raw" key holding a multiline value.
+    let text = "[version]\nscheme = \"semver-beta\"\n\n[[version.examples]]\nversion = \"0.21.6-beta\"\n\"raw\" = \"\"\"0.21.6-beta\nscheme = \"operator-private-marker\"\n\"\"\"\n";
     assert!(
-        catalog_version(text).unwrap().scheme.as_deref() == Some("semver-beta"),
-        "the real scheme"
+        catalog_version(text, "lnd").is_err(),
+        "quoted-key multiline raw refused"
     );
-    let text = "[version]\ndoc = \"\"\"\nscheme = \"operator-private-marker\"\n\"\"\"\nscheme = \"semver-beta\"\n";
-    assert!(
-        catalog_version(text).unwrap().scheme.as_deref() == Some("semver-beta"),
-        "the real scheme after a multiline doc"
-    );
-}
-
-#[test]
-fn a_multiline_raw_or_version_is_refused_and_delimiters_do_not_mix() {
-    let text = "[version]\nscheme = \"semver-beta\"\n\n[[version.examples]]\nversion = \"0.21.6-beta\"\nraw = \"\"\"0.21.6-beta\nscheme = \"operator-private-marker\"\n\"\"\"\n";
-    assert!(catalog_version(text).is_err(), "multiline raw refused");
-    let text = "[[version.examples]]\nversion = \"\"\"1.0\n\"\"\"\n";
-    assert!(catalog_version(text).is_err(), "multiline version refused");
-    let text = "[upstream]\nnote = '''\ntext \"\"\" more\nscheme = \"operator-private-marker\"\n'''\n\n[version]\nscheme = \"semver-beta\"\n";
-    assert!(
-        catalog_version(text).unwrap().scheme.as_deref() == Some("semver-beta"),
-        "a triple quote of the other kind inside a string does not close it"
-    );
-    let text = "[version]\nnote = \"a '''b\"\nscheme = \"semver-beta\"\n";
-    assert!(
-        catalog_version(text).unwrap().scheme.as_deref() == Some("semver-beta"),
-        "a one-line value holding the other delimiter does not toggle state"
-    );
+    assert!(lnd_catalog_check(text).is_err());
+    // A comment holding a triple quote cannot hide a second example whose
+    // raw is not a version.
+    let text = "[version]\nscheme = \"semver-beta\"\n\n[[version.examples]]\nversion = \"0.21.6-beta\"\nraw = \"0.21.6-beta\"\n# note \"\"\"\n[[version.examples]]\nversion = \"0.21.6-beta\"\nraw = \"invalid\"\n";
+    let cat = catalog_version(text, "lnd").unwrap();
+    assert_eq!(cat.examples.len(), 2, "the second example is seen");
+    assert_eq!(cat.examples[1].1, "invalid");
+    assert!(lnd_catalog_check(text).is_err(), "invalid raw refused");
 }
 
 struct Pair {
@@ -1122,32 +1094,38 @@ struct Pair {
     version: String,
 }
 
+fn fixture_table(text: &str) -> toml::Table {
+    text.parse::<toml::Table>().unwrap()
+}
+
+fn str_of(t: &toml::Table, key: &str, what: &str) -> String {
+    t.get(key)
+        .and_then(toml::Value::as_str)
+        .unwrap_or_else(|| panic!("{what} {key} is missing or not a string"))
+        .to_string()
+}
+
 /// Every `[[setup.service]]` of the fixture file, with its setup.
 fn fixture_services(text: &str) -> Vec<Pair> {
+    let doc = fixture_table(text);
     let mut out = Vec::new();
-    let mut setup = String::new();
-    let mut in_setup = false;
-    let mut in_service = false;
-    let mut id = String::new();
-    for line in text.lines() {
-        let l = line.trim();
-        if l == "[[setup]]" {
-            in_setup = true;
-            in_service = false;
-        } else if l == "[[setup.service]]" {
-            in_service = true;
-        } else if l.starts_with("[[") {
-            in_setup = false;
-            in_service = false;
-        } else if in_setup && !in_service && l.starts_with("id = ") {
-            setup = toml_values(l, "id").remove(0);
-        } else if in_service && l.starts_with("id = ") {
-            id = toml_values(l, "id").remove(0);
-        } else if in_service && l.starts_with("version = ") {
+    for (si, setup) in doc["setup"].as_array().unwrap().iter().enumerate() {
+        let setup = setup.as_table().unwrap();
+        let sid = str_of(setup, "id", &format!("setup #{si}"));
+        let Some(services) = setup.get("service").and_then(toml::Value::as_array) else {
+            continue;
+        };
+        for (vi, svc) in services.iter().enumerate() {
+            let svc = svc.as_table().unwrap();
+            let what = format!("setup #{si} service #{vi}");
+            let Some(version) = svc.get("version") else {
+                continue;
+            };
+            assert!(version.is_str(), "{what} version is not a string");
             out.push(Pair {
-                setup: setup.clone(),
-                product: id.clone(),
-                version: toml_values(l, "version").remove(0),
+                setup: sid.clone(),
+                product: str_of(svc, "id", &what),
+                version: str_of(svc, "version", &what),
             });
         }
     }
@@ -1156,11 +1134,20 @@ fn fixture_services(text: &str) -> Vec<Pair> {
 
 /// (setup, advisory, version subresult) of every `[[expect]]`.
 fn fixture_expects(text: &str) -> Vec<(String, String, String)> {
-    text.split("\n[[expect]]\n")
-        .skip(1)
-        .map(|block| {
-            let get = |k: &str| toml_values(block, k).into_iter().next().unwrap();
-            (get("setup"), get("advisory"), get("version"))
+    let doc = fixture_table(text);
+    doc["expect"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(n, e)| {
+            let e = e.as_table().unwrap();
+            let what = format!("expectation #{n}");
+            (
+                str_of(e, "setup", &what),
+                str_of(e, "advisory", &what),
+                str_of(e, "version", &what),
+            )
         })
         .collect()
 }
@@ -1378,7 +1365,7 @@ fn fixture_pairs_give_the_expected_version_subresult() {
     let services = fixture_services(&text);
     let expects = fixture_expects(&text);
     let docs = corpus();
-    let mut checked: Vec<String> = Vec::new();
+    let mut checked: BTreeSet<String> = BTreeSet::new();
     let mut subversion_unknown = 0;
     for (xi, (setup, advisory, expected)) in expects.iter().enumerate() {
         let Some((ai, (_, adv, _))) = docs
@@ -1469,7 +1456,10 @@ fn fixture_pairs_give_the_expected_version_subresult() {
             };
             let Some(got) = got else { continue };
             assert!(got == expected, "{pkg} expectation #{xi}");
-            checked.push(format!("{setup}/{pkg}/{advisory}"));
+            assert!(
+                checked.insert(format!("{setup}/{pkg}/{advisory}")),
+                "pair checked twice, expectation #{xi}"
+            );
         }
     }
     assert_eq!(subversion_unknown, SUBVERSION_UNKNOWN.len());

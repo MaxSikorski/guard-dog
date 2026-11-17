@@ -84,9 +84,9 @@ pub enum UnknownReason {
     CandidateIsAnInterval,
     /// The entry has no usable range and no listed version.
     NoUsableRangeOrVersions,
-    /// A channel product's two orders (its own and literal SemVer) disagree, or
-    /// only one of them could answer. Declared last on purpose: order is
-    /// load-bearing, and this is the least fundamental reason.
+    /// A channel product's two orders (its own and literal SemVer) disagree.
+    /// Declared last on purpose: order is load-bearing, and this is the least
+    /// fundamental reason.
     SchemeConflict,
 }
 
