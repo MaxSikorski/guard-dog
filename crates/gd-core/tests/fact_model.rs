@@ -80,8 +80,8 @@ fn fact(subject: Subject, claim: Claim) -> Fact {
 
 fn container(name: &str) -> RunsAs {
     RunsAs::Container {
-        name: Untrusted::new(name.to_owned()),
-        image: Untrusted::new("img".to_owned()),
+        name: OutsideText::new(name),
+        image: OutsideText::new("img"),
         digest: None,
     }
 }
@@ -107,8 +107,11 @@ fn render(view: &SetupView) -> String {
         &view.word_size,
         &view.block_storage,
         &view.exposure,
-        view.services.iter().collect::<Vec<_>>(),
-        view.packages.iter().collect::<Vec<_>>(),
+        view.services().collect::<Vec<_>>(),
+        view.states().collect::<Vec<_>>(),
+        view.settings().collect::<Vec<_>>(),
+        format!("{:?}", view.blind_spots),
+        view.packages().collect::<Vec<_>>(),
     ))
     .unwrap()
 }
@@ -134,7 +137,7 @@ fn hostile_text() -> impl Strategy<Value = String> {
 
 /// A fact with `text` in every slot that takes outside text.
 fn hostile_fact(text: &str) -> Fact {
-    let u = |tag: &str| Untrusted::new(format!("ZQX{tag}{text}"));
+    let u = |tag: &str| OutsideText::new(&format!("ZQX{tag}{text}"));
     Fact::new(
         Subject::Service(instance("bitcoin-core")),
         Claim::Host {
@@ -159,9 +162,10 @@ fn hostile_fact(text: &str) -> Fact {
 }
 
 fn hostile_other_claims(text: &str) -> Vec<Claim> {
-    let u = |tag: &str| Untrusted::new(format!("ZQX{tag}{text}"));
+    let u = |tag: &str| OutsideText::new(&format!("ZQX{tag}{text}"));
     vec![
         Claim::Unrecognized {
+            candidates: vec![],
             runs_as: RunsAs::Container {
                 name: u("name"),
                 image: u("image"),
@@ -171,11 +175,13 @@ fn hostile_other_claims(text: &str) -> Vec<Claim> {
             source_label: Some(u("slabel")),
         },
         Claim::Unrecognized {
+            candidates: vec![],
             runs_as: RunsAs::Unit { name: u("unit") },
             version_label: None,
             source_label: None,
         },
         Claim::Unrecognized {
+            candidates: vec![],
             runs_as: RunsAs::Binary {
                 path: u("path"),
                 sha256: None,
@@ -261,7 +267,7 @@ fn reference_slug(t: &str, underscore: bool, empty_ok: bool) -> bool {
 
 fn reference_version(t: &str) -> bool {
     let ok = |s: &str| {
-        !s.is_empty()
+        s.starts_with(|c: char| c.is_ascii_alphanumeric())
             && s.chars().all(
                 |c| matches!(c, '0'..='9' | 'a'..='z' | 'A'..='Z' | '.' | '+' | '~' | '_' | '-'),
             )
@@ -332,73 +338,124 @@ fn epochs_are_versions_and_digests_are_not() {
     assert!(ImageDigest::parse("1!2.0").is_err());
 }
 
+fn witness() -> Evidence {
+    Evidence::new(
+        CallId::parse("package-search").unwrap(),
+        "searched every layer",
+    )
+}
+
+fn is_unknown<T>(o: &Observed<T>, why: UnknownReason) -> bool {
+    matches!(o, Observed::Unknown(u) if u.reason == why)
+}
+
+fn pkg_fact(presence: Observed<Presence>, v: Observed<PlainVersion>) -> Fact {
+    fact(
+        Subject::Service(instance("lnd")),
+        Claim::Package {
+            product: cat("xz-utils"),
+            presence,
+            version: v,
+        },
+    )
+}
+
 #[test]
 fn absent_is_seen_only_with_complete_coverage_and_never_unknown() {
     assert!(matches!(
-        Presence::absent(Coverage::Complete),
-        Observed::Seen(Presence::Absent)
+        Presence::absent(Coverage::Complete, witness()),
+        Observed::Seen(Presence::Absent(_))
     ));
-    let incomplete = |o: Observed<Presence>| {
-        matches!(
-            o,
-            Observed::Unknown(Unknown {
-                reason: UnknownReason::IncompleteCoverage,
-                ..
-            })
-        )
-    };
-    assert!(incomplete(Presence::absent(Coverage::Partial)));
-    assert!(matches!(
-        ServiceState::not_found(Coverage::Complete),
-        Observed::Seen(ServiceState::NotFound)
+    assert!(is_unknown(
+        &Presence::absent(Coverage::Partial, witness()),
+        UnknownReason::IncompleteCoverage
     ));
     assert!(matches!(
-        ServiceState::not_found(Coverage::Partial),
+        ServiceState::not_found(Coverage::Complete, witness()),
+        Observed::Seen(ServiceState::NotFound(_))
+    ));
+    assert!(matches!(
+        ServiceState::not_found(Coverage::Partial, witness()),
         Observed::Unknown(_)
     ));
 
-    let pkg = |presence: Observed<Presence>, v: Observed<PlainVersion>| {
-        fact(
-            Subject::Service(instance("lnd")),
-            Claim::Package {
-                product: cat("xz-utils"),
-                presence,
-                version: v,
-            },
-        )
-    };
-    let key = (instance("lnd"), cat("xz-utils"));
+    let key_in = instance("lnd");
+    let product = cat("xz-utils");
     let none = || unknown::<PlainVersion>(UnknownReason::NotChecked);
-    let no_presence = || unknown::<Presence>(UnknownReason::NotChecked);
-    let absent = setup_view(&[pkg(Presence::absent(Coverage::Complete), none())]);
+    let absent = |cov| Presence::absent(cov, witness());
+    let present = || Observed::Seen(Presence::Present);
+    let state = |facts: &[Fact]| setup_view(facts).package(&key_in, &product);
+
     assert!(matches!(
-        absent.packages[&key],
+        state(&[pkg_fact(absent(Coverage::Complete), none())]),
         Observed::Seen(PackageState::NotInstalled)
     ));
     // Looked, but not everywhere: unknown, never absent.
-    let partial = setup_view(&[pkg(Presence::absent(Coverage::Partial), none())]);
-    assert!(matches!(partial.packages[&key], Observed::Unknown(_)));
-    // Never looked: unknown.
-    let unlooked = setup_view(&[pkg(no_presence(), none())]);
-    assert!(matches!(unlooked.packages[&key], Observed::Unknown(_)));
-    // Present with no readable version: unknown, not a version.
-    let nov = setup_view(&[pkg(Observed::Seen(Presence::Present), none())]);
-    assert!(matches!(nov.packages[&key], Observed::Unknown(_)));
-    // Absent against a found version is a conflict, not a pick.
-    let both = setup_view(&[
-        pkg(Presence::absent(Coverage::Complete), none()),
-        pkg(
-            Observed::Seen(Presence::Present),
-            Observed::Seen(version("5.4.1")),
-        ),
-    ]);
     assert!(matches!(
-        both.packages[&key],
-        Observed::Unknown(Unknown {
-            reason: UnknownReason::Conflict,
-            ..
-        })
+        state(&[pkg_fact(absent(Coverage::Partial), none())]),
+        Observed::Unknown(_)
     ));
+    // Never looked: unknown.
+    assert!(matches!(
+        state(&[pkg_fact(unknown(UnknownReason::NotChecked), none())]),
+        Observed::Unknown(_)
+    ));
+    // Present with no readable version: installed, version unknown.
+    assert!(matches!(
+        state(&[pkg_fact(present(), none())]),
+        Observed::Seen(PackageState::Installed(Observed::Unknown(_)))
+    ));
+    assert!(matches!(
+        state(&[pkg_fact(present(), Observed::Seen(version("5.4.1")))]),
+        Observed::Seen(PackageState::Installed(Observed::Seen(_)))
+    ));
+    // H1: present (version unreadable) against absent is a conflict, never "not installed".
+    assert!(is_unknown(
+        &state(&[
+            pkg_fact(present(), none()),
+            pkg_fact(absent(Coverage::Complete), none())
+        ]),
+        UnknownReason::Conflict
+    ));
+    // Present with a version against absent: a conflict.
+    assert!(is_unknown(
+        &state(&[
+            pkg_fact(absent(Coverage::Complete), none()),
+            pkg_fact(present(), Observed::Seen(version("5.4.1"))),
+        ]),
+        UnknownReason::Conflict
+    ));
+    // H1: one fact that says absent and carries a version contradicts itself.
+    assert!(is_unknown(
+        &state(&[pkg_fact(
+            absent(Coverage::Complete),
+            Observed::Seen(version("5.4.1"))
+        )]),
+        UnknownReason::Conflict
+    ));
+}
+
+#[test]
+fn absence_without_a_complete_search_cannot_be_loaded() {
+    let absent = Presence::absent(Coverage::Complete, witness());
+    let good = json(&absent);
+    assert!(serde_json::from_str::<Observed<Presence>>(&good).is_ok());
+    // Coverage changed to Partial, evidence removed, or evidence missing: refused.
+    let partial = good.replace("\"Complete\"", "\"Partial\"");
+    assert!(serde_json::from_str::<Observed<Presence>>(&partial).is_err());
+    assert!(
+        serde_json::from_str::<Observed<Presence>>(
+            r#"{"Seen":{"Absent":{"coverage":"Complete"}}}"#
+        )
+        .is_err()
+    );
+    assert!(serde_json::from_str::<Observed<Presence>>(r#"{"Seen":"Absent"}"#).is_err());
+    assert!(serde_json::from_str::<Observed<Presence>>(r#"{"Seen":{"Absent":null}}"#).is_err());
+    let not_found = json(&ServiceState::not_found(Coverage::Complete, witness()));
+    assert!(serde_json::from_str::<Observed<ServiceState>>(&not_found).is_ok());
+    let partial = not_found.replace("\"Complete\"", "\"Partial\"");
+    assert!(serde_json::from_str::<Observed<ServiceState>>(&partial).is_err());
+    assert!(serde_json::from_str::<Observed<ServiceState>>(r#"{"Seen":"NotFound"}"#).is_err());
 }
 
 #[test]
@@ -417,22 +474,16 @@ fn a_stopped_service_is_not_running_and_a_gap_is_not_stopped() {
     let key = instance("lnd");
     let v = setup_view(&[svc(Observed::Seen(ServiceState::Stopped))]);
     assert!(matches!(
-        v.states[&key],
+        v.state(&key),
         Observed::Seen(ServiceState::Stopped)
     ));
     let v = setup_view(&[svc(unknown(UnknownReason::NoPermission))]);
-    assert!(matches!(v.states[&key], Observed::Unknown(_)));
+    assert!(matches!(v.state(&key), Observed::Unknown(_)));
     let v = setup_view(&[
         svc(Observed::Seen(ServiceState::Running)),
         svc(Observed::Seen(ServiceState::Stopped)),
     ]);
-    assert!(matches!(
-        v.states[&key],
-        Observed::Unknown(Unknown {
-            reason: UnknownReason::Conflict,
-            ..
-        })
-    ));
+    assert!(is_unknown(&v.state(&key), UnknownReason::Conflict));
 }
 
 #[test]
@@ -445,7 +496,7 @@ fn a_lower_ranked_disagreement_raises_a_blind_spot_and_the_best_method_wins() {
     };
     let facts = ranked("1.0", "2.0");
     let view = setup_view(&facts);
-    assert!(matches!(&view.services[&instance("lnd")], Observed::Seen(v) if v.as_str() == "1.0"));
+    assert!(matches!(&view.service(&instance("lnd")), Observed::Seen(v) if v.as_str() == "1.0"));
     assert_eq!(view.blind_spots.len(), 1);
     assert!(matches!(
         view.blind_spots[0].what,
@@ -462,14 +513,253 @@ fn a_lower_ranked_disagreement_raises_a_blind_spot_and_the_best_method_wins() {
         service_fact("lnd", "1.0", Method::ImageDigest),
         service_fact("lnd", "2.0", Method::ImageDigest),
     ]);
-    assert!(matches!(
-        tie.services[&instance("lnd")],
-        Observed::Unknown(Unknown {
-            reason: UnknownReason::Conflict,
-            ..
-        })
+    assert!(is_unknown(
+        &tie.service(&instance("lnd")),
+        UnknownReason::Conflict
     ));
     assert!(tie.blind_spots.is_empty());
+}
+
+#[test]
+fn a_better_methods_conflict_or_silence_is_never_replaced_quietly() {
+    let with_version = |v: Observed<PlainVersion>, method| {
+        fact(
+            Subject::Service(instance("lnd")),
+            Claim::Service {
+                state: Observed::Seen(ServiceState::Running),
+                version: v,
+                runs_as: container("lnd"),
+                method,
+            },
+        )
+    };
+    let reply = || with_version(Observed::Seen(version("1.0")), Method::ServiceReply);
+    // L1: the digest method disagreed with itself; the self-report must not win.
+    let v = setup_view(&[
+        with_version(unknown(UnknownReason::Conflict), Method::ImageDigest),
+        reply(),
+    ]);
+    assert!(is_unknown(
+        &v.service(&instance("lnd")),
+        UnknownReason::Conflict
+    ));
+    // A worse method's conflict doesn't override a better method's answer.
+    let v = setup_view(&[
+        with_version(Observed::Seen(version("2.0")), Method::ImageDigest),
+        with_version(unknown(UnknownReason::Conflict), Method::ImageName),
+    ]);
+    assert!(matches!(&v.service(&instance("lnd")), Observed::Seen(x) if x.as_str() == "2.0"));
+    // A better method with no answer: the weaker version is used, with a blind spot.
+    let v = setup_view(&[
+        with_version(unknown(UnknownReason::NoPermission), Method::ImageDigest),
+        reply(),
+    ]);
+    assert!(matches!(&v.service(&instance("lnd")), Observed::Seen(x) if x.as_str() == "1.0"));
+    assert_eq!(v.blind_spots.len(), 1);
+    assert!(matches!(
+        v.blind_spots[0].what,
+        BlindSpotKind::BetterMethodUnavailable
+    ));
+}
+
+#[test]
+fn a_missing_key_is_unknown_never_none() {
+    let v = setup_view(&[service_fact("lnd", "1.0", Method::ServiceReply)]);
+    let ghost = instance("strfry");
+    assert!(is_unknown(&v.service(&ghost), UnknownReason::NotChecked));
+    assert!(is_unknown(&v.state(&ghost), UnknownReason::NotChecked));
+    assert!(is_unknown(
+        &v.package(&ghost, &cat("xz-utils")),
+        UnknownReason::NotChecked
+    ));
+    assert!(is_unknown(
+        &v.setting(&SettingId::parse("option_enabled").unwrap()),
+        UnknownReason::NotChecked
+    ));
+}
+
+#[test]
+fn a_claim_on_the_wrong_subject_is_a_blind_spot_not_silence() {
+    let service_on_host = fact(
+        Subject::Host,
+        Claim::Service {
+            state: Observed::Seen(ServiceState::Running),
+            version: Observed::Seen(version("1.0")),
+            runs_as: container("lnd"),
+            method: Method::Port,
+        },
+    );
+    let package_on_setup = fact(
+        Subject::Setup,
+        Claim::Package {
+            product: cat("xz-utils"),
+            presence: Observed::Seen(Presence::Present),
+            version: unknown(UnknownReason::NotChecked),
+        },
+    );
+    let v = setup_view(&[service_on_host.clone(), service_on_host, package_on_setup]);
+    assert_eq!(v.blind_spots.len(), 2, "{:?}", v.blind_spots);
+    assert!(
+        v.blind_spots
+            .iter()
+            .all(|s| matches!(s.what, BlindSpotKind::WrongSubject))
+    );
+    assert!(is_unknown(
+        &v.state(&instance("lnd")),
+        UnknownReason::NotChecked
+    ));
+}
+
+#[test]
+fn containers_not_checked_is_a_blind_spot_that_round_trips() {
+    let f = fact(
+        Subject::Host,
+        Claim::BlindSpot {
+            area: Area::Containers,
+            what: BlindSpotKind::NotChecked,
+            hint: HintId::parse("containers-not-checked").unwrap(),
+        },
+    );
+    assert_eq!(f.claim.kind(), "blind_spot");
+    let back: Fact = serde_json::from_str(&json(&f)).unwrap();
+    assert!(matches!(
+        back.claim,
+        Claim::BlindSpot {
+            area: Area::Containers,
+            what: BlindSpotKind::NotChecked,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn an_unrecognized_service_on_a_known_port_blocks_a_claim_of_absence() {
+    let lnd = instance("lnd");
+    let unrecognized = |candidates: Vec<CatalogId>| {
+        fact(
+            Subject::Host,
+            Claim::Unrecognized {
+                candidates,
+                runs_as: container("mystery"),
+                version_label: None,
+                source_label: None,
+            },
+        )
+    };
+    let lnd_not_found = || {
+        fact(
+            Subject::Service(lnd.clone()),
+            Claim::Service {
+                state: ServiceState::not_found(Coverage::Complete, witness()),
+                version: unknown(UnknownReason::NotChecked),
+                runs_as: container("lnd"),
+                method: Method::Port,
+            },
+        )
+    };
+    let lnd_package_absent = || {
+        fact(
+            Subject::Service(instance("bitcoin-core")),
+            Claim::Package {
+                product: cat("lnd"),
+                presence: Presence::absent(Coverage::Complete, witness()),
+                version: unknown(UnknownReason::NotChecked),
+            },
+        )
+    };
+    let key = (instance("bitcoin-core"), cat("lnd"));
+
+    // Without the unrecognised endpoint, absence stands.
+    let plain = setup_view(&[lnd_not_found(), lnd_package_absent()]);
+    assert!(matches!(
+        plain.state(&lnd),
+        Observed::Seen(ServiceState::NotFound(_))
+    ));
+    assert!(matches!(
+        plain.package(&key.0, &key.1),
+        Observed::Seen(PackageState::NotInstalled)
+    ));
+    // An unrecognised service on LND's port makes lnd Unknown, never absent.
+    let facts = [
+        lnd_not_found(),
+        lnd_package_absent(),
+        unrecognized(vec![cat("lnd")]),
+    ];
+    let v = setup_view(&facts);
+    assert!(is_unknown(&v.state(&lnd), UnknownReason::NotChecked));
+    assert!(is_unknown(
+        &v.package(&key.0, &key.1),
+        UnknownReason::NotChecked
+    ));
+    // Candidates for another product leave lnd's absence alone.
+    let other = setup_view(&[
+        lnd_not_found(),
+        lnd_package_absent(),
+        unrecognized(vec![cat("strfry")]),
+    ]);
+    assert!(matches!(
+        other.state(&lnd),
+        Observed::Seen(ServiceState::NotFound(_))
+    ));
+    // Order never matters.
+    let mut reversed = facts.to_vec();
+    reversed.reverse();
+    assert_eq!(render(&setup_view(&reversed)), render(&v));
+}
+
+#[test]
+fn settings_are_read_from_facts_and_gaps_are_unknown() {
+    let id = |s: &str| SettingId::parse(s).unwrap();
+    let setting = |key: &str, value: Observed<SettingValue>| {
+        fact(
+            Subject::Service(instance("bitcoin-core")),
+            Claim::Setting {
+                key: id(key),
+                value,
+            },
+        )
+    };
+    let v = setup_view(&[
+        setting("option_enabled", Observed::Seen(SettingValue::Enabled)),
+        setting("option_disabled", Observed::Seen(SettingValue::Disabled)),
+        setting(
+            "backend_in_use",
+            Observed::Seen(SettingValue::Named(id("leveldb"))),
+        ),
+        setting(
+            "node_builds_block_templates",
+            unknown(UnknownReason::NotChecked),
+        ),
+        // Two facts that disagree: a conflict.
+        setting("feature_enabled", Observed::Seen(SettingValue::Enabled)),
+        setting("feature_enabled", Observed::Seen(SettingValue::Disabled)),
+    ]);
+    assert!(matches!(
+        v.setting(&id("option_enabled")),
+        Observed::Seen(SettingValue::Enabled)
+    ));
+    assert!(matches!(
+        v.setting(&id("option_disabled")),
+        Observed::Seen(SettingValue::Disabled)
+    ));
+    assert!(matches!(
+        v.setting(&id("backend_in_use")),
+        Observed::Seen(SettingValue::Named(_))
+    ));
+    assert!(is_unknown(
+        &v.setting(&id("node_builds_block_templates")),
+        UnknownReason::NotChecked
+    ));
+    assert!(is_unknown(
+        &v.setting(&id("feature_enabled")),
+        UnknownReason::Conflict
+    ));
+    // Never mentioned: Unknown(NotChecked), not "disabled".
+    assert!(is_unknown(
+        &v.setting(&id("option_never_asked")),
+        UnknownReason::NotChecked
+    ));
+    assert_eq!(v.settings().count(), 5);
 }
 
 #[test]
@@ -631,7 +921,7 @@ fn a_digest_beats_a_self_report_in_the_view() {
         service_fact("lnd", "0.21.6-beta", Method::ImageDigest),
     ];
     let view = setup_view(&facts);
-    match &view.services[&instance("lnd")] {
+    match &view.service(&instance("lnd")) {
         Observed::Seen(v) => assert_eq!(v.as_str(), "0.21.6-beta"),
         Observed::Unknown(_) => panic!("expected the digest's version"),
     }
@@ -641,7 +931,7 @@ fn a_digest_beats_a_self_report_in_the_view() {
         service_fact("lnd", "2.0", Method::ServiceReply),
     ];
     assert!(matches!(
-        &setup_view(&tie).services[&instance("lnd")],
+        &setup_view(&tie).service(&instance("lnd")),
         Observed::Unknown(Unknown {
             reason: UnknownReason::Conflict,
             ..
@@ -758,18 +1048,21 @@ fn judge_text(view: &SetupView) -> Vec<(String, String)> {
             }),
         ),
     ];
-    for (inst, v) in &view.services {
+    for (inst, v) in view.services() {
         out.push((
             format!("service {}", inst.catalog.as_str()),
             seen(v, |v| v.as_str().to_owned()),
         ));
     }
-    for ((inst, product), v) in &view.packages {
+    for ((inst, product), v) in view.packages() {
         out.push((
             format!("package {} {}", inst.catalog.as_str(), product.as_str()),
             seen(v, |s| match s {
                 PackageState::NotInstalled => "none".to_owned(),
-                PackageState::Version(v) => v.as_str().to_owned(),
+                PackageState::Installed(Observed::Seen(v)) => v.as_str().to_owned(),
+                PackageState::Installed(Observed::Unknown(_)) => {
+                    "installed, version unknown".to_owned()
+                }
             }),
         ));
     }
@@ -815,7 +1108,7 @@ fn facts_from_fixture(setup: &Table) -> Vec<Fact> {
         mk(
             Subject::Host,
             Claim::Host {
-                os: Untrusted::new("fixture".to_owned()),
+                os: OutsideText::new("fixture"),
                 os_version: unknown(UnknownReason::NotChecked),
                 kernel: unknown(UnknownReason::NotChecked),
                 arch: Observed::Seen(match text(setup, "arch").as_str() {
@@ -866,7 +1159,7 @@ fn facts_from_fixture(setup: &Table) -> Vec<Fact> {
         let (presence, found) = match text(pkg, "version").as_str() {
             // The fixture's `none` is a complete search that found nothing.
             "none" => (
-                Presence::absent(Coverage::Complete),
+                Presence::absent(Coverage::Complete, witness()),
                 unknown(UnknownReason::NotChecked),
             ),
             v => (
@@ -987,7 +1280,15 @@ fn every_judge_b_family_is_a_fact_and_comes_back_equal() {
     }
 }
 
-const MANIFEST_FACT_KINDS: [&str; 4] = ["chain", "platform", "service", "source"];
+const MANIFEST_FACT_KINDS: [&str; 7] = [
+    "arch",
+    "block_storage",
+    "chain",
+    "exposure",
+    "platform",
+    "service",
+    "source",
+];
 const MANIFEST_NOTES: [&str; 3] = ["description", "format", "recorder"];
 
 #[test]
@@ -1044,6 +1345,40 @@ fn every_lab_manifest_kind_is_a_fact_and_comes_back_equal() {
             },
         ));
     }
+    // Without the three derived kinds, the view says Unknown, never a guess.
+    let without = judge_text(&setup_view(&facts));
+    for family in ["arch", "block_storage", "exposure"] {
+        let (_, value) = without.iter().find(|(f, _)| f == family).unwrap();
+        assert!(value.starts_with("unknown"), "{family}: {value}");
+    }
+    facts.push(mk(
+        Subject::Host,
+        Claim::Host {
+            os: OutsideText::new("lab"),
+            os_version: unknown(UnknownReason::NotChecked),
+            kernel: unknown(UnknownReason::NotChecked),
+            arch: Observed::Seen(match text(&m, "arch").as_str() {
+                "64-bit" => Arch::Aarch64,
+                other => panic!("arch {other:?}"),
+            }),
+        },
+    ));
+    facts.push(mk(
+        Subject::Service(instance(NODE)),
+        Claim::BlockStorage(Observed::Seen(fs_from(&text(&m, "block_storage")))),
+    ));
+    facts.push(mk(
+        Subject::Service(instance(NODE)),
+        Claim::Exposure {
+            port: 8333,
+            proto: Proto::Tcp,
+            reach: Observed::Seen(match text(&m, "exposure").as_str() {
+                "none" => Reach::NotListening,
+                other => panic!("exposure {other:?}"),
+            }),
+        },
+    ));
+
     // The manifest's `source` is the fact's Backend: every fact carries it.
     assert!(
         facts
@@ -1056,17 +1391,15 @@ fn every_lab_manifest_kind_is_a_fact_and_comes_back_equal() {
         ("chain", text(&m, "chain")),
         ("platform", text(&m, "platform")),
         ("source", text(&m, "source")),
+        ("arch", text(&m, "arch")),
+        ("block_storage", text(&m, "block_storage")),
+        ("exposure", text(&m, "exposure")),
     ] {
         assert!(view.contains(&(family.to_owned(), value)), "{family}");
     }
     for svc in m["service"].as_array().unwrap() {
         let svc = svc.as_table().unwrap();
         assert!(view.contains(&(format!("service {}", text(svc, "id")), text(svc, "version"))));
-    }
-    // What the manifest doesn't record stays Unknown, never a guess.
-    for family in ["arch", "block_storage", "exposure"] {
-        let (_, value) = view.iter().find(|(f, _)| f == family).unwrap();
-        assert!(value.starts_with("unknown"), "{family}: {value}");
     }
 }
 
@@ -1232,7 +1565,7 @@ fn disagreements_and_gaps_are_unknown_never_a_pick() {
         fact(
             Subject::Host,
             Claim::Host {
-                os: Untrusted::new("x".to_owned()),
+                os: OutsideText::new("x"),
                 os_version: unknown(UnknownReason::NotChecked),
                 kernel: unknown(UnknownReason::NotChecked),
                 arch: Observed::Seen(a),
@@ -1260,7 +1593,7 @@ fn disagreements_and_gaps_are_unknown_never_a_pick() {
     let v = setup_view(&[host(Arch::X86_64), host(Arch::Aarch64)]);
     assert!(matches!(v.word_size, Observed::Seen(WordSize::Bits64)));
     // An architecture we don't know has no word size.
-    let v = setup_view(&[host(Arch::Other(Untrusted::new("riscv".to_owned())))]);
+    let v = setup_view(&[host(Arch::Other(OutsideText::new("riscv")))]);
     assert!(matches!(
         v.word_size,
         Observed::Unknown(Unknown {
@@ -1284,7 +1617,7 @@ fn disagreements_and_gaps_are_unknown_never_a_pick() {
             ..
         })
     ));
-    assert!(v.services.is_empty() && v.packages.is_empty());
+    assert!(v.services().next().is_none() && v.packages().next().is_none());
 }
 
 fn reach_facts(items: &[Observed<Reach>]) -> Vec<Fact> {
@@ -1402,4 +1735,125 @@ fn every_version_in_the_fixtures_parses_and_up_sh_only_text_is_refused() {
     }
     // The one shared definition of the extra characters.
     assert_eq!(VERSION_PUNCTUATION, ".+~_-");
+}
+
+// ------------------------------------------ caps on every outside-text slot
+
+#[test]
+fn versions_cannot_look_like_options_or_paths() {
+    for bad in [
+        ".", "..", "-x", "--help", "-", "+1", "_1", "0!-x", "0!.", "1!~2",
+    ] {
+        assert!(PlainVersion::parse(bad).is_err(), "{bad:?}");
+    }
+    for good in ["0", "1.0", "0!1", "v1", "1-x"] {
+        assert!(PlainVersion::parse(good).is_ok(), "{good:?}");
+    }
+}
+
+#[test]
+fn outside_text_and_unknown_detail_are_capped_and_checked_on_load() {
+    let long = "é".repeat(2000);
+    // Built through the constructors, they are cut to the cap with the marker.
+    let text = OutsideText::new(&long);
+    assert!(text.untrusted().byte_len() <= MAX_OUTSIDE_TEXT_BYTES);
+    assert!(text.untrusted().expose_untrusted().ends_with(CUT_MARKER)); // test reads its own value
+    let u = Unknown::with_detail(UnknownReason::NoReply, &long);
+    assert!(u.detail().unwrap().byte_len() <= MAX_DETAIL_BYTES);
+    // Loaded from JSON over the cap: refused. At the cap: accepted.
+    let wrap = |n: usize| format!(r#"{{"untrusted":"{}"}}"#, "x".repeat(n));
+    assert!(serde_json::from_str::<OutsideText>(&wrap(MAX_OUTSIDE_TEXT_BYTES)).is_ok());
+    assert!(serde_json::from_str::<OutsideText>(&wrap(MAX_OUTSIDE_TEXT_BYTES + 1)).is_err());
+    let unknown_json = |n: usize| format!(r#"{{"reason":"NoReply","detail":{}}}"#, wrap(n));
+    assert!(serde_json::from_str::<Unknown>(&unknown_json(MAX_DETAIL_BYTES)).is_ok());
+    assert!(serde_json::from_str::<Unknown>(&unknown_json(MAX_DETAIL_BYTES + 1)).is_err());
+    assert!(serde_json::from_str::<Unknown>(r#"{"reason":"NoReply","detail":null}"#).is_ok());
+    // A fact whose slots hold oversized text is refused on load too.
+    let f = hostile_fact("a");
+    let mut doc: Json = serde_json::from_str(&json(&f)).unwrap();
+    doc["claim"]["Host"]["os"]["untrusted"] = Json::String("x".repeat(5000));
+    assert!(serde_json::from_value::<Fact>(doc).is_err());
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// Whatever text goes into an outside-text slot, the stored size is capped.
+    #[test]
+    fn every_outside_text_slot_is_capped(text in proptest::collection::vec(any::<char>(), 0..1500)
+        .prop_map(|c| c.into_iter().collect::<String>())) {
+        let f = hostile_fact(&text);
+        let back: Fact = serde_json::from_str(&json(&f)).unwrap();
+        prop_assert_eq!(json(&back), json(&f));
+        for claim in hostile_other_claims(&text) {
+            let g = fact(Subject::Host, claim);
+            let again: Fact = serde_json::from_str(&json(&g)).unwrap();
+            prop_assert_eq!(json(&again), json(&g));
+        }
+    }
+}
+
+// ------------------------------------------------------ ASCII-only JSON
+
+proptest! {
+    #![proptest_config(config())]
+
+    #[test]
+    fn ascii_json_has_no_raw_non_ascii_or_markup_and_means_the_same(text in hostile_text()) {
+        let f = hostile_fact(&text);
+        let out = to_ascii_json(&f).unwrap();
+        prop_assert!(out.bytes().all(|b| (0x20..0x7f).contains(&b)), "{out}");
+        prop_assert!(!out.contains(['<', '>', '&']), "{out}");
+        // Same meaning: parses to the same value as plain serde_json output.
+        let a: Json = serde_json::from_str(&out).unwrap();
+        let b: Json = serde_json::from_str(&json(&f)).unwrap();
+        prop_assert_eq!(a, b);
+    }
+}
+
+#[test]
+fn ascii_json_escapes_the_named_attacks() {
+    let t = Untrusted::new("a\u{9b}31m\u{202e}b\u{2028}</script>\u{1f415}&".to_owned());
+    let out = to_ascii_json(&t).unwrap();
+    let bs = "\\";
+    let expected = [
+        "{\"untrusted\":\"a",
+        bs,
+        "u009b31m",
+        bs,
+        "u202eb",
+        bs,
+        "u2028",
+        bs,
+        "u003c/script",
+        bs,
+        "u003e",
+        bs,
+        "ud83d",
+        bs,
+        "udc15",
+        bs,
+        "u0026\"}",
+    ]
+    .concat();
+    assert_eq!(out, expected);
+    // Plain serde_json leaves them raw, which is why the writer exists.
+    assert!(json(&t).contains('\u{9b}'));
+}
+
+// ------------------------------------------- the Untrusted wrapper's shape
+
+#[test]
+fn duplicate_keys_and_an_empty_object_are_refused() {
+    for bad in [
+        r#"{"untrusted":"a","untrusted":"b"}"#,
+        "{}",
+        r#"{"untrusted":"a","x":1}"#,
+        r#"{"x":"a"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<Untrusted<String>>(bad).is_err(),
+            "{bad}"
+        );
+    }
 }

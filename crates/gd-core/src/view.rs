@@ -5,15 +5,20 @@
 //! [`setup_view`]. It is a pure fold: the same facts in any order give the same
 //! view, and anything that can't be settled is `Unknown`, never a guess.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::fact::{
     Area, BackendKind, BlindSpotKind, CatalogId, Chain, Claim, Fact, FsKind, HintId, InstanceRef,
-    Method, Observed, PackageState, PlainVersion, Presence, Reach, ServiceState, Subject, Unknown,
-    UnknownReason, WordSize,
+    Method, Observed, PackageState, PlainVersion, Presence, Reach, ServiceState, SettingId,
+    SettingValue, Subject, Unknown, UnknownReason, WordSize,
 };
 
-/// What every fact said about one setup, folded.
+type PackageKey = (InstanceRef, CatalogId);
+type PackageFacts = Vec<(Observed<Presence>, Observed<PlainVersion>)>;
+
+/// What every fact said about one setup, folded. The per-service maps are
+/// private: ask through `service`, `state` and `package`, which answer
+/// `Unknown(NotChecked)` for something no fact mentioned, never a missing value.
 #[derive(Clone, Debug)]
 pub struct SetupView {
     /// Judge B's `source`: one back end kind, or `Unknown(Conflict)` if mixed.
@@ -29,26 +34,91 @@ pub struct SetupView {
     /// The widest reach of any port seen; an unknown port that might reach
     /// further makes the whole answer unknown.
     pub exposure: Observed<Reach>,
-    /// Each service's version, by the best detection method.
-    pub services: BTreeMap<InstanceRef, Observed<PlainVersion>>,
-    /// Running, stopped or not found, per service. `service_running` is read
-    /// from here, never from "a fact exists".
-    pub states: BTreeMap<InstanceRef, Observed<ServiceState>>,
-    /// Where methods of different rank gave different versions (the better one
-    /// was used). Sorted.
+    /// Where the fold met something it could not settle quietly: methods that
+    /// disagree, a better method with no answer, a claim on the wrong subject.
+    /// Sorted, without repeats.
     pub blind_spots: Vec<ViewBlindSpot>,
-    /// Keyed by (the service it is inside, the product).
-    pub packages: BTreeMap<(InstanceRef, CatalogId), Observed<PackageState>>,
+    services: BTreeMap<InstanceRef, Observed<PlainVersion>>,
+    states: BTreeMap<InstanceRef, Observed<ServiceState>>,
+    packages: BTreeMap<PackageKey, Observed<PackageState>>,
+    settings: BTreeMap<SettingId, Observed<SettingValue>>,
 }
 
-/// A note the fold raises about a service: two ways of finding its version
-/// disagreed. Becomes a `BlindSpot` fact when the scan is stored.
+fn not_checked<T>() -> Observed<T> {
+    Observed::Unknown(Unknown::new(UnknownReason::NotChecked))
+}
+
+impl SetupView {
+    /// A service's version, by the best detection method.
+    pub fn service(&self, instance: &InstanceRef) -> Observed<PlainVersion> {
+        self.services
+            .get(instance)
+            .cloned()
+            .unwrap_or_else(not_checked)
+    }
+
+    /// Running, stopped or not found. `service_running` is read from here,
+    /// never from "a fact exists".
+    pub fn state(&self, instance: &InstanceRef) -> Observed<ServiceState> {
+        self.states
+            .get(instance)
+            .cloned()
+            .unwrap_or_else(not_checked)
+    }
+
+    /// A package inside a service: absent, or installed.
+    pub fn package(&self, inside: &InstanceRef, product: &CatalogId) -> Observed<PackageState> {
+        self.packages
+            .get(&(inside.clone(), product.clone()))
+            .cloned()
+            .unwrap_or_else(not_checked)
+    }
+
+    /// A setting (`option_enabled`, `feature_enabled`, ...): what the facts say,
+    /// or `Unknown(NotChecked)` if none does. Conditions are read from here.
+    pub fn setting(&self, key: &SettingId) -> Observed<SettingValue> {
+        self.settings.get(key).cloned().unwrap_or_else(not_checked)
+    }
+
+    /// Every setting some fact mentioned, in order.
+    pub fn settings(&self) -> impl Iterator<Item = (&SettingId, &Observed<SettingValue>)> {
+        self.settings.iter()
+    }
+
+    /// Every service some fact mentioned, in order.
+    pub fn services(&self) -> impl Iterator<Item = (&InstanceRef, &Observed<PlainVersion>)> {
+        self.services.iter()
+    }
+
+    /// Every service whose state some fact mentioned, in order.
+    pub fn states(&self) -> impl Iterator<Item = (&InstanceRef, &Observed<ServiceState>)> {
+        self.states.iter()
+    }
+
+    /// Every (service, product) some fact mentioned, in order.
+    pub fn packages(&self) -> impl Iterator<Item = (&PackageKey, &Observed<PackageState>)> {
+        self.packages.iter()
+    }
+}
+
+/// A note the fold raises. Becomes a `BlindSpot` fact when the scan is stored.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ViewBlindSpot {
-    pub subject: InstanceRef,
+    pub subject: Subject,
     pub area: Area,
     pub what: BlindSpotKind,
     pub hint: HintId,
+}
+
+/// The hint is a literal that always parses; if it ever stopped, the note is
+/// dropped rather than panicking.
+fn spot(subject: &Subject, area: Area, what: BlindSpotKind, hint: &str) -> Option<ViewBlindSpot> {
+    Some(ViewBlindSpot {
+        subject: subject.clone(),
+        area,
+        what,
+        hint: HintId::parse(hint).ok()?,
+    })
 }
 
 /// Folds `facts` into one view. Order of `facts` never matters.
@@ -62,12 +132,18 @@ pub fn setup_view(facts: &[Fact]) -> SetupView {
     let mut reaches = Vec::new();
     let mut services: BTreeMap<InstanceRef, Vec<(Method, Observed<PlainVersion>)>> =
         BTreeMap::new();
-    let mut packages: BTreeMap<(InstanceRef, CatalogId), Vec<Observed<PackageState>>> =
-        BTreeMap::new();
+    let mut packages: BTreeMap<PackageKey, PackageFacts> = BTreeMap::new();
+    let mut settings: BTreeMap<SettingId, Vec<Observed<SettingValue>>> = BTreeMap::new();
+    let mut candidates: BTreeSet<CatalogId> = BTreeSet::new();
+    let mut blind_spots = Vec::new();
 
     for fact in facts {
         sources.push(Observed::Seen(fact.source.backend.kind()));
         match &fact.claim {
+            Claim::Setting { key, value } => {
+                settings.entry(key.clone()).or_default().push(value.clone())
+            }
+            Claim::Unrecognized { candidates: c, .. } => candidates.extend(c.iter().cloned()),
             Claim::Chain(chain) => chains.push(chain.clone()),
             Claim::Platform { id, .. } => platforms.push(Observed::Seen(id.clone())),
             Claim::Host { arch, .. } => word_sizes.push(match arch {
@@ -84,8 +160,8 @@ pub fn setup_view(facts: &[Fact]) -> SetupView {
                 version,
                 method,
                 ..
-            } => {
-                if let Subject::Service(instance) = &fact.subject {
+            } => match &fact.subject {
+                Subject::Service(instance) => {
                     states
                         .entry(instance.clone())
                         .or_default()
@@ -95,48 +171,66 @@ pub fn setup_view(facts: &[Fact]) -> SetupView {
                         .or_default()
                         .push((*method, version.clone()));
                 }
-            }
+                other => blind_spots.extend(spot(
+                    other,
+                    Area::Services,
+                    BlindSpotKind::WrongSubject,
+                    "claim-on-wrong-subject",
+                )),
+            },
             Claim::Package {
                 product,
                 presence,
                 version,
-            } => {
-                if let Subject::Service(instance) = &fact.subject {
-                    packages
-                        .entry((instance.clone(), product.clone()))
-                        .or_default()
-                        .push(package_state(presence, version));
-                }
-            }
+            } => match &fact.subject {
+                Subject::Service(instance) => packages
+                    .entry((instance.clone(), product.clone()))
+                    .or_default()
+                    .push((presence.clone(), version.clone())),
+                other => blind_spots.extend(spot(
+                    other,
+                    Area::Packages,
+                    BlindSpotKind::WrongSubject,
+                    "claim-on-wrong-subject",
+                )),
+            },
             _ => {}
         }
     }
 
-    let mut blind_spots = Vec::new();
     let services = services
         .into_iter()
         .map(|(instance, found)| {
-            let (value, disagrees) = fold_by_method(&found);
-            // The hint is a literal that always parses; if it ever stopped, the
-            // note is dropped rather than panicking.
-            if let (true, Ok(hint)) = (disagrees, HintId::parse("methods-disagree")) {
-                blind_spots.push(ViewBlindSpot {
-                    subject: instance.clone(),
-                    area: Area::Services,
-                    what: BlindSpotKind::MethodsDisagree,
+            let (value, notes) = fold_by_method(&found);
+            for (what, hint) in notes {
+                blind_spots.extend(spot(
+                    &Subject::Service(instance.clone()),
+                    Area::Services,
+                    what,
                     hint,
-                });
+                ));
             }
             (instance, value)
         })
         .collect();
     blind_spots.sort();
+    blind_spots.dedup();
 
     SetupView {
         source: fold(&sources, |a, b| a == b),
         states: states
             .into_iter()
-            .map(|(instance, found)| (instance, fold(&found, |a, b| a == b)))
+            .map(|(instance, found)| {
+                let folded = fold(&found, |a, b| a == b);
+                (
+                    instance.clone(),
+                    unless_candidate(folded, candidates.contains(&instance.catalog)),
+                )
+            })
+            .collect(),
+        settings: settings
+            .into_iter()
+            .map(|(key, found)| (key, fold(&found, |a, b| a == b)))
             .collect(),
         blind_spots,
         chain: fold(&chains, |a, b| a == b),
@@ -147,8 +241,32 @@ pub fn setup_view(facts: &[Fact]) -> SetupView {
         services,
         packages: packages
             .into_iter()
-            .map(|(key, found)| (key, fold(&found, |a, b| a == b)))
+            .map(|(key, found)| {
+                let folded = fold_package(&found);
+                let maybe = candidates.contains(&key.1);
+                (key, unless_candidate_package(folded, maybe))
+            })
             .collect(),
+    }
+}
+
+/// Something unrecognised might be this product, so its absence can't be
+/// claimed: a not-found service becomes `Unknown(NotChecked)`.
+fn unless_candidate(state: Observed<ServiceState>, maybe_it: bool) -> Observed<ServiceState> {
+    match state {
+        Observed::Seen(ServiceState::NotFound(_)) if maybe_it => not_checked(),
+        other => other,
+    }
+}
+
+/// The same for a package: not-installed becomes `Unknown(NotChecked)`.
+fn unless_candidate_package(
+    state: Observed<PackageState>,
+    maybe_it: bool,
+) -> Observed<PackageState> {
+    match state {
+        Observed::Seen(PackageState::NotInstalled) if maybe_it => not_checked(),
+        other => other,
     }
 }
 
@@ -204,59 +322,99 @@ fn fold<T: Clone>(items: &[Observed<T>], agree: impl Fn(&T, &T) -> bool) -> Obse
     }
 }
 
-/// A service's version: only the best evidence counts. Among the `Seen`
-/// versions found by the strongest method, they must agree.
-fn fold_by_method(found: &[(Method, Observed<PlainVersion>)]) -> (Observed<PlainVersion>, bool) {
-    let best = found
-        .iter()
-        .filter(|(_, observed)| matches!(observed, Observed::Seen(_)))
-        .map(|(method, _)| *method)
-        .min();
-    match best {
-        Some(best) => {
-            let top: Vec<Observed<PlainVersion>> = found
-                .iter()
-                .filter(|(method, _)| *method == best)
-                .map(|(_, observed)| observed.clone())
-                .collect();
-            let winner = fold(&top, |a, b| a == b);
-            // A lower-ranked method that saw a different version is a blind spot.
-            let disagrees = match &winner {
-                Observed::Seen(chosen) => found.iter().any(|(method, observed)| {
-                    *method != best && matches!(observed, Observed::Seen(v) if v != chosen)
-                }),
-                Observed::Unknown(_) => false,
-            };
-            (winner, disagrees)
-        }
-        None => {
-            let reasons: Vec<UnknownReason> = found
-                .iter()
-                .filter_map(|(_, observed)| match observed {
-                    Observed::Unknown(unknown) => Some(unknown.reason),
-                    Observed::Seen(_) => None,
-                })
-                .collect();
-            (no_value(&reasons), false)
-        }
+/// A service's version: only the best evidence counts.
+///
+/// - Among the `Seen` versions of the strongest method, they must agree, or the
+///   answer is `Unknown(Conflict)`.
+/// - A better method that reported `Conflict` is never replaced by a weaker
+///   method's answer: the result is `Conflict`.
+/// - A weaker method that saw a different version raises `MethodsDisagree`; a
+///   better method that gave no answer at all raises `BetterMethodUnavailable`.
+fn fold_by_method(
+    found: &[(Method, Observed<PlainVersion>)],
+) -> (Observed<PlainVersion>, Vec<(BlindSpotKind, &'static str)>) {
+    let best_where = |pick: &dyn Fn(&Observed<PlainVersion>) -> bool| {
+        found
+            .iter()
+            .filter(|(_, observed)| pick(observed))
+            .map(|(method, _)| *method)
+            .min()
+    };
+    let best_seen = best_where(&|o| matches!(o, Observed::Seen(_)));
+    let best_conflict = best_where(&|o| {
+        matches!(
+            o,
+            Observed::Unknown(Unknown {
+                reason: UnknownReason::Conflict,
+                ..
+            })
+        )
+    });
+    let best_gap =
+        best_where(&|o| matches!(o, Observed::Unknown(u) if u.reason != UnknownReason::Conflict));
+
+    let Some(best) = best_seen else {
+        let reasons: Vec<UnknownReason> = found
+            .iter()
+            .filter_map(|(_, observed)| match observed {
+                Observed::Unknown(unknown) => Some(unknown.reason),
+                Observed::Seen(_) => None,
+            })
+            .collect();
+        return (no_value(&reasons), Vec::new());
+    };
+    if best_conflict.is_some_and(|conflict| conflict <= best) {
+        return (
+            Observed::Unknown(Unknown::new(UnknownReason::Conflict)),
+            Vec::new(),
+        );
     }
+    let top: Vec<Observed<PlainVersion>> = found
+        .iter()
+        .filter(|(method, _)| *method == best)
+        .map(|(_, observed)| observed.clone())
+        .collect();
+    let winner = fold(&top, |a, b| a == b);
+    let mut notes = Vec::new();
+    if let Observed::Seen(chosen) = &winner
+        && found.iter().any(|(method, observed)| {
+            *method != best && matches!(observed, Observed::Seen(v) if v != chosen)
+        })
+    {
+        notes.push((BlindSpotKind::MethodsDisagree, "methods-disagree"));
+    }
+    if best_gap.is_some_and(|gap| gap < best) {
+        notes.push((
+            BlindSpotKind::BetterMethodUnavailable,
+            "better-method-unavailable",
+        ));
+    }
+    (winner, notes)
 }
 
-/// A package's state from its two observations: absent, present with a
-/// version, or unknown (never absent for lack of looking).
-fn package_state(
-    presence: &Observed<Presence>,
-    version: &Observed<PlainVersion>,
-) -> Observed<PackageState> {
-    match (presence, version) {
-        (Observed::Seen(Presence::Absent), _) => Observed::Seen(PackageState::NotInstalled),
-        (Observed::Seen(Presence::Present), Observed::Seen(v)) => {
-            Observed::Seen(PackageState::Version(v.clone()))
+/// A package from its presence and version observations. Presence is settled
+/// first: present against absent is a conflict, and an absent package that
+/// also carries a version contradicts itself. Only a package that is present
+/// gets a version fold (which may still be unknown).
+fn fold_package(found: &[(Observed<Presence>, Observed<PlainVersion>)]) -> Observed<PackageState> {
+    let presences: Vec<Observed<Presence>> = found.iter().map(|(p, _)| p.clone()).collect();
+    match fold(&presences, |a, b| a == b) {
+        Observed::Unknown(unknown) => Observed::Unknown(Unknown::new(unknown.reason)),
+        Observed::Seen(Presence::Absent(_)) => {
+            if found
+                .iter()
+                .any(|(_, version)| matches!(version, Observed::Seen(_)))
+            {
+                Observed::Unknown(Unknown::new(UnknownReason::Conflict))
+            } else {
+                Observed::Seen(PackageState::NotInstalled)
+            }
         }
-        (Observed::Seen(Presence::Present), Observed::Unknown(u)) => {
-            Observed::Unknown(Unknown::new(u.reason))
+        Observed::Seen(Presence::Present) => {
+            let versions: Vec<Observed<PlainVersion>> =
+                found.iter().map(|(_, v)| v.clone()).collect();
+            Observed::Seen(PackageState::Installed(fold(&versions, |a, b| a == b)))
         }
-        (Observed::Unknown(u), _) => Observed::Unknown(Unknown::new(u.reason)),
     }
 }
 

@@ -23,6 +23,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 ///   wrapper that marks it; a new caller of `serde_json::to_*` on facts outside
 ///   `gd-store` and the JSON output needs a reviewer's OK too.
 ///
+/// JSON meant for people or pages must go through [`crate::to_ascii_json`]: plain
+/// `serde_json` leaves C1 controls, bidi overrides and `</script>` raw.
+///
 /// `Debug` never shows the content, so a struct holding untrusted text can
 /// still derive `Debug` without leaking that text into logs. `Clone` runs the
 /// wrapped type's own `clone`, which is trusted code: wrap plain data types

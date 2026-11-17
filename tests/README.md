@@ -58,15 +58,26 @@ Phase 1.1 PR 1 (`crates/gd-core/src/fact.rs`, `view.rs`). Property tests use the
 | `evidence_is_cut_visibly_at_a_character_boundary`, `too_much_evidence_is_dropped_and_oversized_evidence_is_refused_on_load` | same | Evidence is at most 1 KiB with a visible cut marker, at most 4 per fact. |
 | `digests_and_signed_hashes_outrank_self_reports`, `a_digest_beats_a_self_report_in_the_view` | same | Method order, and the view prefers the better method; equal methods that disagree are a conflict. |
 | `every_judge_b_family_is_a_fact_and_comes_back_equal` | same | Both `expected-matches.toml` setups become facts, survive JSON, and fold back to the fixture's values in all families. |
-| `every_lab_manifest_kind_is_a_fact_and_comes_back_equal` | same | Every manifest key is a fact kind or a known note; what it doesn't record stays Unknown. |
-| `every_advisory_condition_fact_has_a_claim` | same | Every condition fact name in the corpus is a claim (six directly, the rest as Settings). |
+| `every_lab_manifest_kind_is_a_fact_and_comes_back_equal` | same | Every manifest key is a fact kind or a known note; what it leaves out stays Unknown. |
+| `every_advisory_condition_fact_has_a_claim` | same | Every condition fact name in the corpus is a claim (four claims directly, four Setting-shaped ones, the rest as Settings). |
 | `the_view_is_the_same_whatever_order_facts_arrive_in`, `disagreements_and_gaps_are_unknown_never_a_pick`, `no_exposure_evidence_is_not_checked_never_none` | same | Derived setup facts are deterministic; conflicts and gaps are Unknown. |
 | `unknown_never_moves_exposure_towards_none`, `an_unchecked_port_blocks_a_none_answer` | same | Replacing any exposure fact with Unknown never makes the setup look safer. |
 | `absent_is_seen_only_with_complete_coverage_and_never_unknown` | same | "Not installed" and "service not found" need complete coverage; partial, unlooked or version-less is Unknown, never absent; absent against a found version is a conflict. |
+| `absence_without_a_complete_search_cannot_be_loaded` | same | `Absent` and `NotFound` carry a complete-search witness; JSON with partial coverage, no evidence or a bare `"Absent"` is refused. |
+| `a_better_methods_conflict_or_silence_is_never_replaced_quietly` | same | A better method's conflict stays a conflict; a better method with no answer raises `BetterMethodUnavailable`. |
+| `a_missing_key_is_unknown_never_none` | same | The view's accessors answer `Unknown(NotChecked)` for a service, state, package or setting no fact mentioned. |
+| `a_claim_on_the_wrong_subject_is_a_blind_spot_not_silence` | same | A Service or Package claim on a non-service subject raises `WrongSubject`, counted once. |
+| `containers_not_checked_is_a_blind_spot_that_round_trips` | same | `Area::Containers` and `BlindSpotKind::NotChecked` make a blind spot that survives JSON. |
+| `an_unrecognized_service_on_a_known_port_blocks_a_claim_of_absence` | same | An unrecognised endpoint whose candidates include `lnd` turns lnd's not-found state and not-installed package into Unknown; other candidates leave them alone. |
+| `settings_are_read_from_facts_and_gaps_are_unknown` | same | Setting facts reach the view; disagreement is a conflict, a gap is Unknown, a never-asked key is `Unknown(NotChecked)`. |
+| `versions_cannot_look_like_options_or_paths` | same | A version must start with a letter or digit (also after `!`): `.`, `..`, `-x`, `0!-x` are refused. |
+| `outside_text_and_unknown_detail_are_capped_and_checked_on_load`, `every_outside_text_slot_is_capped` | same | Names, labels, OS and detail text are cut at construction (1 KiB, detail 256 B) and refused over the cap on load. |
+| `ascii_json_has_no_raw_non_ascii_or_markup_and_means_the_same`, `ascii_json_escapes_the_named_attacks` | same | `to_ascii_json` writes pure ASCII with `< > &` escaped, parsing to the same value; C1, bidi, U+2028 and `</script>` never appear raw. |
+| `duplicate_keys_and_an_empty_object_are_refused` | same | The `Untrusted` wrapper refuses duplicate keys, `{}` and extra keys. |
 | `a_stopped_service_is_not_running_and_a_gap_is_not_stopped` | same | Service state is its own observation: Stopped is not Running, a gap is Unknown, two states conflict. |
 | `a_lower_ranked_disagreement_raises_a_blind_spot_and_the_best_method_wins` | same | The best method's version wins; a worse method that disagrees raises a `MethodsDisagree` blind spot; equal-rank disagreement is a conflict; order never matters. |
 | `every_version_in_the_fixtures_parses_and_up_sh_only_text_is_refused` | same | Every version in the manifest and `expected-matches.toml` parses; `:`, `/`, spaces and quotes are refused. |
-| 7 compile-fail cases | `crates/gd-core/tests/ui/` | `Observed` can't be a bool, defaulted, compared with a plain value or `unwrap_or`ed; evidence can't be displayed or built past its cap; a version has no public constructor. |
+| 9 compile-fail cases | `crates/gd-core/tests/ui/` | `Observed` can't be a bool, defaulted, compared with a plain value or `unwrap_or`ed; evidence can't be displayed or built past its cap; a version has no public constructor; absence and `Unknown.detail` can't be built by hand. |
 
 ## License and supply-chain guard
 

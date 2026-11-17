@@ -6,10 +6,12 @@
 //! greppable [`Untrusted::expose_untrusted`].
 
 mod fact;
+mod json;
 mod untrusted;
 mod view;
 
 pub use fact::*;
+pub use json::to_ascii_json;
 pub use untrusted::Untrusted;
 pub use view::{SetupView, setup_view};
 

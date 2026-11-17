@@ -39,6 +39,8 @@ pub const MAX_EVIDENCE: usize = 4;
 pub const MAX_EVIDENCE_BYTES: usize = 1024;
 /// Detail text on an [`Unknown`] is cut to this many bytes, marker included.
 pub const MAX_DETAIL_BYTES: usize = 256;
+/// Outside text kept in a fact (names, labels) is cut to this many bytes.
+pub const MAX_OUTSIDE_TEXT_BYTES: usize = 1024;
 /// Appended where text was cut, so a reader can see it was.
 pub const CUT_MARKER: &str = "[...cut]";
 
@@ -77,8 +79,10 @@ pub const VERSION_PUNCTUATION: &str = ".+~_-";
 pub const MAX_VERSION_BYTES: usize = 64;
 
 fn is_plain_version(text: &str) -> bool {
+    // Starts with a letter or digit, so a version can never look like an option
+    // (`-x`) or a path (`.`, `..`).
     let plain = |t: &str| {
-        !t.is_empty()
+        t.starts_with(|c: char| c.is_ascii_alphanumeric())
             && t.chars()
                 .all(|c| c.is_ascii_alphanumeric() || VERSION_PUNCTUATION.contains(c))
     };
@@ -206,14 +210,73 @@ pub enum Observed<T> {
     Unknown(Unknown),
 }
 
-/// Why nothing was seen.
+/// Why nothing was seen. The detail text is outside text, capped at
+/// [`MAX_DETAIL_BYTES`] at construction and refused over it on load.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "UnknownWire")]
 pub struct Unknown {
     pub reason: UnknownReason,
-    pub detail: Option<Untrusted<String>>,
+    detail: Option<Untrusted<String>>,
+}
+
+#[derive(Deserialize)]
+struct UnknownWire {
+    reason: UnknownReason,
+    detail: Option<Untrusted<String>>,
+}
+
+impl TryFrom<UnknownWire> for Unknown {
+    type Error = FactError;
+    fn try_from(wire: UnknownWire) -> Result<Self, FactError> {
+        if wire
+            .detail
+            .as_ref()
+            .is_some_and(|d| d.byte_len() > MAX_DETAIL_BYTES)
+        {
+            return Err(FactError {
+                what: "detail (over 256 bytes)",
+            });
+        }
+        Ok(Self {
+            reason: wire.reason,
+            detail: wire.detail,
+        })
+    }
+}
+
+/// Outside text kept in a fact (an OS name, a container name, a label): always
+/// untrusted, cut to [`MAX_OUTSIDE_TEXT_BYTES`] with a visible marker, and
+/// refused over that on load.
+#[derive(Clone, Debug, Serialize)]
+pub struct OutsideText(Untrusted<String>);
+
+impl OutsideText {
+    pub fn new(text: &str) -> Self {
+        Self(Untrusted::new(cap_text(text, MAX_OUTSIDE_TEXT_BYTES)))
+    }
+
+    /// The text, still untrusted.
+    pub fn untrusted(&self) -> &Untrusted<String> {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for OutsideText {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let inner = Untrusted::<String>::deserialize(deserializer)?;
+        if inner.byte_len() > MAX_OUTSIDE_TEXT_BYTES {
+            return Err(serde::de::Error::custom("outside text over 1 KiB"));
+        }
+        Ok(Self(inner))
+    }
 }
 
 impl Unknown {
+    /// The detail text, if any. Still untrusted.
+    pub fn detail(&self) -> Option<&Untrusted<String>> {
+        self.detail.as_ref()
+    }
+
     pub fn new(reason: UnknownReason) -> Self {
         Self {
             reason,
@@ -247,7 +310,7 @@ pub enum UnknownReason {
 #[non_exhaustive]
 pub enum Claim {
     Host {
-        os: Untrusted<String>,
+        os: OutsideText,
         os_version: Observed<PlainVersion>,
         kernel: Observed<PlainVersion>,
         arch: Observed<Arch>,
@@ -265,8 +328,11 @@ pub enum Claim {
     },
     Unrecognized {
         runs_as: RunsAs,
-        version_label: Option<Untrusted<String>>,
-        source_label: Option<Untrusted<String>>,
+        /// Catalog products whose recognised ports include this endpoint's port:
+        /// what it might be. Their absence can no longer be claimed.
+        candidates: Vec<CatalogId>,
+        version_label: Option<OutsideText>,
+        source_label: Option<OutsideText>,
     },
     /// Subject: the node that said it.
     Chain(Observed<Chain>),
@@ -321,52 +387,103 @@ pub enum Coverage {
     Partial,
 }
 
-/// Whether a package is there. `Absent` is a claim, never a gap: it needs a
-/// search with complete coverage (`Presence::absent`), and the fact's evidence
-/// says what was searched. Judge B's `version = "none"` is `Seen(Absent)`; a
-/// package nobody looked for is `Unknown`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Proof that a search was complete. Built only by `Presence::absent` and
+/// `ServiceState::not_found`, with the evidence of what was searched; a value
+/// read from JSON is refused unless it says `Complete`. Any two complete
+/// searches compare equal (the evidence is for people, not for folding).
+#[derive(Clone, Debug, Serialize)]
+pub struct CompleteSearch {
+    coverage: Coverage,
+    evidence: Evidence,
+}
+
+#[derive(Deserialize)]
+struct CompleteSearchWire {
+    coverage: Coverage,
+    evidence: Evidence,
+}
+
+impl<'de> Deserialize<'de> for CompleteSearch {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = CompleteSearchWire::deserialize(deserializer)?;
+        match wire.coverage {
+            Coverage::Complete => Ok(Self {
+                coverage: wire.coverage,
+                evidence: wire.evidence,
+            }),
+            Coverage::Partial => Err(serde::de::Error::custom("absence needs a complete search")),
+        }
+    }
+}
+
+impl CompleteSearch {
+    /// What was searched, and what came back.
+    pub fn evidence(&self) -> &Evidence {
+        &self.evidence
+    }
+}
+
+impl PartialEq for CompleteSearch {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for CompleteSearch {}
+
+/// Whether a package is there. `Absent` is a claim, never a gap: it carries a
+/// [`CompleteSearch`], which only `Presence::absent` makes, so "not there"
+/// can't exist without evidence of a complete search. Judge B's
+/// `version = "none"` is `Seen(Absent)`; a package nobody looked for is `Unknown`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Presence {
     Present,
-    Absent,
+    Absent(CompleteSearch),
 }
 
 impl Presence {
-    /// "Looked and it is not there": `Seen(Absent)` for a complete search,
-    /// `Unknown(IncompleteCoverage)` for anything less.
-    pub fn absent(coverage: Coverage) -> Observed<Presence> {
+    /// "Looked and it is not there": `Seen(Absent)` for a complete search (with
+    /// its evidence), `Unknown(IncompleteCoverage)` for anything less.
+    pub fn absent(coverage: Coverage, search: Evidence) -> Observed<Presence> {
         match coverage {
-            Coverage::Complete => Observed::Seen(Presence::Absent),
+            Coverage::Complete => Observed::Seen(Presence::Absent(CompleteSearch {
+                coverage,
+                evidence: search,
+            })),
             Coverage::Partial => Observed::Unknown(Unknown::new(UnknownReason::IncompleteCoverage)),
         }
     }
 }
 
 /// What a service is doing. A stopped container is `Stopped`, never "running
-/// because a fact exists"; a service searched for and not found is `NotFound`,
-/// built only by `ServiceState::not_found`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// because a fact exists"; `NotFound` carries a [`CompleteSearch`] and is built
+/// only by `ServiceState::not_found`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ServiceState {
     Running,
     Stopped,
-    NotFound,
+    NotFound(CompleteSearch),
 }
 
 impl ServiceState {
     /// `Seen(NotFound)` for a complete search, `Unknown(IncompleteCoverage)` otherwise.
-    pub fn not_found(coverage: Coverage) -> Observed<ServiceState> {
+    pub fn not_found(coverage: Coverage, search: Evidence) -> Observed<ServiceState> {
         match coverage {
-            Coverage::Complete => Observed::Seen(ServiceState::NotFound),
+            Coverage::Complete => Observed::Seen(ServiceState::NotFound(CompleteSearch {
+                coverage,
+                evidence: search,
+            })),
             Coverage::Partial => Observed::Unknown(Unknown::new(UnknownReason::IncompleteCoverage)),
         }
     }
 }
 
-/// A package as the view reports it, derived from presence and version.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A package as the view reports it: proved absent, or installed (with a
+/// version that may still be unknown).
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PackageState {
     NotInstalled,
-    Version(PlainVersion),
+    Installed(Observed<PlainVersion>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -381,7 +498,7 @@ pub enum Arch {
     Aarch64,
     Armv7,
     X86,
-    Other(Untrusted<String>),
+    Other(OutsideText),
 }
 
 impl Arch {
@@ -415,7 +532,7 @@ pub enum FsKind {
     Exfat,
     Ntfs,
     Tmpfs,
-    Other(Untrusted<String>),
+    Other(OutsideText),
 }
 
 /// How far a port reaches, least to most. Judge B's `none` is
@@ -435,7 +552,7 @@ pub enum Proto {
     Udp,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SettingValue {
     Enabled,
     Disabled,
@@ -451,10 +568,14 @@ pub enum Area {
     Exposure,
     Packages,
     Store,
+    /// Containers and images (is the container runtime readable at all?).
+    Containers,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum BlindSpotKind {
+    /// The sensor never ran or was never asked (for example, containers not checked).
+    NotChecked,
     NoPermission,
     NoReply,
     Unparsable,
@@ -463,20 +584,24 @@ pub enum BlindSpotKind {
     HistorySetAside,
     /// Two detection methods gave different versions; the better one was used.
     MethodsDisagree,
+    /// A better detection method gave no answer; a weaker one was used.
+    BetterMethodUnavailable,
+    /// A claim about a service or package whose subject was not a service.
+    WrongSubject,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RunsAs {
     Container {
-        name: Untrusted<String>,
-        image: Untrusted<String>,
+        name: OutsideText,
+        image: OutsideText,
         digest: Option<ImageDigest>,
     },
     Unit {
-        name: Untrusted<String>,
+        name: OutsideText,
     },
     Binary {
-        path: Untrusted<String>,
+        path: OutsideText,
         sha256: Option<Sha256>,
     },
 }
