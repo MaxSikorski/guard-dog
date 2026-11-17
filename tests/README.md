@@ -68,11 +68,23 @@ The judges measure outcomes from outside the code. They arrive next, each with a
 | `the_checks_catch_subtle_mistakes` | A leading mark outside the main combining blocks, and an emoji selector left raw after an escape, are both caught even though they round-trip. |
 | `every_leading_mark_is_escaped` | Each of Unicode 16's 2,033 nonspacing and enclosing marks is escaped when it starts the text, in both renderers. |
 
-**Judge B, expected matches** (`crates/gd-core/tests/expected_matches.rs`, file `fixtures/expected-matches.toml`, format in `fixtures/README.md`): written by hand before any matcher. Today one setup, `lab-regtest` (the lab's five pinned services), times the 23 advisories: 0 affected, 22 not affected, 1 possibly affected (xz, because the lab records no package versions), 2 marked for Max's review. Every alert scores only if its result is exactly the expected one. **Baseline 2026-11-16: no matcher yet.** Reported 0, precision n/a (nothing reported), recall 0% (0 of 1). The lab setup has no affected pair, so it tests false alarms more than misses; recall needs recorded setups with older versions (Judge A). Four tests:
+**Judge B, expected matches** (`crates/gd-core/tests/expected_matches.rs`; the file is `fixtures/expected-matches.toml`, its format is in `fixtures/README.md`). The expectations were written by hand before any matcher exists. Two setups, each against all 23 advisories:
+
+| Setup | Affected | Not affected | Possibly affected |
+|---|---|---|---|
+| `lab-regtest` (the lab's five pinned services) | 0 | 23 | 0 |
+| `lab-old-synthetic` (labelled synthetic: the lab's configuration with Core 28.1, LND 0.18.4-beta, CLN 25.09 and Nutshell 0.17.0) | 7 | 14 | 2 |
+
+Three pairs are marked for Max's review. The lab's xz result comes from the versions read inside each pinned image. An alert scores only if its result is exactly the expected one. The matcher sees only the setup and advisory ids.
+
+**Baseline 2026-11-16: no matcher yet.** Reported 0, precision n/a (nothing reported), recall 0% (0 of 9).
+
+Five tests:
 
 | Test | What it proves |
 |---|---|
-| `expected_matches_cover_every_setup_and_advisory` | Every listed setup has exactly one entry per corpus advisory, sorted; ids exist; each result is one of the three and follows from its separate version and condition calls; possibly-affected has a question; reasons are one printable line; `lab-regtest`'s services and versions equal the id and expected-version labels in `lab/compose.yml`, which `lab/up.sh` checks the live services against. |
-| `judge_b_matcher_baseline` | Scores the stub matcher (says nothing) and pins the baseline above; update both when the matcher lands. |
-| `the_scoring_has_teeth` | The expectations themselves score 100% precision and recall; flagging everything "affected" gets nothing right; hedging everything "possibly" costs precision. |
-| `every_broken_file_is_refused` | 17 broken edits are each refused for their own reason: unknown result, a result the two calls don't give, unknown advisory or setup, a doubled or missing pair, a missing or malformed question, a question on a settled pair, an empty or control-character reason, a reviewer other than Max, an unknown key, a wrong lab version or service, an absent product with its condition met, a wrong format number. |
+| `expected_matches_cover_every_setup_and_advisory` | The file passes every check, and at least one pair is affected. The checks: every setup has exactly one sorted entry per corpus advisory; ids and products exist; each result follows from its separate version and condition calls; every in-range or out-of-range call has an affected package (platform-scoped entries only where they apply) that maps to a product in the setup, and `not-applicable` is used only when none does; every condition `service` in the corpus is a product id or alias; possibly-affected has a question; reasons are one printable line; `lab-regtest`'s services and versions equal the id and expected-version labels in `lab/compose.yml`; a synthetic setup says so. |
+| `every_platform_scope_is_understood` | Every per-entry `database_specific.platform` in the corpus has a rule saying which setups it applies to. A new platform text fails. |
+| `judge_b_matcher_baseline` | Scores the stub matcher, which says nothing, and pins the baseline above. Update both when the matcher lands. |
+| `the_scoring_has_teeth` | The expectations themselves score 100% precision and recall. Flagging everything "affected", or hedging everything "possibly", gets exactly the matching pairs right (counted from the file) and loses precision on the rest. |
+| `every_broken_file_is_refused` | 23 broken edits are each refused for their own reason. Among them: a result the two calls don't give, a doubled or missing pair, a missing question, a wrong lab version or service, a version call with no matching package, `not-applicable` for a product that is present, a condition service with no product, an unlabelled synthetic setup, and package versions without their evidence. |
