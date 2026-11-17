@@ -75,6 +75,17 @@ If your money and identity live on your own infrastructure, you're your own secu
 - Tell you you're "secure". It says **"no known issues found"**, along with when it checked and what it *couldn't* see.
 - Scan anybody else's machines.
 
+## How we know it works
+
+"It seems to work" isn't good enough for something that watches your money, so I grade Guard Dog with **judges**. A judge is a test that checks Guard Dog from the outside against real-world truth: real setups, real advisories, real network traffic and hostile text. I write each judge before the feature it grades exists, record a baseline score, and run it in CI, so a score can't quietly go down.
+
+- **Judge A, recorded setups:** does it find every service and its version on a real setup? Coming next.
+- **Judge B, real advisories:** does it report every advisory that applies, and nothing that doesn't? So far there's a corpus of 23 advisories, checked against the OSV schema. The matching comes later.
+- **Judge C, egress:** does anything leave the box that shouldn't? Coming next.
+- **Judge D, injection:** can hostile text make it do or show something it shouldn't? 48 hostile payloads, and 48 of 48 pass. A naive renderer fails 36 of them, so the judge has teeth.
+
+The details are in [tests/README.md](tests/README.md).
+
 ## For AI agents
 
 Guard Dog is built to work well with AI agents, on both sides:
