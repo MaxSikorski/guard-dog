@@ -38,7 +38,7 @@ fn nip44_conversation_keys_match_the_vectors() {
         let sec = hex32(&s(case, "sec1")).unwrap();
         let public = hex32(&s(case, "pub2")).unwrap();
         let key = nip44::conversation_key(&sec, &public).unwrap();
-        assert_eq!(hex_encode(&key), s(case, "conversation_key"));
+        assert_eq!(hex_encode(key.as_slice()), s(case, "conversation_key"));
     }
 }
 
@@ -79,8 +79,8 @@ fn nip44_encrypt_and_decrypt_match_the_vectors() {
         // Both directions of the key agreement give the vector's key.
         let a = nip44::conversation_key(&hex32(&sec1).unwrap(), &secret_to_pub_x(&sec2)).unwrap();
         let b = nip44::conversation_key(&hex32(&sec2).unwrap(), &secret_to_pub_x(&sec1)).unwrap();
-        assert_eq!(hex_encode(&a), want_key);
-        assert_eq!(hex_encode(&b), want_key);
+        assert_eq!(hex_encode(a.as_slice()), want_key);
+        assert_eq!(hex_encode(b.as_slice()), want_key);
 
         let nonce = hex32(&s(case, "nonce")).unwrap();
         let plaintext = s(case, "plaintext");

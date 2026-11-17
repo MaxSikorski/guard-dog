@@ -41,8 +41,7 @@ fn examples() -> Value {
 fn open(name: &str, any_kind: bool) {
     let all = examples();
     let case = &all[name];
-    let recipient =
-        Keys::from_secret_hex(case["recipient_secret"].as_str().unwrap()).unwrap();
+    let recipient = Keys::from_secret_hex(case["recipient_secret"].as_str().unwrap()).unwrap();
     let wrap = Event::from_json(&case["wrap"].to_string()).unwrap();
     wrap.verify().unwrap();
     let opened = if any_kind {
@@ -50,8 +49,14 @@ fn open(name: &str, any_kind: bool) {
     } else {
         unwrap_dm(&recipient, &wrap).unwrap()
     };
-    assert_eq!(opened.rumor.content, case["expect_content"].as_str().unwrap());
-    assert_eq!(opened.rumor.kind, case["expect_rumor_kind"].as_u64().unwrap());
+    assert_eq!(
+        opened.rumor.content,
+        case["expect_content"].as_str().unwrap()
+    );
+    assert_eq!(
+        opened.rumor.kind,
+        case["expect_rumor_kind"].as_u64().unwrap()
+    );
     opened.seal.verify().unwrap();
     assert_eq!(opened.rumor.pubkey, opened.seal.pubkey);
 }

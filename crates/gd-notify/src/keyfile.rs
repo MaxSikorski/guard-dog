@@ -11,6 +11,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
+use zeroize::Zeroizing;
 
 /// The key file's name inside the state folder.
 pub const KEY_FILE_NAME: &str = "notify.key";
@@ -19,7 +20,8 @@ fn refuse(message: &'static str) -> NotifyError {
     NotifyError::KeyFile(message)
 }
 
-fn check_state_dir(dir: &Path) -> Result<(), NotifyError> {
+/// Returns the folder's owner.
+fn check_state_dir(dir: &Path) -> Result<u32, NotifyError> {
     let meta = fs::symlink_metadata(dir).map_err(|_| refuse("the state folder does not exist"))?;
     if !meta.file_type().is_dir() {
         return Err(refuse("the state folder is not a real folder (a symlink?)"));
@@ -27,10 +29,15 @@ fn check_state_dir(dir: &Path) -> Result<(), NotifyError> {
     if meta.permissions().mode() & 0o7777 != 0o700 {
         return Err(refuse("the state folder must have mode 0700"));
     }
-    Ok(())
+    Ok(meta.uid())
 }
 
-fn read_key(path: &Path) -> Result<Keys, NotifyError> {
+/// The key file must belong to whoever owns the state folder.
+fn owners_match(file_uid: u32, dir_uid: u32) -> bool {
+    file_uid == dir_uid
+}
+
+fn read_key(path: &Path, dir_uid: u32) -> Result<Keys, NotifyError> {
     let before = fs::symlink_metadata(path).map_err(|_| refuse("cannot look at the key file"))?;
     if !before.file_type().is_file() {
         return Err(refuse("the key file is a symlink or not a regular file"));
@@ -51,12 +58,17 @@ fn read_key(path: &Path) -> Result<Keys, NotifyError> {
     if after.dev() != before.dev() || after.ino() != before.ino() || !after.file_type().is_file() {
         return Err(refuse("the key file changed while it was being opened"));
     }
+    if !owners_match(after.uid(), dir_uid) {
+        return Err(refuse(
+            "the key file does not belong to the state folder's owner",
+        ));
+    }
     if after.permissions().mode() & 0o7177 != 0 {
         return Err(refuse(
             "the key file must be readable and writable by its owner only (0600)",
         ));
     }
-    let mut text = String::new();
+    let mut text = Zeroizing::new(String::new());
     (&mut file)
         .take(129)
         .read_to_string(&mut text)
@@ -70,37 +82,55 @@ fn read_key(path: &Path) -> Result<Keys, NotifyError> {
 /// Reads Guard Dog's key, creating it on first use. `state_dir` must already
 /// exist with mode 0700.
 pub fn load_or_create(state_dir: &Path, entropy: &mut dyn Entropy) -> Result<Keys, NotifyError> {
-    check_state_dir(state_dir)?;
+    let dir_uid = check_state_dir(state_dir)?;
     let path = state_dir.join(KEY_FILE_NAME);
     match fs::symlink_metadata(&path) {
-        Ok(_) => return read_key(&path),
+        Ok(_) => return read_key(&path, dir_uid),
         Err(e) if e.kind() == ErrorKind::NotFound => {}
         Err(_) => return Err(refuse("cannot look at the key file")),
     }
     let keys = Keys::generate(entropy)?;
-    let created = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path);
-    match created {
-        Ok(mut file) => {
-            let mut line = keys.secret_hex();
-            line.push('\n');
-            file.write_all(line.as_bytes())
-                .and_then(|()| file.sync_all())
-                .map_err(|_| refuse("cannot write the key file"))?;
-            Ok(keys)
-        }
+    let mut line = keys.secret_hex();
+    line.push('\n');
+    match write_new(&path, |file| {
+        file.write_all(line.as_bytes())?;
+        file.sync_all()
+    }) {
+        Ok(()) => Ok(keys),
         // Someone else created it a moment ago: use theirs, after the same checks.
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => read_key(&path),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => read_key(&path, dir_uid),
         Err(_) => Err(refuse("cannot create the key file")),
     }
 }
 
+/// Creates the file (never over an existing one, mode 0600) and fills it with
+/// `fill`. If filling fails, the half-written file is removed, so a later run
+/// does not meet a broken key.
+fn write_new(
+    path: &Path,
+    fill: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    if let Err(e) = fill(&mut file) {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(e);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic
+    )]
 
     use super::*;
     use std::io;
@@ -118,7 +148,7 @@ mod tests {
     fn a_failed_write_leaves_no_key_file_behind() {
         let dir = temp_dir("partial");
         let path = dir.join(KEY_FILE_NAME);
-        let result = write_new(&path, "ab", |file| {
+        let result = write_new(&path, |file| {
             file.write_all(b"half a ke")?;
             Err(io::Error::other("disk full"))
         });
@@ -134,7 +164,7 @@ mod tests {
     fn a_failed_sync_is_also_cleaned_up() {
         let dir = temp_dir("sync");
         let path = dir.join(KEY_FILE_NAME);
-        assert!(write_new(&path, "ab", |_| Err(io::Error::other("sync failed"))).is_err());
+        assert!(write_new(&path, |_| Err(io::Error::other("sync failed"))).is_err());
         assert!(!path.exists());
         fs::remove_dir_all(&dir).unwrap();
     }

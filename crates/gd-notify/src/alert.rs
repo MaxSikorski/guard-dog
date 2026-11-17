@@ -3,6 +3,11 @@
 //! An [`Alert`] holds only values that were validated or escaped when it was
 //! built, so rendering it cannot let outside text add a headline, a "Fix:"
 //! line or a second message. One alert is one direct message.
+//!
+//! There is no "evidence" section in the message on purpose (design R1.8):
+//! text a service supplied (a banner, a version string, a label) never
+//! reaches a direct message. Only validated tokens, the advisory's own
+//! escaped and capped text, and Guard Dog's fixed sentences do.
 
 use crate::NotifyError;
 use gd_core::Untrusted;
@@ -202,6 +207,11 @@ impl Alert {
             checked_at: parts.checked_at,
             blind_spots: parts.blind_spots,
         })
+    }
+
+    /// The chain this alert is about.
+    pub fn chain(&self) -> Chain {
+        self.chain
     }
 
     /// The plain-text message: the headline sentence first, then what is

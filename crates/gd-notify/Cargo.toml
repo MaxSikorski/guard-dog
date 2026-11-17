@@ -22,5 +22,7 @@ hkdf = "=0.13.0"
 hmac = "=0.13.0"
 sha2 = "=0.11.1"
 getrandom = "=0.4.3"
+# Wipes secret keys and key-derived values from memory when dropped. Already in the tree via k256.
+zeroize = "=1.9.1"
 # WebSocket client for ws:// (lab relay). No TLS, no extras.
 tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }

@@ -269,10 +269,21 @@ impl fmt::Debug for UnwrappedDm {
     }
 }
 
-/// Opens a gift wrap addressed to `recipient`, checking every layer: the
-/// wrap's and seal's ids and signatures, their kinds, that the rumor was
-/// written by the seal's author, and the rumor's id.
+/// Opens a gift wrap addressed to `recipient` and requires the rumor to be a
+/// direct message (kind 14). See [`unwrap_any`] for the checks.
 pub fn unwrap_dm(recipient: &Keys, wrap: &Event) -> Result<UnwrappedDm, NotifyError> {
+    let opened = unwrap_any(recipient, wrap)?;
+    if opened.rumor.kind != 14 {
+        return Err(NotifyError::Crypto("gift wrap is not a direct message"));
+    }
+    Ok(opened)
+}
+
+/// Opens a gift wrap addressed to `recipient`, whatever the rumor's kind,
+/// checking every layer: the wrap's and seal's ids and signatures, their
+/// kinds, that the rumor was written by the seal's author, and the rumor's id.
+/// Used to check our code against other implementations' wraps.
+pub fn unwrap_any(recipient: &Keys, wrap: &Event) -> Result<UnwrappedDm, NotifyError> {
     let bad = NotifyError::Crypto("gift wrap refused");
     if wrap.kind != 1059 {
         return Err(bad);
@@ -291,7 +302,7 @@ pub fn unwrap_dm(recipient: &Keys, wrap: &Event) -> Result<UnwrappedDm, NotifyEr
     let value: Value = serde_json::from_str(&rumor_text).map_err(|_| bad)?;
     let rumor = core_fields(&value).map_err(|_| bad)?;
     let rumor_id = string_field(&value, "id").map_err(|_| bad)?;
-    if rumor.pubkey != seal.pubkey || rumor.id() != rumor_id || rumor.kind != 14 {
+    if rumor.pubkey != seal.pubkey || rumor.id() != rumor_id {
         return Err(bad);
     }
     Ok(UnwrappedDm {

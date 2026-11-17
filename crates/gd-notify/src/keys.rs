@@ -4,6 +4,7 @@ use crate::encoding::{hex_encode, hex32};
 use crate::{Entropy, NotifyError};
 use k256::schnorr::SigningKey;
 use std::fmt;
+use zeroize::Zeroizing;
 
 /// A BIP-340 key pair. The secret never leaves this type except to be written
 /// to the 0600 key file, and `Debug` shows nothing.
@@ -48,8 +49,9 @@ impl Keys {
     }
 
     /// The secret as hex, for the key file only.
-    pub(crate) fn secret_hex(&self) -> String {
-        hex_encode(self.signing.to_bytes().as_slice())
+    pub(crate) fn secret_hex(&self) -> Zeroizing<String> {
+        let bytes = Zeroizing::new(self.signing.to_bytes().as_slice().to_vec());
+        Zeroizing::new(hex_encode(&bytes))
     }
 }
 

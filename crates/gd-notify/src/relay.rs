@@ -8,7 +8,8 @@ use crate::NotifyError;
 use crate::event::Event;
 use gd_core::Untrusted;
 use serde_json::Value;
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use tungstenite::protocol::WebSocketConfig;
 use tungstenite::{Error as WsError, Message};
@@ -75,17 +76,54 @@ impl RelayUrl {
         }
     }
 
-    fn socket_addr(&self) -> Result<SocketAddr, NotifyError> {
+    fn allow_loopback(&self) -> bool {
         #[cfg(test)]
-        if self.loopback {
-            return Ok(SocketAddr::from(([127, 0, 0, 1], self.port)));
+        {
+            self.loopback
         }
-        (self.host.as_str(), self.port)
-            .to_socket_addrs()
-            .map_err(|_| NotifyError::Relay("cannot find the relay"))?
-            .next()
-            .ok_or(NotifyError::Relay("cannot find the relay"))
+        #[cfg(not(test))]
+        {
+            false
+        }
     }
+}
+
+/// True for the private ranges a lab or home network uses: 10.0.0.0/8,
+/// 172.16.0.0/12, 192.168.0.0/16 and IPv6 unique-local fc00::/7 (the lab is
+/// 172.29.208.0/24). An IPv4 address written as IPv6 is judged as IPv4.
+fn is_private(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_private(),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.is_private(),
+            None => v6.segments().first().is_some_and(|s| s & 0xfe00 == 0xfc00),
+        },
+    }
+}
+
+/// Picks the address to connect to from what the name resolved to. Every
+/// address must be private (loopback too, but only when `allow_loopback`, which
+/// only tests can set); one public address refuses the name, so a lookup that
+/// has been tampered with cannot send a message out to the internet.
+fn addresses_ok(addrs: &[SocketAddr], allow_loopback: bool) -> Result<SocketAddr, NotifyError> {
+    let all_private = addrs
+        .iter()
+        .all(|a| is_private(a.ip()) || (allow_loopback && a.ip().is_loopback()));
+    match addrs.first() {
+        Some(first) if all_private => Ok(*first),
+        _ => Err(NotifyError::Refused(
+            "the relay name does not resolve to a private address",
+        )),
+    }
+}
+
+fn system_resolver(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+    Ok((host, port).to_socket_addrs()?.collect())
+}
+
+#[cfg(test)]
+fn loopback_resolver(_host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+    Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])
 }
 
 /// The relay's answer to one event. The relay's own message is outside text.
@@ -97,13 +135,6 @@ pub struct PublishOutcome {
     pub accepted: bool,
     /// What the relay said, untrusted.
     pub message: Untrusted<String>,
-}
-
-fn remaining(start: Instant) -> Result<Duration, NotifyError> {
-    TOTAL_TIMEOUT
-        .checked_sub(start.elapsed())
-        .filter(|d| !d.is_zero())
-        .ok_or(NotifyError::Relay("timed out waiting for the relay"))
 }
 
 fn ws_error(e: &WsError) -> NotifyError {
@@ -128,8 +159,44 @@ fn ws_error(e: &WsError) -> NotifyError {
 /// all) for the relay's `["OK", id, true|false, message]` for each. Returns
 /// one outcome per event, in order.
 pub fn publish(relay: &RelayUrl, events: &[Event]) -> Result<Vec<PublishOutcome>, NotifyError> {
+    #[cfg(test)]
+    if relay.loopback {
+        return publish_with(relay, events, TOTAL_TIMEOUT, &loopback_resolver);
+    }
+    publish_with(relay, events, TOTAL_TIMEOUT, &system_resolver)
+}
+
+/// [`publish`] with the name lookup and the total time as parameters (tests
+/// use a fake lookup and a short deadline). The lookup runs in its own thread
+/// and counts against `total`; the address it returns is checked, and that
+/// checked address is the one connected to.
+fn publish_with<R>(
+    relay: &RelayUrl,
+    events: &[Event],
+    total: Duration,
+    resolver: &R,
+) -> Result<Vec<PublishOutcome>, NotifyError>
+where
+    R: Fn(&str, u16) -> std::io::Result<Vec<SocketAddr>> + Clone + Send + 'static,
+{
     let start = Instant::now();
-    let addr = relay.socket_addr()?;
+    let remaining = |start: Instant| -> Result<Duration, NotifyError> {
+        total
+            .checked_sub(start.elapsed())
+            .filter(|d| !d.is_zero())
+            .ok_or(NotifyError::Relay("timed out waiting for the relay"))
+    };
+    let (tx, rx) = mpsc::channel();
+    let lookup = resolver.clone();
+    let (host, port) = (relay.host.clone(), relay.port);
+    std::thread::spawn(move || {
+        let _ = tx.send(lookup(&host, port));
+    });
+    let found = rx
+        .recv_timeout(remaining(start)?)
+        .map_err(|_| NotifyError::Relay("timed out looking up the relay"))?
+        .map_err(|_| NotifyError::Relay("cannot find the relay"))?;
+    let addr = addresses_ok(&found, relay.allow_loopback())?;
     let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT.min(remaining(start)?))
         .map_err(|_| NotifyError::Relay("cannot connect to the relay"))?;
     let _ = stream.set_nodelay(true);
@@ -489,12 +556,32 @@ mod tests {
 
     #[test]
     fn only_private_addresses_are_accepted() {
-        for ok in ["10.1.2.3", "172.16.0.1", "172.29.208.5", "172.31.255.255", "192.168.1.1", "fd12:3456::1", "fc00::1"] {
+        for ok in [
+            "10.1.2.3",
+            "172.16.0.1",
+            "172.29.208.5",
+            "172.31.255.255",
+            "192.168.1.1",
+            "fd12:3456::1",
+            "fc00::1",
+        ] {
             assert!(addresses_ok(&[sock(ok)], false).is_ok(), "{ok}");
         }
         for bad in [
-            "8.8.8.8", "172.15.0.1", "172.32.0.1", "192.169.0.1", "127.0.0.1", "169.254.1.1", "0.0.0.0",
-            "100.64.0.1", "::1", "fe80::1", "2001:db8::1", "::ffff:8.8.8.8", "::", "fe00::1",
+            "8.8.8.8",
+            "172.15.0.1",
+            "172.32.0.1",
+            "192.169.0.1",
+            "127.0.0.1",
+            "169.254.1.1",
+            "0.0.0.0",
+            "100.64.0.1",
+            "::1",
+            "fe80::1",
+            "2001:db8::1",
+            "::ffff:8.8.8.8",
+            "::",
+            "fe00::1",
         ] {
             assert!(addresses_ok(&[sock(bad)], false).is_err(), "{bad}");
         }
@@ -503,14 +590,19 @@ mod tests {
         assert!(addresses_ok(&[], false).is_err());
         // Loopback only when the test hook says so.
         assert!(addresses_ok(&[sock("127.0.0.1")], true).is_ok());
-        assert_eq!(addresses_ok(&[sock("10.0.0.1"), sock("10.0.0.2")], false).unwrap(), sock("10.0.0.1"));
+        assert_eq!(
+            addresses_ok(&[sock("10.0.0.1"), sock("10.0.0.2")], false).unwrap(),
+            sock("10.0.0.1")
+        );
     }
 
     #[test]
     fn a_name_that_resolves_to_a_public_address_is_refused_before_connecting() {
         let (_, events) = wraps(1);
         let relay = RelayUrl::loopback_for_test(1);
-        let resolver = |_: &str, _: u16| -> std::io::Result<Vec<SocketAddr>> { Ok(vec![sock("93.184.216.34")]) };
+        let resolver = |_: &str, _: u16| -> std::io::Result<Vec<SocketAddr>> {
+            Ok(vec![sock("93.184.216.34")])
+        };
         // The loopback test relay may use loopback, but never a public address.
         let err = publish_with(&relay, &events, TOTAL_TIMEOUT, &resolver).unwrap_err();
         assert!(matches!(err, NotifyError::Refused(_)), "{err}");
@@ -527,7 +619,11 @@ mod tests {
         let start = Instant::now();
         let err = publish_with(&relay, &events, Duration::from_secs(1), &resolver).unwrap_err();
         assert!(matches!(err, NotifyError::Relay(_)), "{err}");
-        assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            start.elapsed()
+        );
     }
 
     #[test]

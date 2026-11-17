@@ -48,6 +48,15 @@ pub fn send_alerts(
             "notifications are only sent when the node is on regtest or signet",
         ));
     }
+    // Each alert's own chain must be one the node set reported and one we may
+    // notify about, so a mixed run cannot carry a mainnet finding.
+    for alert in alerts {
+        if !notify_allowed(&[alert.chain()]) || !chains.contains(&alert.chain()) {
+            return Err(NotifyError::Refused(
+                "an alert is about a chain that notifications are not allowed for",
+            ));
+        }
+    }
     let mut wraps = Vec::new();
     for message in plan_dms(alerts) {
         wraps.push(event::gift_wrap_dm(

@@ -355,5 +355,8 @@ fn an_alert_says_which_chain_it_is_on() {
 #[test]
 fn the_module_explains_why_there_is_no_evidence_section() {
     let source = include_str!("../src/alert.rs");
-    assert!(source.contains("no \"evidence\" section"), "say why in the module doc");
+    assert!(
+        source.contains("no \"evidence\" section"),
+        "say why in the module doc"
+    );
 }
