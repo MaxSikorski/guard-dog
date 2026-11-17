@@ -1,0 +1,5 @@
+Judge C (egress capture): FAIL
+control: dns ok, https ok, wire ok, blocked-path ok
+destinations: 0 unlisted, 2 allowlisted
+F2 canary-leaked nsec in http-body to api.example.org:443
+F5 capture-unreadable mitm: undecoded-content-encoding

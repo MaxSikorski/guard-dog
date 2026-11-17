@@ -1,0 +1,5 @@
+error[E0599]: no method named `unwrap_or` found for enum `Observed<T>` in the current scope
+ --> tests/ui/observed_unwrap_or.rs:5:23
+  |
+5 |     let _value = seen.unwrap_or(0);
+  |                       ^^^^^^^^^ method not found in `Observed<u8>`

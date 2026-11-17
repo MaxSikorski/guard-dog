@@ -5,16 +5,16 @@
 //! printed, shown or passed on without an escape function or an explicit,
 //! greppable [`Untrusted::expose_untrusted`].
 
+mod fact;
+mod json;
+pub mod privilege;
 mod untrusted;
+mod view;
 
+pub use fact::*;
+pub use json::to_ascii_json;
 pub use untrusted::Untrusted;
-
-/// Something a sensor observed: a service and its version, a listening port,
-/// a router mapping, a registered hardware wallet's firmware.
-///
-/// A placeholder until the inventory is built.
-#[non_exhaustive]
-pub struct Fact {}
+pub use view::{SetupView, setup_view};
 
 /// The matcher's verdict that an advisory applies to this setup: affected,
 /// not affected, or possibly affected plus the question that would settle it.

@@ -135,6 +135,27 @@ fn is_calendar_date(s: &str) -> bool {
     (1..=days_in_month).contains(&day)
 }
 
+/// The closed chain names: the same five as the fact model's `Chain` enum.
+const CHAINS: [&str; 5] = ["main", "testnet3", "testnet4", "signet", "regtest"];
+
+/// What is wrong with one condition, if anything: a `chain` condition's
+/// `any_of` must be a non-empty list of known chain names.
+fn condition_problem(cond: &Value) -> Option<String> {
+    if cond.get("required").is_some_and(|r| !r.is_boolean()) {
+        return Some("`required` must be true or false".to_owned());
+    }
+    if cond["fact"].as_str() != Some("chain") {
+        return None;
+    }
+    let Some(any_of) = cond["any_of"].as_array().filter(|a| !a.is_empty()) else {
+        return Some("a chain condition needs a non-empty any_of list".to_owned());
+    };
+    any_of
+        .iter()
+        .find(|v| !v.as_str().is_some_and(|s| CHAINS.contains(&s)))
+        .map(|v| format!("chain {v} is not one of {CHAINS:?}"))
+}
+
 /// OSV range rules the schema can't express. Events start with `introduced`;
 /// each `fixed` or `last_affected` closes the interval opened just before it,
 /// so two closings never follow each other; and one range uses `fixed` or
@@ -307,6 +328,11 @@ fn every_advisory_has_a_plain_english_playbook_and_checked_date() {
             "{}: every condition needs a \"fact\"",
             path.display()
         );
+        for cond in conditions {
+            if let Some(problem) = condition_problem(cond) {
+                panic!("{}: {problem}", path.display());
+            }
+        }
         assert!(
             gd["conditions_format"]
                 .as_str()
@@ -486,6 +512,25 @@ fn custom_checks_reject_broken_ranges_and_dates() {
         {"introduced": "2.0"}, {"last_affected": "2.1"}
     ])));
     assert!(!ok(json!([{"introduced": "0"}, {"limit": "abc"}])));
+
+    let chain_ok = |any_of: Value| {
+        condition_problem(&json!({"fact": "chain", "any_of": any_of, "required": true})).is_none()
+    };
+    assert!(chain_ok(json!(["main", "signet", "regtest"])));
+    assert!(
+        !chain_ok(json!(["testnet"])),
+        "a typo in a chain name must fail"
+    );
+    assert!(!chain_ok(json!(["mainnet"])));
+    assert!(!chain_ok(json!([])));
+    assert!(!chain_ok(json!([3])));
+    assert!(condition_problem(&json!({"fact": "chain"})).is_some());
+    assert!(condition_problem(&json!({"fact": "service_running"})).is_none());
+    assert!(condition_problem(&json!({"fact": "service_running", "required": false})).is_none());
+    assert!(
+        condition_problem(&json!({"fact": "service_running", "required": "no"})).is_some(),
+        "a non-boolean `required` must fail"
+    );
 
     assert!(is_calendar_date("2026-11-16"));
     assert!(is_calendar_date("2024-02-29"));
