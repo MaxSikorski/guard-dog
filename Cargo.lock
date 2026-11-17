@@ -449,6 +449,7 @@ dependencies = [
  "libc",
  "proptest",
  "regex",
+ "serde",
  "serde_json",
  "toml",
  "trybuild",

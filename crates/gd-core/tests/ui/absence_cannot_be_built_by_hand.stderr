@@ -1,0 +1,9 @@
+error: cannot construct `CompleteSearch` with struct literal syntax due to private fields
+ --> tests/ui/absence_cannot_be_built_by_hand.rs:5:71
+  |
+5 |     let _absent: Observed<Presence> = Observed::Seen(Presence::Absent(CompleteSearch {
+  |                                                                       ^^^^^^^^^^^^^^
+6 |         coverage: gd_core::Coverage::Complete,
+  |         ------------------------------------- private field
+  |
+  = note: ...and other private field `evidence` that was not provided
