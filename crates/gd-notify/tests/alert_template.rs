@@ -1,0 +1,317 @@
+//! The alert message, the sending policy and the chain guard.
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+
+use gd_core::Untrusted;
+use gd_notify::alert::{
+    Alert, AlertParts, Chain, MAX_DMS_PER_RUN, MatchResult, Severity, notify_allowed, plan_dms,
+    should_send_now,
+};
+use std::fs;
+use std::path::PathBuf;
+
+const CHECKED: u64 = 1_795_000_000;
+
+fn parts() -> AlertParts {
+    AlertParts {
+        product: "LND",
+        version: "0.18.4-beta".to_owned(),
+        chain: Chain::Regtest,
+        advisory_id: "x_lightning-labs-example-1".to_owned(),
+        result: MatchResult::Affected,
+        severity: Severity::High,
+        fixed_in: Some("0.18.5-beta".to_owned()),
+        summary: Untrusted::new("A crafted invoice can crash the node.".to_owned()),
+        playbook: Untrusted::new("1. Stop LND. 2. Install the new release.".to_owned()),
+        question: None,
+        checked_at: CHECKED,
+        blind_spots: vec!["Container images were not checked."],
+    }
+}
+
+fn alert(f: impl FnOnce(&mut AlertParts)) -> Alert {
+    let mut p = parts();
+    f(&mut p);
+    Alert::new(p).unwrap()
+}
+
+fn corpus() -> Vec<(String, String)> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/injection");
+    let mut out = Vec::new();
+    for channel in fs::read_dir(&root).unwrap() {
+        let channel = channel.unwrap().path();
+        if !channel.is_dir() {
+            continue;
+        }
+        for file in fs::read_dir(&channel).unwrap() {
+            let file = file.unwrap().path();
+            let bytes = fs::read(&file).unwrap();
+            out.push((
+                file.strip_prefix(&root).unwrap().display().to_string(),
+                String::from_utf8_lossy(&bytes).into_owned(),
+            ));
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn the_message_reads_in_the_planned_order() {
+    let text = alert(|p| p.question = Some(Untrusted::new("Is port 9735 open?".to_owned()))).render();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines[0],
+        "LND 0.18.4-beta on this node is affected by x_lightning-labs-example-1."
+    );
+    let at = |needle: &str| lines.iter().position(|l| l.starts_with(needle)).unwrap();
+    assert!(at("What is affected") < at("Why") && at("Why") < at("What to do"));
+    assert!(at("What to do") < at("Question:") && at("Question:") < at("Checked"));
+    assert!(at("Checked") < at("Blind spots") && at("Blind spots") < at("No known issues"));
+    assert!(text.contains("Update to 0.18.5-beta or later."));
+    assert!(text.contains("  > A crafted invoice can crash the node."));
+    assert!(text.contains("  > 1. Stop LND. 2. Install the new release."));
+    assert!(text.contains("  > Is port 9735 open?"));
+    assert!(text.contains("Checked: 2026-"));
+    assert!(text.contains("UTC"));
+    assert!(text.contains("- Container images were not checked."));
+    assert_eq!(
+        lines.last().copied(),
+        Some("No known issues is not the same as secure.")
+    );
+}
+
+#[test]
+fn possibly_affected_says_may_be() {
+    let text = alert(|p| p.result = MatchResult::PossiblyAffected).render();
+    assert_eq!(
+        text.lines().next().unwrap(),
+        "LND 0.18.4-beta on this node may be affected by x_lightning-labs-example-1."
+    );
+}
+
+#[test]
+fn no_fix_means_no_update_line_and_no_question_means_no_question_line() {
+    let text = alert(|p| p.fixed_in = None).render();
+    assert!(!text.lines().any(|l| l.starts_with("Update")));
+    assert!(!text.lines().any(|l| l.starts_with("Question:")));
+    assert!(text.contains("  > 1. Stop LND."));
+}
+
+#[test]
+fn empty_blind_spots_are_said_plainly() {
+    let text = alert(|p| p.blind_spots = vec![]).render();
+    assert!(text.contains("Blind spots: none reported."));
+}
+
+#[test]
+fn bad_tokens_are_refused() {
+    for v in ["", "1.2 3", "1.2\n3", "1.2;rm", &"1".repeat(65), "v1/2", "1.0\u{202e}", "é"] {
+        let mut p = parts();
+        p.version = v.to_owned();
+        assert!(Alert::new(p).is_err(), "version {v:?}");
+        let mut p = parts();
+        p.fixed_in = Some(v.to_owned());
+        assert!(Alert::new(p).is_err(), "fixed_in {v:?}");
+    }
+    for id in ["", "a b", "a\nFix: x", &"a".repeat(101), "a/b", "id:", "é"] {
+        let mut p = parts();
+        p.advisory_id = id.to_owned();
+        assert!(Alert::new(p).is_err(), "id {id:?}");
+    }
+    let mut ok = parts();
+    ok.version = "1.2.3+build~4-rc.1".to_owned();
+    ok.advisory_id = "CVE-2024-52911".to_owned();
+    assert!(Alert::new(ok).is_ok());
+}
+
+#[test]
+fn every_injection_payload_stays_quoted_in_one_message() {
+    let files = corpus();
+    assert!(files.len() >= 40, "corpus too small: {}", files.len());
+    for (name, payload) in &files {
+        for slot in 0..3 {
+            let text = alert(|p| {
+                let u = Untrusted::new(payload.clone());
+                match slot {
+                    0 => p.summary = u,
+                    1 => p.playbook = u,
+                    _ => p.question = Some(u),
+                }
+            })
+            .render();
+            // No control character at all except the line breaks we write.
+            for c in text.chars() {
+                assert!(
+                    c == '\n' || !c.is_control(),
+                    "{name}/{slot}: control {:?}",
+                    c as u32
+                );
+            }
+            // Our own lines, each exactly once; none a payload can forge.
+            let count = |f: &dyn Fn(&str) -> bool| text.lines().filter(|l| f(l)).count();
+            assert_eq!(count(&|l| l.starts_with("Fix:")), 0, "{name}/{slot}");
+            assert_eq!(count(&|l| l.starts_with("Update")), 1, "{name}/{slot}");
+            assert_eq!(
+                count(&|l| l.starts_with("Question:")),
+                usize::from(slot == 2),
+                "{name}/{slot}"
+            );
+            assert_eq!(
+                count(&|l| l.contains(" on this node is ") || l.contains(" on this node may be ")),
+                1 + 0 * slot,
+                "{name}/{slot}"
+            );
+            assert!(text.lines().next().unwrap().starts_with("LND 0.18.4-beta on this node is"));
+            // Every other line starts with our own words or the quote prefix.
+            let mut quoted = 0;
+            for l in text.lines() {
+                if l.starts_with("  > ") {
+                    quoted += 1;
+                    assert!(l.chars().count() <= 4 + 1000, "{name}/{slot}: too long");
+                }
+            }
+            assert_eq!(quoted, 3 - usize::from(slot != 2), "{name}/{slot}");
+            // One alert is one message: the footer closes it exactly once.
+            assert_eq!(text.matches("No known issues is not the same as secure.").count(), 1);
+        }
+    }
+}
+
+#[test]
+fn long_untrusted_text_is_capped_after_escaping_on_a_char_boundary() {
+    // Newlines become two characters each when escaped, so the cap is on the escaped text.
+    let long = "é\n".repeat(2000);
+    let text = alert(|p| {
+        p.summary = Untrusted::new(long.clone());
+        p.playbook = Untrusted::new(long.clone());
+        p.question = Some(Untrusted::new(long.clone()));
+    })
+    .render();
+    let mut lens = Vec::new();
+    for l in text.lines().filter(|l| l.starts_with("  > ")) {
+        lens.push(l.chars().count() - 4);
+    }
+    // summary, playbook (1000), question (500), in message order.
+    assert_eq!(lens, vec![500, 1000, 500]);
+    // An escape sequence may be cut, but nothing raw leaks.
+    assert!(!text.contains("é\n"));
+    // Short text is not touched.
+    let short = alert(|p| p.summary = Untrusted::new("é".to_owned())).render();
+    assert!(short.contains("  > é\n"));
+}
+
+#[test]
+fn policy_table() {
+    use MatchResult::{Affected, PossiblyAffected};
+    use Severity::{Critical, High, Low, Medium, Unknown};
+    let table = [
+        (Critical, Affected, true),
+        (High, Affected, true),
+        (Unknown, Affected, true),
+        (Medium, Affected, false),
+        (Low, Affected, false),
+        (Critical, PossiblyAffected, true),
+        (High, PossiblyAffected, true),
+        (Unknown, PossiblyAffected, true),
+        (Medium, PossiblyAffected, false),
+        (Low, PossiblyAffected, false),
+    ];
+    for (severity, result, want) in table {
+        let a = alert(|p| {
+            p.severity = severity;
+            p.result = result;
+        });
+        assert_eq!(should_send_now(&a), want, "{severity:?} {result:?}");
+    }
+}
+
+fn numbered(n: usize) -> Vec<Alert> {
+    (0..n)
+        .map(|i| alert(|p| p.advisory_id = format!("adv-{i:03}")))
+        .collect()
+}
+
+#[test]
+fn at_most_twenty_messages_then_one_summary() {
+    assert_eq!(MAX_DMS_PER_RUN, 20);
+    assert!(plan_dms(&[]).is_empty());
+    assert_eq!(plan_dms(&numbered(1)).len(), 1);
+    assert_eq!(plan_dms(&numbered(20)).len(), 20);
+    let planned = plan_dms(&numbered(23));
+    assert_eq!(planned.len(), 21);
+    assert!(planned[0].contains("adv-000") && planned[19].contains("adv-019"));
+    assert!(!planned.iter().take(20).any(|m| m.contains("more finding")));
+    assert!(planned[20].contains("3 more findings; run guard-dog scan to see them"));
+    assert!(planned[20].contains("No known issues is not the same as secure."));
+    assert!(!planned.iter().any(|m| m.contains("adv-020")));
+    assert!(plan_dms(&numbered(21))[20].contains("1 more finding; run guard-dog scan"));
+}
+
+#[test]
+fn plan_skips_what_policy_holds_back_and_puts_the_worst_first() {
+    let alerts = vec![
+        alert(|p| {
+            p.severity = Severity::Medium;
+            p.advisory_id = "medium-one".to_owned();
+        }),
+        alert(|p| {
+            p.severity = Severity::High;
+            p.advisory_id = "high-one".to_owned();
+        }),
+        alert(|p| {
+            p.severity = Severity::Critical;
+            p.advisory_id = "critical-one".to_owned();
+        }),
+        alert(|p| {
+            p.severity = Severity::Unknown;
+            p.advisory_id = "unknown-one".to_owned();
+        }),
+        alert(|p| {
+            p.severity = Severity::Low;
+            p.advisory_id = "low-one".to_owned();
+        }),
+    ];
+    let planned = plan_dms(&alerts);
+    assert_eq!(planned.len(), 3);
+    assert!(planned[0].contains("critical-one"));
+    assert!(planned[1].contains("high-one"));
+    assert!(planned[2].contains("unknown-one"));
+}
+
+#[test]
+fn notify_allowed_table() {
+    use Chain::{Mainnet, Regtest, Signet, Testnet, Unknown};
+    let table: [(&[Chain], bool); 12] = [
+        (&[], false),
+        (&[Regtest], true),
+        (&[Signet], true),
+        (&[Regtest, Signet], true),
+        (&[Regtest, Regtest], true),
+        (&[Mainnet], false),
+        (&[Testnet], false),
+        (&[Unknown], false),
+        (&[Regtest, Mainnet], false),
+        (&[Signet, Unknown], false),
+        (&[Regtest, Testnet], false),
+        (&[Unknown, Regtest, Signet], false),
+    ];
+    for (chains, want) in table {
+        assert_eq!(notify_allowed(chains), want, "{chains:?}");
+    }
+}
+
+#[test]
+fn debug_hides_the_message() {
+    let a = alert(|_| {});
+    let shown = format!("{a:?} {a:#?}");
+    assert!(shown.contains("<redacted>"));
+    for needle in ["LND", "0.18.4", "crafted invoice", "Stop LND", "x_lightning"] {
+        assert!(!shown.contains(needle), "{needle}");
+    }
+}
