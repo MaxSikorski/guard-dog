@@ -1,0 +1,260 @@
+# Guard Dog's regtest lab (Phase 0.8). Start it with lab/up.sh, remove it with
+# lab/down.sh. Never run `docker compose up` on this file by hand: up.sh makes
+# the throwaway regtest passwords first, and the file refuses to start without them.
+#
+# Rules this file keeps (checked by crates/gd-core/tests/lab_compose.rs):
+# - every image is pinned by its multi-arch index digest (linux/amd64 + linux/arm64)
+# - regtest only; nothing here can talk to mainnet, and the network has no way out
+# - no ports on the host, no host folders, no Docker socket, no named volumes:
+#   all data lives in memory (tmpfs) and vanishes with the container
+# - every container: read-only root, all capabilities dropped, no-new-privileges,
+#   a non-root user, and memory, swap, CPU and process limits (under 4 GiB in total)
+# - no password is written here: ${GD_LAB_*} values come from lab/.data/lab.env,
+#   generated fresh by lab/up.sh on every start
+name: gd-lab
+
+services:
+  # Bitcoin Core 32.1, regtest. Image: bitcoin/bitcoin on Docker Hub, MIT, built
+  # by CI in github.com/willcl-ark/bitcoin-core-docker. Unofficial: Bitcoin Core
+  # publishes no image. The image's own entrypoint needs root (chown, gosu), so
+  # we start bitcoind directly as the image's bitcoin user (101).
+  bitcoind:
+    image: bitcoin/bitcoin@sha256:d2454aaf2ff4ce1ebbc49f4aa05ed044c907b849a80a3f4c0ad23e488e50bbe0
+    labels:
+      org.guard-dog.lab.service: bitcoind
+      org.guard-dog.lab.id: bitcoin-core
+      org.guard-dog.lab.software: Bitcoin Core
+      org.guard-dog.lab.expected-version: "32.1"
+    user: "101:101"
+    entrypoint: ["bitcoind"]
+    command:
+      - -chain=regtest
+      - -datadir=/data
+      - -printtoconsole=1
+      - -server=1
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=172.29.208.0/24
+      # gdlab: the lab's own admin login, used only by LND and Core Lightning.
+      - -rpcauth=${GD_LAB_RPCAUTH:?run lab/up.sh, not docker compose}
+      # gdwatch: the least-privileged login spike b proposes for Guard Dog.
+      - -rpcauth=${GD_LAB_WATCH_RPCAUTH:?run lab/up.sh, not docker compose}
+      - -rpcwhitelist=gdwatch:getnetworkinfo,getblockchaininfo
+      - -rpcwhitelistdefault=0
+      - -zmqpubrawblock=tcp://0.0.0.0:28332
+      - -zmqpubrawtx=tcp://0.0.0.0:28333
+      - -fallbackfee=0.0002
+      - -dbcache=50
+      - -maxmempool=50
+      - -listen=0
+      - -dnsseed=0
+      - -fixedseeds=0
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-chain=regtest", "-datadir=/data", "getblockchaininfo"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+    tmpfs:
+      - /data:uid=101,gid=101,mode=0700,size=256m
+      # The image declares this path a VOLUME; covering it stops Docker making
+      # an anonymous volume that would outlive the lab.
+      - /home/bitcoin/.bitcoin:size=1m
+    networks: [lab]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    restart: "no"
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
+
+  # LND 0.21.6-beta, regtest. Image: lightninglabs/lnd on Docker Hub (Lightning
+  # Labs, official), MIT. The wallet is made with --noseedbackup: a throwaway
+  # regtest wallet with no seed to keep.
+  lnd:
+    image: lightninglabs/lnd@sha256:54b3c87ad0bc3fea3fab8af23ace6421147ea97e6b56bf3911592d7853c185b8
+    labels:
+      org.guard-dog.lab.service: lnd
+      org.guard-dog.lab.id: lnd
+      org.guard-dog.lab.software: LND
+      org.guard-dog.lab.expected-version: "0.21.6-beta"
+    user: "1000:1000"
+    environment:
+      HOME: /data
+    depends_on:
+      bitcoind:
+        condition: service_healthy
+    command:
+      - --lnddir=/data
+      - --bitcoin.regtest
+      - --bitcoin.node=bitcoind
+      - --bitcoind.rpchost=bitcoind:18443
+      - --bitcoind.rpcuser=gdlab
+      - --bitcoind.rpcpass=${GD_LAB_RPC_PASSWORD:?run lab/up.sh, not docker compose}
+      - --bitcoind.zmqpubrawblock=tcp://bitcoind:28332
+      - --bitcoind.zmqpubrawtx=tcp://bitcoind:28333
+      - --noseedbackup
+      - --alias=gd-lab-lnd
+      - --listen=0.0.0.0:9735
+      - --rpclisten=127.0.0.1:10009
+      - --norest
+      - --tlsextradomain=lnd
+    healthcheck:
+      test: ["CMD", "lncli", "--lnddir=/data", "--network=regtest", "getinfo"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+    tmpfs:
+      - /data:uid=1000,gid=1000,mode=0700,size=256m
+      - /root/.lnd:size=1m
+    networks: [lab]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    restart: "no"
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
+
+  # Core Lightning 26.06.9, regtest. Image: elementsproject/lightningd on Docker
+  # Hub (Blockstream / ElementsProject, official), BSD-MIT. The image defaults
+  # to mainnet ("bitcoin"); LIGHTNINGD_NETWORK below makes it regtest.
+  cln:
+    image: elementsproject/lightningd@sha256:de74289ddcccb68cd60543b08b2b8594002d819125d200492e17a95166d56577
+    labels:
+      org.guard-dog.lab.service: cln
+      org.guard-dog.lab.id: core-lightning
+      org.guard-dog.lab.software: Core Lightning
+      org.guard-dog.lab.expected-version: "26.06.9"
+    user: "1000:1000"
+    environment:
+      HOME: /data
+      LIGHTNINGD_DATA: /data
+      LIGHTNINGD_NETWORK: regtest
+    depends_on:
+      bitcoind:
+        condition: service_healthy
+    command:
+      - --lightning-dir=/data
+      - --alias=gd-lab-cln
+      - --bind-addr=0.0.0.0:9735
+      - --bitcoin-rpcconnect=bitcoind
+      - --bitcoin-rpcport=18443
+      - --bitcoin-rpcuser=gdlab
+      - --bitcoin-rpcpassword=${GD_LAB_RPC_PASSWORD:?run lab/up.sh, not docker compose}
+      - --disable-plugin=clnrest
+      - --disable-plugin=wss-proxy
+    healthcheck:
+      test: ["CMD", "lightning-cli", "--lightning-dir=/data", "--network=regtest", "getinfo"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+    tmpfs:
+      - /data:uid=1000,gid=1000,mode=0700,size=256m
+      - /tmp:size=16m
+      - /root/.lightning:size=1m
+    networks: [lab]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    restart: "no"
+    mem_limit: 384m
+    memswap_limit: 384m
+    cpus: 1.0
+    pids_limit: 256
+
+  # strfry 1.1.2-148-g4cd3cf6, a Nostr relay. Image: ghcr.io/hoytech/strfry
+  # (Doug Hoyte, official; only a `latest` tag exists, built 2026-09-04 from
+  # commit 4cd3cf6). GPL-3.0: run as a separate test container, never shipped
+  # with or linked into Guard Dog.
+  strfry:
+    image: ghcr.io/hoytech/strfry@sha256:36f1886d185a88ca57c66ebe52e6e9e8428dac2486eea0a5d50ff934f18b60c3
+    labels:
+      org.guard-dog.lab.service: strfry
+      org.guard-dog.lab.id: strfry
+      org.guard-dog.lab.software: strfry
+      org.guard-dog.lab.expected-version: "1.1.2-148-g4cd3cf6"
+    user: "1000:1000"
+    command:
+      - --config=/app/strfry.conf
+      - --set
+      - db=/data/
+      - --set
+      - relay.bind=0.0.0.0
+      - --set
+      - relay.nofiles=0
+      - --set
+      - dbParams.mapsize=1073741824
+      - relay
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "--header", "Accept: application/nostr+json", "http://127.0.0.1:7777/"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+    tmpfs:
+      - /data:uid=1000,gid=1000,mode=0700,size=128m
+    networks: [lab]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    restart: "no"
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+
+  # Cashu Nutshell 0.21.0, an ecash mint. Image: cashubtc/nutshell on Docker
+  # Hub (cashubtc, official), MIT. FakeWallet: no real Lightning backend, so
+  # the mint can never pay or be paid.
+  nutshell:
+    image: cashubtc/nutshell@sha256:beed25e291357368e35e1698bf2e4645d97ed435232a8f8ff6501c77d67c0b90
+    labels:
+      org.guard-dog.lab.service: nutshell
+      org.guard-dog.lab.id: nutshell
+      org.guard-dog.lab.software: Nutshell
+      org.guard-dog.lab.expected-version: "0.21.0"
+    user: "1000:1000"
+    working_dir: /data
+    command: ["python3", "-m", "cashu.mint"]
+    environment:
+      HOME: /data
+      PYTHONPATH: /app
+      CASHU_DIR: /data/.cashu
+      MINT_DATABASE: /data/mint
+      MINT_AUTH_DATABASE: /data/auth
+      MINT_BACKEND_BOLT11_SAT: FakeWallet
+      MINT_LISTEN_HOST: 0.0.0.0
+      MINT_LISTEN_PORT: "3338"
+      MINT_INFO_NAME: gd-lab-mint
+      MINT_PRIVATE_KEY: ${GD_LAB_MINT_KEY:?run lab/up.sh, not docker compose}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:3338/v1/info"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+    tmpfs:
+      - /data:uid=1000,gid=1000,mode=0700,size=64m
+      - /tmp:size=16m
+    networks: [lab]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    restart: "no"
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+
+networks:
+  lab:
+    # internal: no route out of the lab, not even to the internet.
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.29.208.0/24
