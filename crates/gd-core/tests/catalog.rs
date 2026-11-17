@@ -30,8 +30,9 @@ use std::path::{Path, PathBuf};
 
 use gd_core::Untrusted;
 use gd_core::catalog::{
-    self, Catalog, Entry, MAX_REPLY, Pattern, READ_ONLY_CALLS, ReplyMatch, SHARED_PORTS,
-    Unreadable, normalise_image,
+    self, Catalog, Entry, Identified, IdentifiedBy, MAX_REPLY, OTHER_URLS, Pattern,
+    READ_ONLY_CALLS, RELATED_OTHER_OWNER, ReplyMatch, SHARED_PORTS, Unreadable, VersionMatch,
+    normalise_image,
 };
 use regex::Regex;
 use toml::{Table, Value};
@@ -653,7 +654,12 @@ fn version_regexes_read_other_forms_of_the_same_product() {
         ("v24.11.1", Some("24.11.1")),
         ("v24.11rc1", Some("24.11rc1")),
         ("v24.08.2-12-gabcdef0", Some("24.08.2-12-gabcdef0")),
-        ("v24.11-modded", Some("24.11")),
+        // Modded builds keep their marker so the scheme can refuse them.
+        ("v24.11-modded", Some("24.11-modded")),
+        (
+            "v24.08.2-12-gabcdef0-modded",
+            Some("24.08.2-12-gabcdef0-modded"),
+        ),
     ] {
         assert_eq!(extract(&cln, raw).as_deref(), want, "cln {raw}");
     }
@@ -1219,9 +1225,19 @@ fn broken_entries_are_refused() {
         &replaced(&fry, "endpoint_port = 7777\n", "endpoint_port = 9999\n"),
         "one of recognize.ports",
     );
-    let no_port = replaced(&fry, "endpoint_port = 7777\n", "");
+    // With no endpoint_port the probe has no port either (the identity rule counts a
+    // probe on the endpoint port, or on no port).
+    let no_port = replaced(
+        &replaced(&fry, "endpoint_port = 7777\n", ""),
+        "port = 7777\nfield = \"software\"",
+        "field = \"software\"",
+    );
+    // The same without the probe at all, and without the todo that excuses the gap.
+    let probe_at = no_port.find("[[recognize.probes]]").unwrap();
+    let version_at = no_port.find("[version]").unwrap();
+    let no_probe = format!("{}{}", &no_port[..probe_at], &no_port[version_at..]);
     let no_todo = replaced(
-        &no_port,
+        &no_probe,
         "ports: 7777 comes from the lab healthcheck; confirm it is the upstream default",
         "something else",
     );
@@ -1900,31 +1916,122 @@ fn entries_on_port_finds_entries_sorted_by_id() {
     assert!(cat.entries_on_port(65535).is_empty());
 }
 
+/// The identity probe reply of each network-source entry that matches it.
+const IDENTITY_REPLIES: [(&str, &str); 4] = [
+    ("bitcoin-core", "/Satoshi:32.1.0/"),
+    ("lnd", "SERVER_ACTIVE"),
+    ("nutshell", "Nutshell/0.21.0"),
+    ("strfry", "git+https://github.com/hoytech/strfry.git"),
+];
+
+/// The proof of identity for an entry, from its probe reply; panics when it is not `Read`.
+fn identified<'e>(e: &'e Entry, reply: &str) -> Identified<'e> {
+    match e.identify_endpoint(&[u(reply)]) {
+        ReplyMatch::Read(i) => i,
+        other => panic!("{}: not identified: {other:?}", e.id()),
+    }
+}
+
 #[test]
-fn match_version_refuses_long_replies_and_partial_matches() {
+fn identity_comes_before_the_version() {
+    // Codex catalog r2 HIGH 1: a version is read only from an identified product.
     let cat = catalog::embedded().unwrap();
-    let core = cat.get("bitcoin-core").unwrap();
-    assert_eq!(
-        core.match_version(&u("/Satoshi:32.1.0/")),
-        ReplyMatch::Read("32.1")
-    );
-    // Anchored: junk before or after is not a match, nor is a second product.
-    assert_eq!(
-        core.match_version(&u("x/Satoshi:32.1.0/")),
-        ReplyMatch::NoMatch
-    );
-    assert_eq!(
-        core.match_version(&u("/Satoshi:32.1.0/ ")),
-        ReplyMatch::NoMatch
-    );
-    assert_eq!(
-        core.match_version(&u("/Satoshi:28.1.0/Knots:20250305/")),
-        ReplyMatch::NoMatch
-    );
-    // The reply cap: 256 bytes are read, 257 are Unreadable (version unknown),
-    // never NoMatch, whatever the pattern says.
     let fry = cat.get("strfry").unwrap();
-    assert_eq!(fry.match_version(&u("1.1.2")), ReplyMatch::Read("1.1.2"));
+    assert!(matches!(
+        fry.identify_endpoint(&[u("other-relay")]),
+        ReplyMatch::NoMatch
+    ));
+    let id = identified(fry, "git+https://github.com/hoytech/strfry.git");
+    assert_eq!(id.read_version(&u("1.1.2")), VersionMatch::Read("1.1.2"));
+    assert_eq!(id.entry().id(), "strfry");
+    assert_eq!(id.by(), IdentifiedBy::Probes);
+    // The wrong number of replies, or none, is missing evidence.
+    assert!(matches!(
+        fry.identify_endpoint(&[]),
+        ReplyMatch::Unreadable(Unreadable::MissingEvidence)
+    ));
+    assert!(matches!(
+        fry.identify_endpoint(&[u("a"), u("b")]),
+        ReplyMatch::Unreadable(Unreadable::MissingEvidence)
+    ));
+
+    // Bitcoin Core: the identity probe refuses Knots and anything partial.
+    let core = cat.get("bitcoin-core").unwrap();
+    let id = identified(core, "/Satoshi:32.1.0/");
+    assert_eq!(
+        id.read_version(&u("/Satoshi:32.1.0/")),
+        VersionMatch::Read("32.1")
+    );
+    for raw in [
+        "/Satoshi:28.1.0/Knots:20250305/",
+        "x/Satoshi:32.1.0/",
+        "/Satoshi:32.1.0/ ",
+    ] {
+        assert!(
+            matches!(core.identify_endpoint(&[u(raw)]), ReplyMatch::NoMatch),
+            "{raw}"
+        );
+    }
+
+    // Evidence kind: the version source says which evidence it can use.
+    let lnd = cat.get("lnd").unwrap();
+    let by_probe = identified(lnd, "SERVER_ACTIVE");
+    assert_eq!(
+        by_probe.read_version(&u("0.21.6-beta")),
+        VersionMatch::Read("0.21.6-beta")
+    );
+    let by_image = match lnd.identify_image(&u("lightninglabs/lnd:v0.21.6-beta")) {
+        ReplyMatch::Read(i) => i,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(by_image.by(), IdentifiedBy::Image);
+    assert_eq!(
+        by_image.read_version(&u("0.21.6-beta")),
+        VersionMatch::Unreadable(Unreadable::MissingEvidence)
+    );
+    let cln = cat.get("core-lightning").unwrap();
+    let cln_image = match cln.identify_image(&u("elementsproject/lightningd:v26.06.9")) {
+        ReplyMatch::Read(i) => i,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        cln_image.read_version(&u("v26.06.9")),
+        VersionMatch::Read("26.06.9")
+    );
+    assert!(matches!(
+        cln.identify_endpoint(&[]),
+        ReplyMatch::Unreadable(Unreadable::MissingEvidence)
+    ));
+
+    // identify_image.
+    let tapd = cat.get("tapd").unwrap();
+    assert!(matches!(
+        tapd.identify_image(&u("docker.io/lightninglabs/tapd")),
+        ReplyMatch::NoMatch
+    ));
+    assert!(matches!(
+        lnd.identify_image(&u("docker.io/evil/lnd")),
+        ReplyMatch::NoMatch
+    ));
+    assert!(matches!(
+        lnd.identify_image(&u("lnd\u{1b}[31m")),
+        ReplyMatch::Unreadable(Unreadable::BadToken)
+    ));
+    assert!(matches!(
+        lnd.identify_image(&u(&"a".repeat(MAX_REPLY + 1))),
+        ReplyMatch::Unreadable(Unreadable::TooLong)
+    ));
+    assert!(matches!(
+        lnd.identify_image(&u("lnd\u{e9}")),
+        ReplyMatch::Unreadable(Unreadable::NonAscii)
+    ));
+    assert_eq!(
+        format!("{by_probe:?}"),
+        "Identified { entry: \"lnd\", by: Probes }"
+    );
+
+    // The Pattern-level reply cap: 256 bytes are read, 257 are Unreadable (version
+    // unknown), never NoMatch, whatever the pattern says.
     let pat = Pattern::new(r"^(?P<version>\d+)$").unwrap();
     assert_eq!(
         pat.version(&u(&"7".repeat(MAX_REPLY + 1))),
@@ -1947,33 +2054,6 @@ fn match_version_refuses_long_replies_and_partial_matches() {
     let alt = Pattern::new(r"^nomatch|(?P<version>\d+)\.0$").unwrap();
     assert_eq!(alt.version(&u("junk 9.0")), ReplyMatch::NoMatch);
     assert_eq!(alt.version(&u("9.0")), ReplyMatch::Read("9"));
-    // No real entry's pattern reads a 257-byte reply: it is Unreadable for every one.
-    for e in cat.entries() {
-        let long = format!("{}{}", "1".repeat(MAX_REPLY), ".0.0");
-        assert_eq!(
-            e.match_version(&u(&long)),
-            ReplyMatch::Unreadable(Unreadable::TooLong),
-            "{}",
-            e.id()
-        );
-    }
-}
-
-#[test]
-fn match_version_returns_only_ascii_version_tokens() {
-    let cat = catalog::embedded().unwrap();
-    // Arabic-Indic digits are not versions: strfry's and LND's patterns give
-    // Unreadable (non-ASCII), which is version unknown and never a match.
-    for id in ["strfry", "lnd"] {
-        let e = cat.get(id).unwrap();
-        for raw in ["١.٢.٣", "١.٢.٣-beta", "1.2.٣"] {
-            assert_eq!(
-                e.match_version(&u(raw)),
-                ReplyMatch::Unreadable(Unreadable::NonAscii),
-                "{id}"
-            );
-        }
-    }
     // Even a pattern that accepts any text gives out only a clean token.
     let any = Pattern::new(r"^(?P<version>.+)$").unwrap();
     assert_eq!(
@@ -2011,6 +2091,95 @@ fn match_version_returns_only_ascii_version_tokens() {
     assert_eq!(
         digits.matches(&u("١٢٣")),
         ReplyMatch::Unreadable(Unreadable::NonAscii)
+    );
+}
+
+#[test]
+fn an_identified_product_with_an_unreadable_version_is_kept() {
+    // Codex catalog r2 HIGH 3: an identified product whose version cannot be read
+    // is version unknown with the product kept: the type has no `NoMatch` for a
+    // version. (The inventory-level check, product kept and version Unknown,
+    // belongs to the scanner PR, which has no code yet.)
+    let cat = catalog::embedded().unwrap();
+    let lnd = cat.get("lnd").unwrap();
+    let id = identified(lnd, "SERVER_ACTIVE");
+    for raw in ["", "garbage", "0.21.6"] {
+        assert_eq!(
+            id.read_version(&u(raw)),
+            VersionMatch::Unreadable(Unreadable::NotAVersion),
+            "{raw:?}"
+        );
+    }
+    assert_eq!(
+        id.read_version(&u(&"1".repeat(MAX_REPLY + 1))),
+        VersionMatch::Unreadable(Unreadable::TooLong)
+    );
+    assert_eq!(
+        id.read_version(&u("١.٢.٣-beta")),
+        VersionMatch::Unreadable(Unreadable::NonAscii)
+    );
+    // A release candidate is identified by Bitcoin Core's probe, and its version is unread.
+    let core = cat.get("bitcoin-core").unwrap();
+    let rc = identified(core, "/Satoshi:0.21.0rc1/");
+    assert_eq!(
+        rc.read_version(&u("/Satoshi:0.21.0rc1/")),
+        VersionMatch::Unreadable(Unreadable::NotAVersion)
+    );
+    // Every network-source entry: an identified read of a 257-byte reply is TooLong.
+    let mut seen = Vec::new();
+    for e in cat.entries() {
+        if !matches!(
+            e.version_call().source(),
+            catalog::Source::Rpc
+                | catalog::Source::Grpc
+                | catalog::Source::Http
+                | catalog::Source::Nip11
+        ) {
+            continue;
+        }
+        let (_, reply) = IDENTITY_REPLIES
+            .iter()
+            .find(|(i, _)| *i == e.id())
+            .unwrap_or_else(|| panic!("{}: add its identity reply to IDENTITY_REPLIES", e.id()));
+        let id = identified(e, reply);
+        let long = format!("{}{}", "1".repeat(MAX_REPLY), ".0.0");
+        assert_eq!(
+            id.read_version(&u(&long)),
+            VersionMatch::Unreadable(Unreadable::TooLong),
+            "{}",
+            e.id()
+        );
+        seen.push(e.id());
+    }
+    assert_eq!(seen.len(), IDENTITY_REPLIES.len(), "{seen:?}");
+}
+
+#[test]
+fn a_network_source_needs_an_identity_probe() {
+    // Codex catalog r2 HIGH 1: no identity check on the endpoint, no network source.
+    let lnd = text_of("lnd");
+    let block = "[[recognize.probes]]\nkind = \"grpc\"\nmethod = \"lnrpc.State/GetState\"\nport = 10009\nfield = \"state\"\nmatch = '^(?:NON_EXISTING|LOCKED|UNLOCKED|RPC_ACTIVE|SERVER_ACTIVE|WAITING_TO_START)$'\n\n";
+    refused(
+        "lnd",
+        &replaced(&lnd, block, ""),
+        "a network source needs a recognize.probes item",
+    );
+    // A probe on another port is not the identity of this endpoint.
+    let nutshell = text_of("nutshell");
+    let moved = replaced(
+        &nutshell,
+        "[[recognize.probes]]\nkind = \"http\"",
+        "[[recognize.ports]]\nport = 9999\nproto = \"tcp\"\nwhat = \"other\"\nexposure = \"lan\"\n\n[[recognize.probes]]\nkind = \"http\"",
+    );
+    let moved = replaced(
+        &moved,
+        "path = \"/v1/info\"\nport = 3338\nfield",
+        "path = \"/v1/info\"\nport = 9999\nfield",
+    );
+    refused(
+        "nutshell",
+        &moved,
+        "a network source needs a recognize.probes item",
     );
 }
 
@@ -2101,7 +2270,10 @@ todo = ["binaries: none", "units: none"]
 #[test]
 fn a_port_in_too_many_entries_is_refused() {
     // The cap equals the fact model's MAX_CANDIDATES.
-    assert_eq!(catalog::CATALOG_MAX_PRODUCTS_PER_PORT, 32);
+    assert_eq!(
+        catalog::CATALOG_MAX_PRODUCTS_PER_PORT,
+        gd_core::MAX_CANDIDATES
+    );
     let build = |n: usize| -> Result<Catalog, catalog::CatalogError> {
         let texts: Vec<(String, String)> = (0..n)
             .map(|i| {
@@ -2112,8 +2284,8 @@ fn a_port_in_too_many_entries_is_refused() {
             .collect();
         catalog::load_all(&pairs(&texts))
     };
-    build(32).unwrap();
-    let err = build(33).unwrap_err();
+    build(gd_core::MAX_CANDIDATES).unwrap();
+    let err = build(gd_core::MAX_CANDIDATES + 1).unwrap_err();
     assert!(
         err.to_string().contains("CATALOG_MAX_PRODUCTS_PER_PORT"),
         "{err}"
@@ -2336,6 +2508,29 @@ fn plain_version_sweep_refuses_wide_regexes() {
         &with("^(?P<version>[1-9]\\d*\\.\\d+\\.\\d+)$", "5.1.1"),
         "more than one major",
     );
+    // Codex catalog r2 HIGH 5: a wide regex that reads a first major the sweep once
+    // missed, a major in the sample range, a one-major regex that is not pinned as
+    // written, and a regex whose parts hide a second major.
+    refused(
+        "tapd",
+        &with("^(?P<version>(?:0|41|42)\\.\\d+\\.\\d+)$", "0.5.1"),
+        "more than one major",
+    );
+    refused(
+        "tapd",
+        &with("^(?P<version>(?:0|777)\\.\\d+\\.\\d+)$", "0.5.1"),
+        "more than one major",
+    );
+    refused(
+        "tapd",
+        &with("^(?P<version>(?:0)\\.\\d+\\.\\d+)$", "0.5.1"),
+        "must pin that major",
+    );
+    refused(
+        "tapd",
+        &with("^(?P<version>0\\.\\d+\\.\\d+)?(?:5\\.\\d+)?$", "0.5.1"),
+        "major",
+    );
     // A regex pinned to one major still loads (the shipped 0.x and 2.x entries).
     validate("tapd", &tapd).unwrap();
 }
@@ -2417,7 +2612,7 @@ fn website_never_vouches_for_keys_or_feeds_and_shared_hosts_are_refused() {
         &replaced(
             &core,
             keys,
-            "keys_url = \"https://github.com/bitcoin-core/bitcoincore.org/keys\"",
+            "keys_url = \"https://github.com/bitcoin-core/bitcoincore.org/tree/main/keys\"",
         ),
     )
     .unwrap();
@@ -2569,6 +2764,26 @@ fn display_text_has_no_hidden_characters_and_names_are_unique() {
         &replaced(&lnd, "name = \"LND\"", "name = \"L\u{039d}D\""),
         "ASCII",
     );
+    // Opus catalog r2 LOW: no leading, trailing or doubled space, so two names
+    // that look the same can never both exist.
+    for bad in ["LND ", " LND", "L  ND"] {
+        refused(
+            "lnd",
+            &replaced(&lnd, "name = \"LND\"", &format!("name = \"{bad}\"")),
+            "entry.name must not start or end",
+        );
+    }
+    let a = synthetic("one-svc");
+    let b = replaced(
+        &synthetic("two-svc"),
+        "name = \"Synthetic two-svc\"",
+        "name = \"Synthetic one-svc \"",
+    );
+    let err = catalog::load_all(&[("one-svc", &a), ("two-svc", &b)]).unwrap_err();
+    assert!(
+        err.to_string().contains("entry.name must not start or end"),
+        "{err}"
+    );
     // Names are unique across the catalog, ignoring case.
     let a = synthetic("one-svc");
     let b = replaced(
@@ -2645,4 +2860,329 @@ fn link_checks_survive_a_long_chain_and_still_find_cycles() {
     let a = replaced(&a, "name = \"Synthetic aa\"", "name = \"Synthetic aa\"");
     let err = catalog::load_all(&[("aa", &a), ("bb", &b)]).unwrap_err();
     assert!(err.to_string().contains("cycle"), "{err}");
+}
+
+// ---------- round 3: trust roots, work budget, no quoting, recorded replies ----------
+
+#[test]
+fn trust_roots_are_on_a_reviewed_forge_in_a_fixed_shape() {
+    // Codex catalog r2 HIGH 4: a repo on an unreviewed host, and a trust root that
+    // is a page anyone can write, are refused.
+    let lnd = text_of("lnd");
+    let moved = lnd.replace(
+        "https://github.com/lightningnetwork/lnd",
+        "https://example.org/team/lnd",
+    );
+    refused("lnd", &moved, "reviewed code host");
+    let keys = "keys_url = \"https://github.com/lightningnetwork/lnd/tree/master/scripts/keys\"";
+    for bad in [
+        "issues/1234",
+        "pull/1/files",
+        "discussions/5",
+        "wiki/Keys",
+        "tree/refs/pull/1/head",
+        "",
+    ] {
+        let url = if bad.is_empty() {
+            "https://github.com/lightningnetwork/lnd".to_string()
+        } else {
+            format!("https://github.com/lightningnetwork/lnd/{bad}")
+        };
+        let text = replaced(&lnd, keys, &format!("keys_url = \"{url}\""));
+        refused("lnd", &text, "signing.keys_url must be a release feed");
+        let e = load_error("lnd", &text);
+        // The URL's own path is never quoted back.
+        for part in ["issues", "pull/1", "wiki/Keys", "discussions/5"] {
+            assert!(!e.contains(part), "{e}");
+        }
+    }
+    let feed = "release_feed = \"https://github.com/lightningnetwork/lnd/releases.atom\"";
+    refused(
+        "lnd",
+        &replaced(
+            &lnd,
+            feed,
+            "release_feed = \"https://github.com/lightningnetwork/lnd/issues.atom\"",
+        ),
+        "upstream.release_feed must be a release feed",
+    );
+    validate("lnd", &lnd).unwrap();
+}
+
+#[test]
+fn catalog_work_is_bounded() {
+    // Codex catalog r2 MED 1: an entry, a list, the images and the catalog are capped.
+    let lnd = text_of("lnd");
+    let pad = 32_769 - lnd.len() - 3;
+    let big = format!("{lnd}# {}\n", "x".repeat(pad));
+    assert_eq!(big.len(), 32_769);
+    refused("lnd", &big, "larger than 32768 bytes");
+    let e = catalog::scan_secret_shapes(&big).unwrap_err().to_string();
+    assert!(e.contains("larger than 32768 bytes"), "{e}");
+
+    let images = "images = [\"docker.io/lightninglabs/lnd\"]";
+    let list = |n: usize| {
+        let items: Vec<String> = (0..n).map(|i| format!("\"docker.io/o/i{i}\"")).collect();
+        format!("images = [{}]", items.join(", "))
+    };
+    refused(
+        "lnd",
+        &replaced(&lnd, images, &list(65)),
+        "has more than 64 items",
+    );
+    refused(
+        "lnd",
+        &replaced(&lnd, images, &list(17)),
+        "recognize.images has more than 16 items",
+    );
+    refused(
+        "lnd",
+        &replaced(
+            &lnd,
+            images,
+            "images = [\"docker.io/lightninglabs/lnd\", \"docker.io/lightninglabs/lnd\"]",
+        ),
+        "recognize.images[1] repeats recognize.images[0]",
+    );
+    // The count check runs before any entry is parsed (the texts are empty).
+    let many: Vec<(String, &str)> = (0..1025).map(|i| (format!("x{i}"), "")).collect();
+    let files: Vec<(&str, &str)> = many.iter().map(|(n, t)| (n.as_str(), *t)).collect();
+    let e = catalog::load_all(&files).unwrap_err().to_string();
+    assert!(e.contains("more than 1024 entries"), "{e}");
+}
+
+#[test]
+fn errors_never_quote_untrusted_values() {
+    // Codex catalog r2 MED 2 and Opus r2 LOW 2: an error names a field and an
+    // index, never a value from the entry (or the caller's name for it).
+    let check = |err: catalog::CatalogError, label: &str| {
+        let shown = err.to_string();
+        let debug = format!("{err:?}");
+        for text in [&shown, &debug] {
+            assert!(!text.to_lowercase().contains("qzxmark"), "{text}");
+            assert!(!text.contains('\u{1b}'), "{text:?}");
+            assert!(text.contains(label), "{text} (wanted `{label}`)");
+        }
+    };
+    let lnd = text_of("lnd");
+    let cln = text_of("core-lightning");
+    let nutshell = text_of("nutshell");
+    check(catalog::load("QZXMARK\u{1b}", &lnd).unwrap_err(), "<entry>");
+    let load = |stem: &str, text: &str| catalog::load(stem, text).unwrap_err();
+    check(
+        load(
+            "lnd",
+            &replaced(&lnd, "id = \"lnd\"", "id = \"QZXMARK\\u001b[31m\""),
+        ),
+        "entry.id",
+    );
+    check(
+        load(
+            "lnd",
+            &replaced(
+                &lnd,
+                "aliases = []",
+                "aliases = []\nbundles = [\"QZXMARK\\u001b\"]",
+            ),
+        ),
+        "entry.bundles[0]",
+    );
+    let argv = "argv = [\"lightning-cli\", \"getinfo\"]";
+    for (to, label) in [
+        ("[\"QZXMARK/x\", \"getinfo\"]", "version.call.argv[0]"),
+        ("[\"lightning-cli\", \"QZXMARK;x\"]", "version.call.argv[1]"),
+        ("[\"lightning-cli\", \"qzxmark\"]", "READ_ONLY_CALLS"),
+    ] {
+        check(
+            load(
+                "core-lightning",
+                &replaced(&cln, argv, &format!("argv = {to}")),
+            ),
+            label,
+        );
+    }
+    check(
+        load(
+            "nutshell",
+            &replaced(
+                &nutshell,
+                "path = \"/v1/info\"",
+                "path = \"/QZXMARK\\u001b\"",
+            ),
+        ),
+        "recognize.probes.path",
+    );
+    check(
+        load(
+            "lnd",
+            &replaced(
+                &lnd,
+                "method = \"lnrpc.State/GetState\"",
+                "method = \"QZXMARK;x\"",
+            ),
+        ),
+        "recognize.probes.method",
+    );
+    check(
+        load(
+            "lnd",
+            &replaced(&lnd, "field = \"state\"", "field = \"QZXMARK\\u001b\""),
+        ),
+        "recognize.probes.field",
+    );
+    let one = replaced(
+        &synthetic("one-svc"),
+        "images = [\"docker.io/o/one-svc\"]",
+        "images = [\"docker.io/o/qzxmark\"]",
+    );
+    let two = replaced(
+        &synthetic("two-svc"),
+        "images = [\"docker.io/o/two-svc\"]",
+        "images = [\"docker.io/o/qzxmark\"]",
+    );
+    check(
+        catalog::load_all(&[("one-svc", &one), ("two-svc", &two)]).unwrap_err(),
+        "recognize.images",
+    );
+    let e = load(
+        "lnd",
+        &replaced(&lnd, "releases.atom\"", "releases\u{202e}.atom\""),
+    );
+    check(e.clone(), "upstream.release_feed");
+    assert!(e.to_string().contains("URL must be ASCII"), "{e}");
+}
+
+/// A field of a recorded JSON reply, as outside text. `path` is dotted.
+fn recorded_field(file: &str, path: &str) -> Untrusted<String> {
+    let mut v: serde_json::Value =
+        serde_json::from_str(&read(&format!("fixtures/lab-recorded/replies/{file}"))).unwrap();
+    for part in path.split('.') {
+        v = v[part].take();
+    }
+    u(v.as_str()
+        .unwrap_or_else(|| panic!("{file} {path} is not a string")))
+}
+
+#[test]
+fn probes_read_the_recorded_replies() {
+    // Opus catalog r2 LOW 3: each entry's identity probe and version regex read the
+    // lab's own recorded replies. The lnd file is the REST `GET /v1/state` reply; its
+    // `state` is the same as gRPC `GetState`'s, which the probe calls today (K1 moves
+    // the probe to REST).
+    let cat = catalog::embedded().unwrap();
+    let rec = recordings(&read("fixtures/lab-recorded/manifest.toml"));
+    let cases = [
+        (
+            "lnd",
+            recorded_field("lnd/state.json", "state"),
+            recorded_field("lnd/versioner-version.json", "version"),
+            "0.21.6-beta",
+        ),
+        (
+            "strfry",
+            recorded_field("strfry/nip11.json", "software"),
+            recorded_field("strfry/nip11.json", "version"),
+            "1.1.2-148-g4cd3cf6",
+        ),
+        (
+            "nutshell",
+            recorded_field("nutshell/info.json", "version"),
+            recorded_field("nutshell/info.json", "version"),
+            "0.21.0",
+        ),
+        (
+            "bitcoin-core",
+            recorded_field("bitcoind/getnetworkinfo.json", "result.subversion"),
+            recorded_field("bitcoind/getnetworkinfo.json", "result.subversion"),
+            "32.1",
+        ),
+    ];
+    for (id, probe_reply, version_reply, expected) in &cases {
+        let e = cat.get(id).unwrap();
+        let proof = match e.identify_endpoint(std::slice::from_ref(probe_reply)) {
+            ReplyMatch::Read(i) => i,
+            other => panic!("{id}: {other:?}"),
+        };
+        assert_eq!(
+            proof.read_version(version_reply),
+            VersionMatch::Read(expected),
+            "{id}"
+        );
+        let manifest = rec.iter().find(|r| r.id == *id).unwrap();
+        assert_eq!(manifest.version, *expected, "{id}");
+    }
+    // Cross-check: lnd's probe does not read strfry's recorded reply.
+    let lnd = cat.get("lnd").unwrap();
+    let fry_software = recorded_field("strfry/nip11.json", "software");
+    assert!(matches!(
+        lnd.identify_endpoint(&[fry_software]),
+        ReplyMatch::NoMatch
+    ));
+}
+
+#[test]
+fn reviewed_url_exceptions_are_each_needed() {
+    // Opus catalog r2 LOW 4: every reviewed exception is used, and adding one means
+    // editing this test.
+    assert_eq!(OTHER_URLS.len(), 1);
+    assert_eq!(RELATED_OTHER_OWNER.len(), 1);
+    let cat = catalog::embedded().unwrap();
+    let owner_of = |url: &str| -> String {
+        url.strip_prefix("https://")
+            .and_then(|r| r.split('/').nth(1))
+            .unwrap_or("")
+            .to_ascii_lowercase()
+    };
+    let under = |url: &str, base: &str| {
+        let base = base.trim_end_matches('/');
+        url == base || url.strip_prefix(base).is_some_and(|r| r.starts_with('/'))
+    };
+    for (id, field, prefix) in OTHER_URLS {
+        let e = cat
+            .get(id)
+            .unwrap_or_else(|| panic!("{id} is not an entry"));
+        let urls: Vec<&str> = match field {
+            "upstream.release_feed" => e
+                .upstream()
+                .release_feed
+                .iter()
+                .map(String::as_str)
+                .collect(),
+            "upstream.security_policy" => e
+                .upstream()
+                .security_policy
+                .iter()
+                .map(String::as_str)
+                .collect(),
+            "signing.keys_url" => e.signing().keys_url.iter().map(String::as_str).collect(),
+            "advisories.feeds.url" => e
+                .advisories()
+                .feeds
+                .iter()
+                .map(|f| f.url.as_str())
+                .collect(),
+            other => panic!("{id}: {other} is not a field an exception can name"),
+        };
+        let mut own: Vec<&str> = vec![&e.upstream().repo];
+        own.extend(e.upstream().related_repos.iter().map(String::as_str));
+        own.extend(e.upstream().website.as_deref());
+        assert!(
+            urls.iter()
+                .any(|u| under(u, prefix) && !own.iter().any(|b| under(u, b))),
+            "{id}: no {field} needs the exception for {prefix}"
+        );
+    }
+    for (id, owner, _) in RELATED_OTHER_OWNER {
+        let e = cat
+            .get(id)
+            .unwrap_or_else(|| panic!("{id} is not an entry"));
+        assert!(
+            e.upstream()
+                .related_repos
+                .iter()
+                .any(|r| owner_of(r) == *owner),
+            "{id}: no related repo is owned by {owner}"
+        );
+        assert_ne!(owner_of(&e.upstream().repo), *owner, "{id}");
+    }
 }

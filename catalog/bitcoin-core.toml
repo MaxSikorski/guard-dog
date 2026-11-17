@@ -30,6 +30,12 @@ what = "RPC (regtest, lab only)"
 exposure = "never-public"
 source = "lab/compose.yml"
 
+[[recognize.probes]]
+kind = "rpc"
+method = "getnetworkinfo"
+field = "subversion"
+match = '^/Satoshi:\d+\.\d+(?:\.\d+){0,2}(?:rc\d+)?/$'
+
 [version]
 source = "rpc"
 credential = "rpcauth user with rpcwhitelist=<user>:getnetworkinfo"

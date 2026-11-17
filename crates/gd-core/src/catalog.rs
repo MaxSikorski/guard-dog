@@ -64,7 +64,7 @@ pub const PLAIN_VERSION_OK: [(&str, &str); 1] = [(
 
 /// Reviewed URL prefixes outside an entry's own repo, related repos and website,
 /// as (entry id, field, prefix). Add one with a reason.
-const OTHER_URLS: [(&str, &str, &str); 1] = [(
+pub const OTHER_URLS: [(&str, &str, &str); 1] = [(
     "lnd",
     "advisories.feeds.url",
     // Lightning Labs' advisory site and Atom feed (spike d).
@@ -74,11 +74,15 @@ const OTHER_URLS: [(&str, &str, &str); 1] = [(
 /// Entries whose `related_repos` may name another owner on the same code host,
 /// as (entry id, owner, reason). Every other entry's related repos share the
 /// owner of `upstream.repo`.
-const RELATED_OTHER_OWNER: [(&str, &str, &str); 1] = [(
+pub const RELATED_OTHER_OWNER: [(&str, &str, &str); 1] = [(
     "bitcoin-core",
     "bitcoin-core",
     "the signature repo and the project site repo live in the bitcoin-core organisation; the code is in bitcoin",
 )];
+
+/// Code hosts an `upstream.repo` or related repo may be on. Add one with a
+/// reason and its path shapes in `trust_path_ok`.
+pub const FORGE_HOSTS: [&str; 2] = ["github.com", "codeberg.org"];
 
 /// Hosts that carry many projects: a website there must be exactly the repo.
 const CODE_HOSTS: [&str; 1] = ["codeberg.org"];
@@ -137,11 +141,21 @@ const LEVELS: [&str; 5] = [
 ];
 const REPRODUCIBLE: [&str; 3] = ["yes", "no", "unverified"];
 
-/// Most entries that may list the same port in `recognize.ports`. It must equal
-/// the fact model's `MAX_CANDIDATES` (how many products one endpoint may be
-/// matched against), so the catalog can never hand the scanner more candidates
-/// than a fact can hold. [`load_all`] refuses a catalog over it.
-pub const CATALOG_MAX_PRODUCTS_PER_PORT: usize = 32;
+/// Most entries that may list the same port in `recognize.ports`. Equals the
+/// fact model's `MAX_CANDIDATES`, by definition (how many products one endpoint
+/// may be matched against), so the catalog can never hand the scanner more
+/// candidates than a fact can hold. [`load_all`] refuses a catalog over it.
+pub const CATALOG_MAX_PRODUCTS_PER_PORT: usize = crate::MAX_CANDIDATES;
+const _: () = assert!(CATALOG_MAX_PRODUCTS_PER_PORT == crate::MAX_CANDIDATES);
+
+/// Largest entry text, in bytes (the largest today is under 3 KB).
+const MAX_ENTRY_BYTES: usize = 32 * 1024;
+/// Most items in any list of an entry (the longest today has 15).
+const MAX_LIST: usize = 64;
+/// Most `recognize.images` items in one entry.
+const MAX_IMAGES: usize = 16;
+/// Most entries in a catalog, and most images across all of them.
+const MAX_ENTRIES: usize = 1024;
 
 /// Size limit for any regex that runs on untrusted text.
 const REGEX_SIZE_LIMIT: usize = 100_000;
@@ -162,7 +176,8 @@ pub struct CatalogError {
 impl CatalogError {
     fn entry(name: &str, message: String) -> Self {
         Self {
-            entry: Some(name.to_string()),
+            // `name` comes from the caller: only a slug is ever shown.
+            entry: Some(if is_slug(name) { name } else { "<entry>" }.to_string()),
             message,
         }
     }
@@ -476,6 +491,12 @@ pub enum Unreadable {
     /// The reply matched, but what the `version` group read is not a valid
     /// version token.
     BadToken,
+    /// The product was identified, but its version reply is not in a form the
+    /// entry reads (empty, a release candidate the regex skips, an unknown build).
+    NotAVersion,
+    /// No identity evidence fits this read: the wrong number of probe replies,
+    /// no identity probe, or evidence of a kind this version source cannot use.
+    MissingEvidence,
 }
 
 /// The result of running a catalog pattern on a service's reply.
@@ -511,6 +532,118 @@ impl<T> ReplyMatch<T> {
     #[must_use]
     pub fn is_read(&self) -> bool {
         matches!(self, Self::Read(_))
+    }
+}
+
+/// The result of reading a version from an identified product. There is no
+/// `NoMatch`: only identity can say "not this product".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub enum VersionMatch<'a> {
+    /// The validated version token.
+    Read(&'a str),
+    /// The version is unknown; see [`Unreadable`]. The product is kept.
+    Unreadable(Unreadable),
+}
+
+impl<'a> VersionMatch<'a> {
+    /// The token of a `Read` result, otherwise `None`.
+    #[must_use]
+    pub fn read(self) -> Option<&'a str> {
+        match self {
+            Self::Read(t) => Some(t),
+            Self::Unreadable(_) => None,
+        }
+    }
+
+    /// Is this `Read`?
+    #[must_use]
+    pub fn is_read(&self) -> bool {
+        matches!(self, Self::Read(_))
+    }
+}
+
+/// How a product was identified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum IdentifiedBy {
+    /// The entry's probes matched on the version endpoint.
+    Probes,
+    /// The container image matched one of `recognize.images`.
+    Image,
+}
+
+/// Proof that one endpoint or container was identified as one entry. Only
+/// [`Entry::identify_endpoint`] and [`Entry::identify_image`] make one.
+///
+/// `Unreadable` from [`Identified::read_version`] is version unknown with the
+/// product kept: never not affected, never not installed.
+#[derive(Clone, Copy)]
+pub struct Identified<'e> {
+    entry: &'e Entry,
+    by: IdentifiedBy,
+}
+
+impl fmt::Debug for Identified<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The id is a validated slug.
+        write!(
+            f,
+            "Identified {{ entry: {:?}, by: {:?} }}",
+            self.entry.id, self.by
+        )
+    }
+}
+
+impl<'e> Identified<'e> {
+    /// The entry the product was identified as.
+    #[must_use]
+    pub fn entry(&self) -> &'e Entry {
+        self.entry
+    }
+
+    /// How it was identified.
+    #[must_use]
+    pub fn by(&self) -> IdentifiedBy {
+        self.by
+    }
+
+    /// Reads the version from a reply, for a product already identified.
+    /// The evidence must fit the entry's version source (`rpc`, `grpc`, `http`
+    /// and `nip11` need probes; `image-label` and a `cli` run in the container
+    /// need the image); otherwise `Unreadable(MissingEvidence)`. The whole reply
+    /// must match the entry's anchored regex; a reply that does not is
+    /// `Unreadable(NotAVersion)`, a reply over [`MAX_REPLY`] bytes or with
+    /// non-ASCII text is `Unreadable(TooLong)` or `Unreadable(NonAscii)`. A read
+    /// result is a valid version token. `Unreadable` is version unknown with
+    /// the product kept: never not affected, never not installed.
+    pub fn read_version<'a>(&self, reply: &'a Untrusted<String>) -> VersionMatch<'a> {
+        let v = &self.entry.version;
+        let fits = match v.source {
+            Source::Rpc | Source::Grpc | Source::Http | Source::Nip11 => {
+                self.by == IdentifiedBy::Probes
+            }
+            Source::ImageLabel => self.by == IdentifiedBy::Image,
+            Source::Cli => {
+                self.by == IdentifiedBy::Image
+                    && matches!(
+                        v.call.call.as_ref().map(Call::kind),
+                        Some(CallKind::Cli {
+                            run_as: RunAs::ServiceUserInContainer,
+                            ..
+                        })
+                    )
+            }
+            Source::PlatformManifest => false,
+        };
+        if !fits {
+            return VersionMatch::Unreadable(Unreadable::MissingEvidence);
+        }
+        match v.pattern.version(reply) {
+            ReplyMatch::Read(t) => VersionMatch::Read(t),
+            ReplyMatch::NoMatch => VersionMatch::Unreadable(Unreadable::NotAVersion),
+            ReplyMatch::Unreadable(x) => VersionMatch::Unreadable(x),
+        }
     }
 }
 
@@ -934,12 +1067,88 @@ impl Entry {
         &self.version
     }
 
-    /// Reads the version from a reply. The whole reply must match the entry's
-    /// anchored regex. A reply over [`MAX_REPLY`] bytes or with non-ASCII text
-    /// is `Unreadable` (surface it as version unknown, never as not affected);
-    /// a read result is a valid version token.
-    pub fn match_version<'a>(&self, reply: &'a Untrusted<String>) -> ReplyMatch<&'a str> {
-        self.version.pattern.version(reply)
+    /// The probes that identify the product on the version endpoint: those with
+    /// no `port` or whose `port` is `version.endpoint_port`, in file order.
+    #[must_use]
+    pub fn identity_probes(&self) -> Vec<&Probe> {
+        self.recognize
+            .probes
+            .iter()
+            .filter(|p| p.port.is_none() || p.port == self.version.endpoint_port)
+            .collect()
+    }
+
+    /// Does this endpoint belong to this product? `replies[i]` is the field
+    /// value of `identity_probes()[i]`, taken from the same host and port the
+    /// version call goes to, in the same scan. Any probe that does not match is
+    /// `NoMatch`; the wrong number of replies, no identity probe or a source
+    /// with no endpoint is `Unreadable(MissingEvidence)`.
+    pub fn identify_endpoint(&self, replies: &[Untrusted<String>]) -> ReplyMatch<Identified<'_>> {
+        if !matches!(
+            self.version.source,
+            Source::Rpc | Source::Grpc | Source::Http | Source::Nip11
+        ) {
+            return ReplyMatch::Unreadable(Unreadable::MissingEvidence);
+        }
+        let probes = self.identity_probes();
+        if probes.is_empty() || probes.len() != replies.len() {
+            return ReplyMatch::Unreadable(Unreadable::MissingEvidence);
+        }
+        let results: Vec<ReplyMatch<()>> = probes
+            .iter()
+            .zip(replies)
+            .map(|(p, r)| p.matches(r))
+            .collect();
+        if results.iter().any(|r| matches!(r, ReplyMatch::NoMatch)) {
+            return ReplyMatch::NoMatch;
+        }
+        if let Some(ReplyMatch::Unreadable(x)) = results
+            .iter()
+            .find(|r| matches!(r, ReplyMatch::Unreadable(_)))
+        {
+            return ReplyMatch::Unreadable(*x);
+        }
+        ReplyMatch::Read(Identified {
+            entry: self,
+            by: IdentifiedBy::Probes,
+        })
+    }
+
+    /// Does this container image (the reference the container runtime reports)
+    /// belong to this product? An entry with no images always gives `NoMatch`.
+    pub fn identify_image(&self, image: &Untrusted<String>) -> ReplyMatch<Identified<'_>> {
+        // expose_untrusted: checked for length and characters, then normalised and
+        // compared with the entry's own image names; nothing is returned.
+        let text = image.expose_untrusted();
+        if text.len() > MAX_REPLY {
+            return ReplyMatch::Unreadable(Unreadable::TooLong);
+        }
+        if !text.is_ascii() {
+            return ReplyMatch::Unreadable(Unreadable::NonAscii);
+        }
+        if !text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | ':' | '@' | '-'))
+        {
+            return ReplyMatch::Unreadable(Unreadable::BadToken);
+        }
+        let n = normalise_image(text);
+        let hit = self
+            .recognize
+            .images
+            .iter()
+            .any(|i| match i.strip_suffix('*') {
+                None => *i == n,
+                Some(prefix) => n.len() > prefix.len() && n.starts_with(prefix),
+            });
+        if hit {
+            ReplyMatch::Read(Identified {
+                entry: self,
+                by: IdentifiedBy::Image,
+            })
+        } else {
+            ReplyMatch::NoMatch
+        }
     }
 
     /// Every call this entry makes, as (form, descriptor), for comparing with
@@ -1001,11 +1210,19 @@ impl Catalog {
 /// # Errors
 /// The first rule the entry breaks, with the entry's name.
 pub fn load(name: &str, text: &str) -> Result<Entry, CatalogError> {
+    check_size(text).map_err(|e| CatalogError::entry(name, e))?;
     let t = parse_toml(text).map_err(|e| CatalogError::entry(name, e))?;
     // The secret scan runs first, so nothing below ever sees (or reports) a
     // value that looks like a secret. Every error names a field path only.
     no_secret_shapes(&t).map_err(|e| CatalogError::entry(name, e))?;
     parse_entry(&t, name).map_err(|e| CatalogError::entry(name, e))
+}
+
+fn check_size(text: &str) -> R<()> {
+    if text.len() > MAX_ENTRY_BYTES {
+        return Err(format!("the entry is larger than {MAX_ENTRY_BYTES} bytes"));
+    }
+    Ok(())
 }
 
 /// Parses TOML. The error names the line only: toml's own message quotes the
@@ -1030,6 +1247,11 @@ fn parse_toml(text: &str) -> R<Table> {
 /// entries share, a port shared outside [`SHARED_PORTS`], or a `fork_of` or
 /// `bundles` that names a missing entry, itself, or forms a cycle.
 pub fn load_all(files: &[(&str, &str)]) -> Result<Catalog, CatalogError> {
+    if files.len() > MAX_ENTRIES {
+        return Err(CatalogError::whole(format!(
+            "the catalog has more than {MAX_ENTRIES} entries"
+        )));
+    }
     let mut entries: BTreeMap<String, Entry> = BTreeMap::new();
     for (name, text) in files {
         let entry = load(name, text)?;
@@ -1135,6 +1357,9 @@ fn table<'a>(t: &'a Table, k: &str, ctx: &str) -> R<&'a Table> {
 fn tables<'a>(t: &'a Table, k: &str, ctx: &str) -> R<Vec<&'a Table>> {
     match t.get(k) {
         None => Ok(Vec::new()),
+        Some(Value::Array(a)) if a.len() > MAX_LIST => {
+            Err(format!("{ctx}.{k} has more than {MAX_LIST} items"))
+        }
         Some(Value::Array(a)) => a
             .iter()
             .map(|v| v.as_table().ok_or(format!("{ctx}.{k} must hold tables")))
@@ -1145,6 +1370,9 @@ fn tables<'a>(t: &'a Table, k: &str, ctx: &str) -> R<Vec<&'a Table>> {
 
 fn strings(t: &Table, k: &str, ctx: &str) -> R<Vec<String>> {
     match t.get(k) {
+        Some(Value::Array(a)) if a.len() > MAX_LIST => {
+            Err(format!("{ctx}.{k} has more than {MAX_LIST} items"))
+        }
         Some(Value::Array(a)) => a
             .iter()
             .map(|v| {
@@ -1328,6 +1556,9 @@ fn internal_host(host: &str) -> bool {
 fn https_parts(url: &str) -> R<(&str, &str)> {
     // No error below quotes the URL: it may carry user info or a token.
     let rest = url.strip_prefix("https://").ok_or("URL must be https")?;
+    if !url.is_ascii() {
+        return Err("URL must be ASCII".into());
+    }
     if rest.contains(['?', '#', '@', ' ']) || url.chars().any(char::is_control) {
         return Err("URL must have no credentials, query, fragment or spaces".into());
     }
@@ -1410,12 +1641,73 @@ fn check_website(repo: &str, site: &str) -> R<()> {
     for suffix in PAGES_SUFFIXES {
         let own = format!("{owner}.{suffix}");
         if on_host(host, suffix) && host != own {
-            return Err(format!(
-                "website on a shared pages host must be {own} (the upstream owner)"
-            ));
+            return Err(
+                "website on a shared pages host must be the upstream owner's own subdomain".into(),
+            );
         }
     }
     Ok(())
+}
+
+/// One path segment of `[A-Za-z0-9._-]`, not `.`.
+fn trust_segment(s: &str) -> bool {
+    !s.is_empty()
+        && s != "."
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// `<ref>`: one segment of `[A-Za-z0-9._-]{1,64}` that is not `refs` and not `.`.
+fn trust_ref(s: &str) -> bool {
+    s.len() <= 64 && s != "refs" && trust_segment(s)
+}
+
+/// Does `rest` (the URL after the matched repo base: empty, or starting with
+/// `/`) have a shape that `field` trusts? An issue, pull request, discussion or
+/// wiki page is writable by anyone, so it is never a trust root. Fields that
+/// only cite a source have no shape rule.
+fn trust_path_ok(field: &str, feed_kind: Option<&str>, rest: &str) -> bool {
+    const FEEDS: [&str; 3] = ["/releases.atom", "/tags.atom", "/releases.rss"];
+    // `/<prefix>/<ref>/<path>`, with the path one or more segments.
+    let at_ref = |prefix: &str, with_path: bool| -> bool {
+        let Some(r) = rest.strip_prefix(prefix) else {
+            return false;
+        };
+        let segs: Vec<&str> = r.split('/').collect();
+        match segs.as_slice() {
+            [r0] => !with_path && trust_ref(r0),
+            [r0, tail @ ..] => {
+                trust_ref(r0) && !tail.is_empty() && tail.iter().all(|t| trust_segment(t))
+            }
+            [] => false,
+        }
+    };
+    // A ref with an optional path below it, or a required one.
+    let tree = |prefix: &str, path_required: bool| -> bool {
+        if path_required {
+            at_ref(prefix, true)
+        } else {
+            at_ref(prefix, false) || at_ref(prefix, true)
+        }
+    };
+    match field {
+        "upstream.release_feed" => FEEDS.contains(&rest),
+        "advisories.feeds.url" => match feed_kind {
+            Some("atom" | "rss") => FEEDS.contains(&rest),
+            Some("markdown-repo") => {
+                rest.is_empty() || tree("/tree/", false) || tree("/src/branch/", false)
+            }
+            Some("release-notes") => rest == "/releases",
+            _ => false,
+        },
+        "signing.keys_url" => {
+            tree("/tree/", true) || tree("/blob/", true) || tree("/src/branch/", true)
+        }
+        "upstream.security_policy" => {
+            tree("/blob/", true) || tree("/src/branch/", true) || rest == "/security/policy"
+        }
+        _ => true,
+    }
 }
 
 /// A feed, policy, key, source or advisory URL must sit under the entry's own
@@ -1427,27 +1719,42 @@ fn check_under_upstream(
     id: &str,
     up: &Upstream,
     field: &str,
+    feed_kind: Option<&str>,
     url: &str,
     website_ok: bool,
 ) -> R<()> {
     https_parts(url).map_err(|e| format!("{field}: {e}"))?;
-    let mut bases: Vec<&str> = vec![&up.repo];
-    bases.extend(up.related_repos.iter().map(String::as_str));
+    // (base, is a repo of the entry): a repo's URLs must also have a fixed shape.
+    let mut bases: Vec<(&str, bool)> = vec![(&up.repo, true)];
+    bases.extend(up.related_repos.iter().map(|r| (r.as_str(), true)));
     if website_ok
         && let Some(w) = up.website.as_deref()
         && let Ok((wh, _)) = https_parts(w)
         && !PAGES_SUFFIXES.iter().any(|s| on_host(wh, s))
     {
-        bases.push(w);
+        bases.push((w, false));
     }
     bases.extend(
         OTHER_URLS
             .iter()
             .filter(|(i, f, _)| *i == id && *f == field)
-            .map(|(_, _, p)| *p),
+            .map(|(_, _, p)| (*p, false)),
     );
-    if bases.iter().any(|b| under(url, b)) {
-        Ok(())
+    let mut under_any = false;
+    for (b, is_repo) in &bases {
+        if !under(url, b) {
+            continue;
+        }
+        under_any = true;
+        let rest = url.get(b.trim_end_matches('/').len()..).unwrap_or("");
+        if !is_repo || trust_path_ok(field, feed_kind, rest) {
+            return Ok(());
+        }
+    }
+    if under_any {
+        Err(format!(
+            "{field} must be a release feed, a file or folder at a ref, or the security policy page of the repo, never an issue, pull request, discussion or wiki page"
+        ))
     } else if website_ok {
         Err(format!(
             "{field} is not under upstream.repo, related_repos or website"
@@ -1464,7 +1771,7 @@ fn check_under_upstream(
 /// (`tests/catalog.rs`); here only its form.
 fn check_source(id: &str, up: &Upstream, field: &str, src: &str) -> R<()> {
     if src.starts_with("https://") {
-        check_under_upstream(id, up, field, src, true)
+        check_under_upstream(id, up, field, None, src, true)
     } else if src.contains("..") || src.starts_with('/') {
         Err(format!(
             "{field} must be a file in the repo or a URL under the upstream"
@@ -1545,29 +1852,23 @@ fn parse_call(t: &Table, form: &str, ctx: &str, binaries: &[String]) -> R<Option
                 return Err(format!("{ctx}.argv must not be empty"));
             };
             if first.contains('/') {
-                return Err(format!(
-                    "{ctx}.argv[0] must be a bare program name: {first}"
-                ));
+                return Err(format!("{ctx}.argv[0] must be a bare program name"));
             }
             if NEVER_RUN.contains(&first.as_str()) {
                 return Err(format!(
-                    "{ctx}.argv[0] must never run a shell or interpreter: {first}"
+                    "{ctx}.argv[0] must never run a shell or interpreter"
                 ));
             }
             if !binaries.contains(first) {
-                return Err(format!(
-                    "{ctx}.argv[0] `{first}` is not in recognize.binaries"
-                ));
+                return Err(format!("{ctx}.argv[0] is not in recognize.binaries"));
             }
-            for a in &argv {
+            for (i, a) in argv.iter().enumerate() {
                 let bad = a.is_empty()
                     || a.chars().any(|c| {
                         c.is_whitespace() || c.is_control() || ";|&$`<>(){}*?~\\\"'!#".contains(c)
                     });
                 if bad {
-                    return Err(format!(
-                        "{ctx}.argv items are plain words, never shell: {a}"
-                    ));
+                    return Err(format!("{ctx}.argv[{i}] must be a plain word, never shell"));
                 }
                 no_endpoint_text(&format!("{ctx}.argv"), a, true)?;
             }
@@ -1586,9 +1887,7 @@ fn parse_call(t: &Table, form: &str, ctx: &str, binaries: &[String]) -> R<Option
                     c.is_ascii_alphanumeric() || matches!(c, '_' | '~' | '/' | '-')
                 });
             if !path_ok || path.contains("//") {
-                return Err(format!(
-                    "{ctx}.path must be a local path like /v1/info: {path}"
-                ));
+                return Err(format!("{ctx}.path must be a local path like /v1/info"));
             }
             let accept = if has("accept") {
                 let a = string(t, "accept", ctx)?;
@@ -1619,7 +1918,7 @@ fn parse_call(t: &Table, form: &str, ctx: &str, binaries: &[String]) -> R<Option
                     c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/')
                 });
             if !name_ok {
-                return Err(format!("{ctx}.method must be a method name: {m}"));
+                return Err(format!("{ctx}.method must be a method name"));
             }
             no_endpoint_text(&format!("{ctx}.method"), m, false)?;
             let method = m.to_string();
@@ -1634,9 +1933,7 @@ fn parse_call(t: &Table, form: &str, ctx: &str, binaries: &[String]) -> R<Option
     if let Some(c) = &call {
         let (f, d) = c.descriptor();
         if !READ_ONLY_CALLS.iter().any(|(rf, rd)| *rf == f && *rd == d) {
-            return Err(format!(
-                "{ctx}: the {f} call `{d}` is not in READ_ONLY_CALLS"
-            ));
+            return Err(format!("{ctx}: the {f} call is not in READ_ONLY_CALLS"));
         }
     }
     Ok(call)
@@ -1649,7 +1946,7 @@ fn check_field(t: &Table, ctx: &str) -> R<String> {
         && all_chars(f, |c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
     if !ok || f.contains("..") {
         return Err(format!(
-            "{ctx}.field must match [A-Za-z0-9_.]{{1,64}} with no `..`: {f}"
+            "{ctx}.field must match [A-Za-z0-9_.]{{1,64}} with no `..`"
         ));
     }
     Ok(f.to_string())
@@ -1751,6 +2048,7 @@ fn no_secret_shapes(t: &Table) -> R<()> {
 /// # Errors
 /// The first value with a secret shape, or text that is not TOML.
 pub fn scan_secret_shapes(text: &str) -> Result<(), CatalogError> {
+    check_size(text).map_err(CatalogError::whole)?;
     let t = parse_toml(text).map_err(CatalogError::whole)?;
     no_secret_shapes(&t).map_err(CatalogError::whole)
 }
@@ -1792,6 +2090,14 @@ pub fn normalise_image(image: &str) -> String {
 
 fn check_image_pattern(img: &str) -> R<()> {
     let body = img.strip_suffix('*').unwrap_or(img);
+    if !body.chars().all(|c| {
+        c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '/' | ':' | '-')
+    }) {
+        return Err(
+            "image must be in normalised form docker.io/namespace/repo, no tag or digest, `*` only at the end"
+                .into(),
+        );
+    }
     let tail_has_colon = body
         .split_once('/')
         .is_some_and(|(_, rest)| rest.contains(':'));
@@ -1828,16 +2134,27 @@ fn check_image_pattern(img: &str) -> R<()> {
 }
 
 /// How many plain versions the sweep generates, at most.
-const PLAIN_SWEEP_MAX: usize = 12_000;
+const PLAIN_SWEEP_MAX: usize = 28_000;
 
-/// Plain versions a regex must not read for more than one major: majors 0 to 40, 100 and 2024 to 2027,
-/// as 2-, 3- and 4-part forms with minors and patches 0 to 12 (the 4-part form
-/// uses a sample of them to stay small). A regex that reads these for several
-/// majors claims some other product's plain reply, whatever way it is spelled.
+/// Plain versions a regex must not read for more than one major: every major 0
+/// to 99 as 2-, 3- and 4-part forms with minors and patches 0 to 12 (the
+/// 4-part form uses a sample of them to stay small), and, for majors 100 to 999,
+/// 2000 to 2099 and a few larger ones (1000, 1024, 4242, 9999, 10000, 65535,
+/// 99999, 4294967295), three forms each: `a.0`, `a.1.2` and `a.1.2.3`. A regex
+/// that reads these for several majors claims some other product's plain reply,
+/// whatever way it is spelled.
 fn plain_sweep() -> Vec<String> {
-    let majors: Vec<u32> = (0..=40).chain([100]).chain(2024..=2027).collect();
     let mut v = Vec::new();
-    for &a in &majors {
+    let wide: Vec<u32> = (100..=999)
+        .chain(2000..=2099)
+        .chain([1000, 1024, 4242, 9999, 10000, 65535, 99999, 4_294_967_295])
+        .collect();
+    for &a in &wide {
+        v.push(format!("{a}.0"));
+        v.push(format!("{a}.1.2"));
+        v.push(format!("{a}.1.2.3"));
+    }
+    for a in 0..=99u32 {
         for b in 0..=12u32 {
             v.push(format!("{a}.{b}"));
             for c in 0..=12u32 {
@@ -1885,14 +2202,19 @@ fn parse_entry(t: &Table, stem: &str) -> R<Entry> {
     }
     let id = string(t, "id", "entry")?;
     if !is_slug(id) {
-        return Err(format!("id `{id}` must be a slug of at most 40 characters"));
+        return Err("entry.id must be a slug of at most 40 characters".into());
     }
     if id != stem {
-        return Err(format!("id `{id}` must equal the file name `{stem}.toml`"));
+        return Err("entry.id must equal the file name".into());
     }
     let name = line(t, "name", "entry")?.to_string();
     if !name.is_ascii() {
         return Err("entry.name must be ASCII".into());
+    }
+    if name != name.trim() || name.contains("  ") {
+        return Err(
+            "entry.name must not start or end with a space or hold two spaces in a row".into(),
+        );
     }
     let kind = one_of(t, "kind", "entry", &KINDS)?.to_string();
     let aliases = strings(t, "aliases", "entry")?;
@@ -1914,9 +2236,9 @@ fn parse_entry(t: &Table, stem: &str) -> R<Entry> {
         None
     };
     let bundles = strings_opt(t, "bundles", "entry")?;
-    for b in &bundles {
+    for (i, b) in bundles.iter().enumerate() {
         if !is_slug(b) {
-            return Err(format!("bundles entry `{b}` must be a slug"));
+            return Err(format!("entry.bundles[{i}] must be a slug"));
         }
     }
 
@@ -2004,6 +2326,9 @@ fn parse_upstream(id: &str, t: &Table) -> R<Upstream> {
     let repo = string(up, "repo", "upstream")?.to_string();
     check_repo_url(&repo).map_err(|e| format!("upstream.repo: {e}"))?;
     let (repo_host, repo_path) = https_parts(&repo)?;
+    if !FORGE_HOSTS.contains(&repo_host) {
+        return Err("upstream.repo must be on a reviewed code host (FORGE_HOSTS)".into());
+    }
     let repo_owner = repo_path
         .trim_matches('/')
         .split('/')
@@ -2049,7 +2374,7 @@ fn parse_upstream(id: &str, t: &Table) -> R<Upstream> {
     for f in ["security_policy", "release_feed"] {
         if up.contains_key(f) {
             let u = string(up, f, "upstream")?;
-            check_under_upstream(id, &out, &format!("upstream.{f}"), u, true)?;
+            check_under_upstream(id, &out, &format!("upstream.{f}"), None, u, true)?;
             if f == "security_policy" {
                 out.security_policy = Some(u.to_string());
             } else {
@@ -2074,8 +2399,18 @@ fn parse_recognize(
         &["ports", "probes"],
     )?;
     let images = strings(rec, "images", "recognize")?;
-    for img in &images {
-        check_image_pattern(img).map_err(|e| format!("recognize.images: {e}"))?;
+    if images.len() > MAX_IMAGES {
+        return Err(format!("recognize.images has more than {MAX_IMAGES} items"));
+    }
+    for (i, img) in images.iter().enumerate() {
+        check_image_pattern(img).map_err(|e| format!("recognize.images[{i}]: {e}"))?;
+        if let Some(j) = images.iter().position(|x| x == img)
+            && j < i
+        {
+            return Err(format!(
+                "recognize.images[{i}] repeats recognize.images[{j}]"
+            ));
+        }
     }
     let binaries = strings(rec, "binaries", "recognize")?;
     if binaries.is_empty() && !has_todo("binaries:") {
@@ -2243,6 +2578,18 @@ fn parse_version(
     } else {
         None
     };
+    // A network source needs an identity check on the endpoint its version is read from.
+    if network
+        && !rec
+            .probes
+            .iter()
+            .any(|p| p.port.is_none() || p.port == endpoint_port)
+    {
+        return Err(
+            "version: a network source needs a recognize.probes item on version.endpoint_port, the identity check for the endpoint the version is read from"
+                .into(),
+        );
+    }
     // TLS: a grpc source says where the certificate comes from and the name it must
     // carry. There is no way to switch verification off: unknown keys fail.
     let tls = if source == Source::Grpc {
@@ -2350,6 +2697,23 @@ fn parse_version(
         .collect();
     let reads_plain = plain_majors.len() > 1;
     let excepted = PLAIN_VERSION_OK.iter().any(|(e, _)| *e == id);
+    // A regex that reads one major must pin it as written, so it cannot be a
+    // wider regex that the sweep happens to see only one major of.
+    if plain_majors.len() == 1
+        && !excepted
+        && let Some(m) = plain_majors.iter().next()
+    {
+        let head = format!("^(?P<version>{m}\\.");
+        let body_ok = regex
+            .strip_prefix(&head)
+            .and_then(|r| r.strip_suffix(")$"))
+            .is_some_and(|b| !b.contains(['(', ')', '|']));
+        if !body_ok {
+            return Err(format!(
+                "version.regex reads plain versions of major {m}, so it must pin that major as written: ^(?P<version>{m}\\. then no group or alternation, then )$"
+            ));
+        }
+    }
     if reads_plain && !excepted {
         return Err(
             "version.regex reads plain versions (like 1.2 or 28.1.0) of more than one major number, so it would claim any product's reply"
@@ -2419,7 +2783,7 @@ fn parse_advisories(id: &str, t: &Table, up: &Upstream) -> R<Advisories> {
         let kind = one_of(f, "kind", "advisories.feeds", &FEED_KINDS)?;
         machine_feed |= MACHINE_FEEDS.contains(&kind);
         let url = string(f, "url", "advisories.feeds")?;
-        check_under_upstream(id, up, "advisories.feeds.url", url, false)?;
+        check_under_upstream(id, up, "advisories.feeds.url", Some(kind), url, false)?;
         feeds.push(Feed {
             kind: kind.to_string(),
             url: url.to_string(),
@@ -2467,7 +2831,7 @@ fn parse_signing(
     let method = opt_line(sg, "method", "signing")?;
     let keys_url = if sg.contains_key("keys_url") {
         let u = string(sg, "keys_url", "signing")?;
-        check_under_upstream(id, up, "signing.keys_url", u, false)?;
+        check_under_upstream(id, up, "signing.keys_url", None, u, false)?;
         Some(u.to_string())
     } else {
         None
@@ -2548,18 +2912,24 @@ fn check_unique(entries: &BTreeMap<String, Entry>) -> R<()> {
 
 /// Images are disjoint across entries; ports are too, except the exact SHARED_PORTS.
 fn check_disjoint(entries: &BTreeMap<String, Entry>) -> R<()> {
-    let mut images: Vec<(&str, &str)> = Vec::new();
+    let mut images: Vec<(&str, &str, usize)> = Vec::new();
     let mut ports: BTreeMap<(u16, Proto), BTreeSet<&str>> = BTreeMap::new();
     for (id, e) in entries {
-        for i in &e.recognize.images {
-            images.push((i, id));
+        for (n, i) in e.recognize.images.iter().enumerate() {
+            images.push((i, id, n));
         }
         for p in &e.recognize.ports {
             ports.entry((p.port, p.proto)).or_default().insert(id);
         }
     }
-    for (i, (a, ida)) in images.iter().enumerate() {
-        for (b, idb) in images.iter().skip(i + 1) {
+    if images.len() > MAX_ENTRIES {
+        return Err(format!("the catalog lists more than {MAX_ENTRIES} images"));
+    }
+    for (i, (a, ida, ia)) in images.iter().enumerate() {
+        for (b, idb, ib) in images.iter().skip(i + 1) {
+            if ida == idb {
+                continue;
+            }
             let (sa, sb) = (a.trim_end_matches('*'), b.trim_end_matches('*'));
             let overlap = match (a.ends_with('*'), b.ends_with('*')) {
                 (false, false) => a == b,
@@ -2567,9 +2937,9 @@ fn check_disjoint(entries: &BTreeMap<String, Entry>) -> R<()> {
                 (false, true) => sa.starts_with(sb),
                 (true, true) => sa.starts_with(sb) || sb.starts_with(sa),
             };
-            if overlap && ida != idb {
+            if overlap {
                 return Err(format!(
-                    "recognize.images of `{ida}` and `{idb}` overlap: {a} and {b}"
+                    "recognize.images of `{ida}` and `{idb}` overlap (items {ia} and {ib})"
                 ));
             }
         }

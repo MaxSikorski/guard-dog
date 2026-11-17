@@ -28,7 +28,7 @@ source = "lab/compose.yml"
 [version]
 source = "cli"
 credential = "rune restricted to the getinfo method"
-regex = '^v(?P<version>\d+\.\d+(?:\.\d+)?(?:rc\d+)?(?:-\d+-g[0-9a-f]{7,})?)(?:-modded)?$'
+regex = '^v(?P<version>\d+\.\d+(?:\.\d+)?(?:rc\d+)?(?:-\d+-g[0-9a-f]{7,})?(?:-modded)?)$'
 scheme = "calver"
 
 [version.call]
@@ -67,6 +67,7 @@ todo = [
   "ports: 9735 is as set in lab/compose.yml; confirm it is the upstream default",
   "units: RaspiBlitz and myNode systemd unit names",
   "scheme: calver is read from the forms seen (v26.06.9, v24.11); confirm the release naming rule",
+  "scheme: a -modded build is read with its marker (24.11-modded); the calver scheme must refuse it as Malformed (version unknown), never strip it",
   "regex: the v24.11rc1, git-describe and -modded forms are matched but have no recorded reply; add examples when recorded",
   "args_from_platform: the data directory and network flags (the lab uses --lightning-dir=/data and --network=regtest) differ per platform; kept out of argv until a platform source is read",
   "signing.min_signatures: how many signers make a release trustworthy",
