@@ -140,6 +140,10 @@ struct Corpus {
     required: BTreeMap<String, Vec<Required>>,
     /// Every condition of every advisory, required or not.
     conditions: Vec<Required>,
+    /// Every `affected[].package` (`<ECOSYSTEM> <name>`) in the corpus.
+    packages: BTreeSet<String>,
+    /// Advisories whose vendor withheld the details (`details_withheld_by_vendor`).
+    withheld: BTreeSet<String>,
 }
 
 fn root() -> PathBuf {
@@ -165,6 +169,8 @@ fn corpus() -> Corpus {
         condition_names: BTreeSet::new(),
         required: BTreeMap::new(),
         conditions: Vec::new(),
+        packages: BTreeSet::new(),
+        withheld: BTreeSet::new(),
     };
     for path in paths {
         let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap())
@@ -185,6 +191,16 @@ fn corpus() -> Corpus {
             })
             .collect();
         let id = v["id"].as_str().unwrap().to_owned();
+        for a in v["affected"].as_array().unwrap() {
+            c.packages.insert(format!(
+                "{} {}",
+                a["package"]["ecosystem"].as_str().unwrap(),
+                a["package"]["name"].as_str().unwrap()
+            ));
+        }
+        if v["database_specific"]["details_withheld_by_vendor"].as_bool() == Some(true) {
+            c.withheld.insert(id.clone());
+        }
         let mut required = Vec::new();
         for cond in v["database_specific"]["guard_dog"]["conditions"]
             .as_array()
@@ -212,6 +228,11 @@ fn corpus() -> Corpus {
                 any_of: any_of.clone(),
             };
             c.conditions.push(make());
+            assert!(
+                cond.get("required")
+                    .is_none_or(serde_json::Value::is_boolean),
+                "{id}: `required` must be true or false"
+            );
             if cond["required"].as_bool() != Some(false) {
                 required.push(make());
             }
@@ -352,8 +373,6 @@ struct Setup {
     packages: BTreeSet<String>,
     /// The setup's top-level `chain`.
     chain: String,
-    /// Each `[[setup.fact]]`: its name and its subject.
-    facts: Vec<(String, Option<String>)>,
     /// Does the setup record package versions (`[[setup.package]]`)?
     has_packages: bool,
     /// Ids of the services the setup runs.
@@ -383,15 +402,227 @@ const REVIEW_PAIRS: [(&str, &str); 4] = [
     ("lab-regtest", "CVE-2026-117346"),
 ];
 
-/// Advisories whose conditions the vendor withheld: in range, their pair is
-/// possibly-affected with condition `unknown`; out of range the condition may
-/// be met or unknown, never not-met. They are left out of the facts rule.
+/// Every pair's result, pinned: an offsetting change that keeps the alert
+/// totals still fails. Per setup: lab-old-synthetic 7 affected, 14
+/// not-affected, 2 possibly-affected; lab-regtest 0, 23, 0. Changing a result
+/// means editing this list in the same pull request.
+const PINNED_RESULTS: [(&str, &str, &str); 46] = [
+    ("lab-old-synthetic", "CVE-2024-3094", "possibly-affected"),
+    ("lab-old-synthetic", "CVE-2024-35202", "not-affected"),
+    ("lab-old-synthetic", "CVE-2024-38359", "not-affected"),
+    ("lab-old-synthetic", "CVE-2024-49379", "not-affected"),
+    ("lab-old-synthetic", "CVE-2024-52911", "affected"),
+    ("lab-old-synthetic", "CVE-2024-52922", "not-affected"),
+    ("lab-old-synthetic", "CVE-2025-46598", "affected"),
+    ("lab-old-synthetic", "CVE-2025-62859", "not-affected"),
+    ("lab-old-synthetic", "CVE-2025-62861", "affected"),
+    ("lab-old-synthetic", "CVE-2026-117346", "affected"),
+    ("lab-old-synthetic", "CVE-2026-117349", "affected"),
+    ("lab-old-synthetic", "CVE-2026-119757", "not-affected"),
+    ("lab-old-synthetic", "GHSA-wj92-jhwh-85j5", "not-affected"),
+    ("lab-old-synthetic", "PYSEC-2025-89", "affected"),
+    (
+        "lab-old-synthetic",
+        "x_alby-hub-2026-09-internet-exposed-takeover",
+        "not-affected",
+    ),
+    (
+        "lab-old-synthetic",
+        "x_btcpay-2026-v2.4.7-85-security-findings",
+        "not-affected",
+    ),
+    (
+        "lab-old-synthetic",
+        "x_cln-2026-v26.06.8-unspecified-vulnerabilities",
+        "possibly-affected",
+    ),
+    (
+        "lab-old-synthetic",
+        "x_coinkite-2026-07-coldcard-weak-seed-entropy",
+        "not-affected",
+    ),
+    (
+        "lab-old-synthetic",
+        "x_fedimint-2026-v0.11.2-security-fixes",
+        "not-affected",
+    ),
+    (
+        "lab-old-synthetic",
+        "x_lightning-labs-2026-lnd-brontide-write-allocation-oom",
+        "affected",
+    ),
+    (
+        "lab-old-synthetic",
+        "x_lightning-labs-2026-lnd-dns-bootstrap-type-assertion-panic",
+        "not-affected",
+    ),
+    (
+        "lab-old-synthetic",
+        "x_lightning-labs-2026-lnd-gossip-validation-barrier-stall",
+        "not-affected",
+    ),
+    (
+        "lab-old-synthetic",
+        "x_lightning-labs-2026-lnd-tapd-cancelled-htlc-marked-settled",
+        "not-affected",
+    ),
+    ("lab-regtest", "CVE-2024-3094", "not-affected"),
+    ("lab-regtest", "CVE-2024-35202", "not-affected"),
+    ("lab-regtest", "CVE-2024-38359", "not-affected"),
+    ("lab-regtest", "CVE-2024-49379", "not-affected"),
+    ("lab-regtest", "CVE-2024-52911", "not-affected"),
+    ("lab-regtest", "CVE-2024-52922", "not-affected"),
+    ("lab-regtest", "CVE-2025-46598", "not-affected"),
+    ("lab-regtest", "CVE-2025-62859", "not-affected"),
+    ("lab-regtest", "CVE-2025-62861", "not-affected"),
+    ("lab-regtest", "CVE-2026-117346", "not-affected"),
+    ("lab-regtest", "CVE-2026-117349", "not-affected"),
+    ("lab-regtest", "CVE-2026-119757", "not-affected"),
+    ("lab-regtest", "GHSA-wj92-jhwh-85j5", "not-affected"),
+    ("lab-regtest", "PYSEC-2025-89", "not-affected"),
+    (
+        "lab-regtest",
+        "x_alby-hub-2026-09-internet-exposed-takeover",
+        "not-affected",
+    ),
+    (
+        "lab-regtest",
+        "x_btcpay-2026-v2.4.7-85-security-findings",
+        "not-affected",
+    ),
+    (
+        "lab-regtest",
+        "x_cln-2026-v26.06.8-unspecified-vulnerabilities",
+        "not-affected",
+    ),
+    (
+        "lab-regtest",
+        "x_coinkite-2026-07-coldcard-weak-seed-entropy",
+        "not-affected",
+    ),
+    (
+        "lab-regtest",
+        "x_fedimint-2026-v0.11.2-security-fixes",
+        "not-affected",
+    ),
+    (
+        "lab-regtest",
+        "x_lightning-labs-2026-lnd-brontide-write-allocation-oom",
+        "not-affected",
+    ),
+    (
+        "lab-regtest",
+        "x_lightning-labs-2026-lnd-dns-bootstrap-type-assertion-panic",
+        "not-affected",
+    ),
+    (
+        "lab-regtest",
+        "x_lightning-labs-2026-lnd-gossip-validation-barrier-stall",
+        "not-affected",
+    ),
+    (
+        "lab-regtest",
+        "x_lightning-labs-2026-lnd-tapd-cancelled-htlc-marked-settled",
+        "not-affected",
+    ),
+];
+
+/// The lab setups' fact rows, pinned (setup, name, service, subject, value):
+/// changing a value means editing this table in the same pull request.
+const PINNED_FACTS: [(&str, &str, Option<&str>, Option<&str>, &str); 8] = [
+    (
+        "lab-old-synthetic",
+        "p2p_inbound_or_outbound_peers",
+        Some("bitcoin-core"),
+        None,
+        "false",
+    ),
+    (
+        "lab-old-synthetic",
+        "node_builds_block_templates",
+        Some("bitcoin-core"),
+        None,
+        "true",
+    ),
+    (
+        "lab-old-synthetic",
+        "option_disabled",
+        Some("lnd"),
+        Some("nobootstrap"),
+        "true",
+    ),
+    (
+        "lab-old-synthetic",
+        "option_enabled",
+        None,
+        Some("invoice HTLC interceptor (or any HtlcModifier RPC client)"),
+        "false",
+    ),
+    (
+        "lab-regtest",
+        "p2p_inbound_or_outbound_peers",
+        Some("bitcoin-core"),
+        None,
+        "false",
+    ),
+    (
+        "lab-regtest",
+        "node_builds_block_templates",
+        Some("bitcoin-core"),
+        None,
+        "true",
+    ),
+    (
+        "lab-regtest",
+        "option_disabled",
+        Some("lnd"),
+        Some("nobootstrap"),
+        "true",
+    ),
+    (
+        "lab-regtest",
+        "option_enabled",
+        None,
+        Some("invoice HTLC interceptor (or any HtlcModifier RPC client)"),
+        "false",
+    ),
+];
+
+/// OSV packages in the corpus that no product lists, on purpose. Expected empty.
+const IGNORED_PACKAGES: [&str; 0] = [];
+
+/// The advisory whose fix is a chain condition that regtest does not meet.
+const DNS_ADVISORY: &str = "x_lightning-labs-2026-lnd-dns-bootstrap-type-assertion-panic";
+
+/// Advisories whose conditions the vendor withheld (the corpus marks them with
+/// `details_withheld_by_vendor`; the test fails if this list and the marks
+/// differ). When their product runs the condition is never not-met, and in
+/// range the pair is possibly-affected with condition `unknown`. They are left
+/// out of the facts rules.
 const UNDISCLOSED_CONDITIONS: [&str; 1] = ["x_cln-2026-v26.06.8-unspecified-vulnerabilities"];
 
+/// The fact row that answers one required condition, if there is one. A row
+/// answers a condition only for the same service: the service itself when the
+/// setup runs it, no service when it does not.
+fn find_row<'a>(
+    req: &Required,
+    s: &'a Setup,
+    alias_to_id: &BTreeMap<String, String>,
+) -> Option<&'a FactRow> {
+    let want: Option<Option<String>> = req
+        .service
+        .as_ref()
+        .and_then(|c| alias_to_id.get(c))
+        .map(|id| s.services.contains(id).then(|| id.clone()));
+    s.fact_rows.iter().find(|r| {
+        r.name == req.name
+            && (req.subject.is_none() || r.subject == req.subject)
+            && want.as_ref().is_none_or(|w| r.service == *w)
+    })
+}
+
 /// What the setup says about one required condition: `Some(true)`,
-/// `Some(false)`, or `None` (unknown: no row, or a row saying "unknown").
-/// A fact row answers a condition only for the same service: the service
-/// itself when the setup runs it, no service when it does not.
+/// `Some(false)`, or `None` (unknown: a row saying "unknown", or no row).
 fn condition_value(
     req: &Required,
     s: &Setup,
@@ -405,17 +636,7 @@ fn condition_value(
         }
         _ => {}
     }
-    let want: Option<Option<String>> = req
-        .service
-        .as_ref()
-        .and_then(|c| alias_to_id.get(c))
-        .map(|id| s.services.contains(id).then(|| id.clone()));
-    let row = s.fact_rows.iter().find(|r| {
-        r.name == req.name
-            && (req.subject.is_none() || r.subject == req.subject)
-            && want.as_ref().is_none_or(|w| r.service == *w)
-    });
-    if let Some(r) = row {
+    if let Some(r) = find_row(req, s, alias_to_id) {
         return match r.value.as_str() {
             "true" => Some(true),
             "false" => Some(false),
@@ -434,23 +655,27 @@ fn condition_value(
 }
 
 /// A local path in text: evidence must not leak where someone's files live.
-/// Any word that is an absolute path, a home path, a drive path or an
-/// environment-variable path.
+/// Any word (split on spaces, commas and semicolons) that is an absolute path,
+/// a home path, a drive path, a UNC path or an environment-variable path, or
+/// a `file://` address.
 fn has_local_path(s: &str) -> bool {
     s.contains("$HOME")
         || s.contains("%USERPROFILE%")
-        || s.split_whitespace().any(|w| {
-            let w = w.trim_start_matches(['(', '"', '\'', '`', '=']);
-            let b = w.as_bytes();
-            w.starts_with('/')
-                || w.starts_with("~/")
-                || w == "~"
-                || w.starts_with('$')
-                || (b.len() >= 3
-                    && b[0].is_ascii_alphabetic()
-                    && b[1] == b':'
-                    && matches!(b[2], b'\\' | b'/'))
-        })
+        || s.contains("file://")
+        || s.split(|c: char| c.is_whitespace() || c == ',' || c == ';')
+            .any(|w| {
+                let w = w.trim_start_matches(['(', '"', '\'', '`', '=']);
+                let b = w.as_bytes();
+                w.starts_with("\\\\")
+                    || w.starts_with('/')
+                    || w.starts_with("~/")
+                    || w == "~"
+                    || w.starts_with('$')
+                    || (b.len() >= 3
+                        && b[0].is_ascii_alphabetic()
+                        && b[1] == b':'
+                        && matches!(b[2], b'\\' | b'/'))
+            })
 }
 
 /// Check the whole file. Returns the expectations, or every problem found.
@@ -568,7 +793,10 @@ fn check(
                 let inside = text(pkg, "in", &what, &mut errors);
                 let product = text(pkg, "product", &what, &mut errors);
                 let version = text(pkg, "version", &what, &mut errors);
-                text(pkg, "evidence", &what, &mut errors);
+                let evidence = text(pkg, "evidence", &what, &mut errors);
+                if has_local_path(evidence) {
+                    errors.push(format!("{what}: package evidence names a local path"));
+                }
                 if !services.contains_key(inside) {
                     errors.push(format!(
                         "{what}: package is in `{inside}`, not a service here"
@@ -609,7 +837,6 @@ fn check(
             )),
         }
         // Setup facts: the closed table the matcher reads instead of prose.
-        let mut facts: Vec<(String, Option<String>)> = Vec::new();
         let mut fact_rows: Vec<FactRow> = Vec::new();
         let mut by_key: BTreeMap<(String, Option<String>), (Option<String>, String)> =
             BTreeMap::new();
@@ -655,6 +882,11 @@ fn check(
                 let evidence = text(f, "evidence", &fwhat, &mut errors);
                 if has_local_path(evidence) {
                     errors.push(format!("{fwhat} {name}: evidence names a local path"));
+                }
+                if name == "package_installed" && s.contains_key("package") {
+                    errors.push(format!(
+                        "{fwhat} {name}: the setup records its packages, so a package_installed row would override them"
+                    ));
                 }
                 if name == "service_running" || name == "chain" {
                     errors.push(format!(
@@ -710,7 +942,6 @@ fn check(
                     service: service.map(str::to_owned),
                     value: value.to_owned(),
                 });
-                facts.push((name, subject));
             }
         }
         let has_packages = s.contains_key("package");
@@ -733,7 +964,6 @@ fn check(
                 storage,
                 packages,
                 chain,
-                facts,
                 has_packages,
                 services: services.keys().cloned().collect(),
                 package_products,
@@ -847,28 +1077,27 @@ fn check(
                 // possibly-affected with condition unknown; out of range the
                 // condition is never not-met.
                 if mapped && undisclosed {
-                    let bad = match version {
-                        "in-range" => condition != "unknown" || result != "possibly-affected",
-                        "out-of-range" => condition == "not-met",
-                        _ => false,
-                    };
+                    let bad = condition == "not-met"
+                        || (version == "in-range"
+                            && (condition != "unknown" || result != "possibly-affected"));
                     if bad {
                         errors.push(format!(
-                            "{what}: the vendor withheld this advisory's conditions: in range it is possibly-affected with condition unknown, out of range the condition is never not-met"
+                            "{what}: the vendor withheld this advisory's conditions: in range it is possibly-affected with condition unknown, and the condition is never not-met"
                         ));
                     }
                 }
-                if mapped && condition != "unknown" {
+                // Every required condition that the setup's own keys don't carry
+                // has an explicit row (true, false or unknown) for every pair
+                // whose product runs; no row never means unknown. Only the
+                // vendor-withheld advisory is exempt.
+                if mapped && !undisclosed {
                     for req in corpus.required.get(&advisory).into_iter().flatten() {
                         let carried = req.name == "service_running"
                             || req.name == "chain"
                             || (req.name == "package_installed" && s.has_packages);
-                        let has_fact = s.facts.iter().any(|(n, sub)| {
-                            *n == req.name && (req.subject.is_none() || *sub == req.subject)
-                        });
-                        if !carried && !has_fact {
+                        if !carried && find_row(req, s, &alias_to_id).is_none() {
                             errors.push(format!(
-                                "{what}: required condition {} {:?} has no [[setup.fact]] and the pair's condition is not unknown",
+                                "{what}: required condition {} {:?} has no [[setup.fact]] row (a missing row is not unknown)",
                                 req.name, req.subject
                             ));
                         }
@@ -916,6 +1145,90 @@ fn check(
             advisory,
             result,
         });
+    }
+    // Every package any advisory names belongs to a product (or is ignored).
+    let known: BTreeSet<&String> = products.values().flatten().collect();
+    for pkg in &corpus.packages {
+        if !known.contains(pkg) && !IGNORED_PACKAGES.contains(&pkg.as_str()) {
+            errors.push(format!(
+                "advisory package `{pkg}` belongs to no [[product]] (and is not in IGNORED_PACKAGES)"
+            ));
+        }
+    }
+    // Pinned results and fact rows.
+    let actual_results: BTreeSet<(String, String, String)> = out
+        .iter()
+        .map(|e| (e.setup.clone(), e.advisory.clone(), e.result.clone()))
+        .collect();
+    let pinned_results: BTreeSet<(String, String, String)> = PINNED_RESULTS
+        .iter()
+        .map(|(a, b, c)| ((*a).to_owned(), (*b).to_owned(), (*c).to_owned()))
+        .collect();
+    if actual_results != pinned_results {
+        errors.push(format!(
+            "the results differ from PINNED_RESULTS in the test; only in the file: {:?}; only in the test: {:?}",
+            actual_results.difference(&pinned_results).collect::<Vec<_>>(),
+            pinned_results.difference(&actual_results).collect::<Vec<_>>()
+        ));
+    }
+    type Row = (String, String, Option<String>, Option<String>, String);
+    let actual_facts: BTreeSet<Row> = setups
+        .iter()
+        .flat_map(|(id, st)| {
+            st.fact_rows.iter().map(move |r| {
+                (
+                    id.clone(),
+                    r.name.clone(),
+                    r.service.clone(),
+                    r.subject.clone(),
+                    r.value.clone(),
+                )
+            })
+        })
+        .collect();
+    let pinned_facts: BTreeSet<Row> = PINNED_FACTS
+        .iter()
+        .map(|(a, b, c, d, e)| {
+            (
+                (*a).to_owned(),
+                (*b).to_owned(),
+                c.map(str::to_owned),
+                d.map(str::to_owned),
+                (*e).to_owned(),
+            )
+        })
+        .collect();
+    if actual_facts != pinned_facts {
+        errors.push(format!(
+            "the setups' fact rows differ from PINNED_FACTS in the test; only in the file: {:?}; only in the test: {:?}",
+            actual_facts.difference(&pinned_facts).collect::<Vec<_>>(),
+            pinned_facts.difference(&actual_facts).collect::<Vec<_>>()
+        ));
+    }
+    // The withheld-conditions list is the corpus's own marks.
+    let listed: BTreeSet<String> = UNDISCLOSED_CONDITIONS
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    if listed != corpus.withheld {
+        errors.push(format!(
+            "UNDISCLOSED_CONDITIONS {listed:?} differs from the advisories marked details_withheld_by_vendor {:?}",
+            corpus.withheld
+        ));
+    }
+    // The DNS advisory keeps its required chain condition, and regtest isn't in it.
+    let dns_ok = corpus.required.get(DNS_ADVISORY).is_some_and(|rs| {
+        rs.iter().any(|r| {
+            r.name == "chain"
+                && r.any_of
+                    .as_ref()
+                    .is_some_and(|a| !a.is_empty() && !a.iter().any(|v| v == "regtest"))
+        })
+    });
+    if !dns_ok {
+        errors.push(format!(
+            "{DNS_ADVISORY} must have a required chain condition whose any_of excludes regtest"
+        ));
     }
     let pinned: BTreeSet<(String, String)> = REVIEW_PAIRS
         .iter()
@@ -1027,6 +1340,25 @@ fn expected_matches_cover_every_setup_and_advisory() {
             count(&mine, "affected"),
             count(&mine, "not-affected"),
             count(&mine, "possibly-affected")
+        );
+    }
+    for (setup, want) in [
+        ("lab-old-synthetic", (7, 14, 2)),
+        ("lab-regtest", (0, 23, 0)),
+    ] {
+        let mine: Vec<Expect> = expects
+            .iter()
+            .filter(|e| e.setup == setup)
+            .cloned()
+            .collect();
+        assert_eq!(
+            (
+                count(&mine, "affected"),
+                count(&mine, "not-affected"),
+                count(&mine, "possibly-affected")
+            ),
+            want,
+            "{setup}: affected, not-affected, possibly-affected"
         );
     }
     assert!(
@@ -1143,6 +1475,63 @@ fn an_unknown_chain_name_in_the_corpus_is_refused() {
         "got:\n  {}",
         errs.join("\n  ")
     );
+}
+
+/// A missing row must not pass as "unknown": delete the synthetic
+/// node_builds_block_templates row and relabel CVE-2025-62861 possibly-affected
+/// with condition unknown; both edits together are refused.
+#[test]
+fn a_missing_row_does_not_pass_as_unknown() {
+    let good = read(FILE);
+    let row = "[[setup.fact]]\nname = \"node_builds_block_templates\"\nservice = \"bitcoin-core\"\nvalue = \"true\"\nevidence = \"description: ";
+    let at = good.find(row).expect("the synthetic row");
+    assert_eq!(anchor_setup(&good, at), "lab-old-synthetic");
+    let end = at + good[at..].find("\n\n").unwrap() + 2;
+    let mut bad = format!("{}{}", &good[..at], &good[end..]);
+    let pair = "advisory = \"CVE-2025-62861\"\nresult = \"affected\"\nversion = \"in-range\"\ncondition = \"met\"";
+    assert!(bad.contains(pair));
+    bad = bad.replacen(
+        pair,
+        "advisory = \"CVE-2025-62861\"\nresult = \"possibly-affected\"\nquestion = \"Q?\"\nversion = \"in-range\"\ncondition = \"unknown\"",
+        1,
+    );
+    let errs = check(&bad, &corpus(), &lab_versions()).expect_err("accepted");
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("a missing row is not unknown")),
+        "got:\n  {}",
+        errs.join("\n  ")
+    );
+}
+
+/// The corpus-side pins: the withheld list follows the corpus marks, and the
+/// DNS advisory keeps a required chain condition that excludes regtest.
+#[test]
+fn corpus_marks_and_the_dns_chain_condition_are_pinned() {
+    let mut c = corpus();
+    c.withheld.clear();
+    let errs = check(&read(FILE), &c, &lab_versions()).expect_err("accepted");
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("details_withheld_by_vendor"))
+    );
+
+    let mut c = corpus();
+    for r in c.required.get_mut(DNS_ADVISORY).unwrap() {
+        if let Some(any) = r.any_of.as_mut() {
+            any.push("regtest".to_owned());
+        }
+    }
+    let errs = check(&read(FILE), &c, &lab_versions()).expect_err("accepted");
+    assert!(errs.iter().any(|e| e.contains("excludes regtest")));
+
+    let mut c = corpus();
+    c.required
+        .get_mut(DNS_ADVISORY)
+        .unwrap()
+        .retain(|r| r.name != "chain");
+    let errs = check(&read(FILE), &c, &lab_versions()).expect_err("accepted");
+    assert!(errs.iter().any(|e| e.contains("excludes regtest")));
 }
 
 #[test]
@@ -1494,6 +1883,69 @@ fn every_broken_file_is_refused() {
             "evidence = \"lab/compose.yml: the lnd command line",
             "evidence = \"\"\nignored = \"lab/compose.yml: the lnd command line",
             "`evidence` must be one line",
+        ),
+        (
+            "the withheld pair marked not-met with an unknown version",
+            "lab-old-synthetic",
+            "result = \"possibly-affected\"\nversion = \"in-range\"\ncondition = \"unknown\"\nreason = \"Core Lightning 25.09",
+            "result = \"not-affected\"\nversion = \"unknown\"\ncondition = \"not-met\"\nreason = \"Core Lightning 25.09",
+            "the vendor withheld this advisory's conditions",
+        ),
+        (
+            "a product's package removed",
+            "",
+            "packages = [\"GIT https://github.com/Coldcard/firmware\"]",
+            "packages = []",
+            "belongs to no [[product]]",
+        ),
+        (
+            "a pinned fact value flipped",
+            "lab-old-synthetic",
+            "name = \"node_builds_block_templates\"\nservice = \"bitcoin-core\"\nvalue = \"true\"",
+            "name = \"node_builds_block_templates\"\nservice = \"bitcoin-core\"\nvalue = \"false\"",
+            "differ from PINNED_FACTS",
+        ),
+        (
+            "a pair's result changed, alert total kept",
+            "lab-old-synthetic",
+            "advisory = \"CVE-2024-52911\"\nresult = \"affected\"\nversion = \"in-range\"\ncondition = \"met\"",
+            "advisory = \"CVE-2024-52911\"\nresult = \"possibly-affected\"\nquestion = \"Q?\"\nversion = \"in-range\"\ncondition = \"unknown\"",
+            "differ from PINNED_RESULTS",
+        ),
+        (
+            "a package_installed row in a setup that records packages",
+            "lab-regtest",
+            "name = \"p2p_inbound_or_outbound_peers\"\nservice = \"bitcoin-core\"\nvalue = \"false\"\nevidence = \"lab/compose.yml",
+            "name = \"package_installed\"\nsubject = \"xz-utils\"\nservice = \"bitcoin-core\"\nvalue = \"false\"\nevidence = \"lab/compose.yml",
+            "would override them",
+        ),
+        (
+            "evidence with a file address",
+            "lab-old-synthetic",
+            "evidence = \"description: ",
+            "evidence = \"file:///srv/lab: ",
+            "evidence names a local path",
+        ),
+        (
+            "evidence with a UNC path",
+            "lab-old-synthetic",
+            "evidence = \"description: ",
+            "evidence = \"\\\\\\\\srv\\\\lab: ",
+            "evidence names a local path",
+        ),
+        (
+            "evidence with an absolute path after a comma",
+            "lab-old-synthetic",
+            "evidence = \"description: ",
+            "evidence = \"description, /srv/lab: ",
+            "evidence names a local path",
+        ),
+        (
+            "package evidence naming a local path",
+            "lab-regtest",
+            "evidence = \"Debian 12 image: liblzma.so.5.4.1; dpkg liblzma5",
+            "evidence = \"/srv/img: liblzma.so.5.4.1; dpkg liblzma5",
+            "package evidence names a local path",
         ),
     ];
     for &(name, owner, from, to, want) in cases {

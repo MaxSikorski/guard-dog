@@ -135,16 +135,15 @@ fn is_calendar_date(s: &str) -> bool {
     (1..=days_in_month).contains(&day)
 }
 
-/// OSV range rules the schema can't express. Events start with `introduced`;
-/// each `fixed` or `last_affected` closes the interval opened just before it,
-/// so two closings never follow each other; and one range uses `fixed` or
-/// `last_affected`, not both. Returns what is wrong, or `None`.
 /// The closed chain names: the same five as the fact model's `Chain` enum.
 const CHAINS: [&str; 5] = ["main", "testnet3", "testnet4", "signet", "regtest"];
 
 /// What is wrong with one condition, if anything: a `chain` condition's
 /// `any_of` must be a non-empty list of known chain names.
 fn condition_problem(cond: &Value) -> Option<String> {
+    if cond.get("required").is_some_and(|r| !r.is_boolean()) {
+        return Some("`required` must be true or false".to_owned());
+    }
     if cond["fact"].as_str() != Some("chain") {
         return None;
     }
@@ -157,6 +156,10 @@ fn condition_problem(cond: &Value) -> Option<String> {
         .map(|v| format!("chain {v} is not one of {CHAINS:?}"))
 }
 
+/// OSV range rules the schema can't express. Events start with `introduced`;
+/// each `fixed` or `last_affected` closes the interval opened just before it,
+/// so two closings never follow each other; and one range uses `fixed` or
+/// `last_affected`, not both. Returns what is wrong, or `None`.
 fn range_problem(events: &[Value]) -> Option<String> {
     let mut kinds = Vec::new();
     for event in events {
@@ -523,6 +526,11 @@ fn custom_checks_reject_broken_ranges_and_dates() {
     assert!(!chain_ok(json!([3])));
     assert!(condition_problem(&json!({"fact": "chain"})).is_some());
     assert!(condition_problem(&json!({"fact": "service_running"})).is_none());
+    assert!(condition_problem(&json!({"fact": "service_running", "required": false})).is_none());
+    assert!(
+        condition_problem(&json!({"fact": "service_running", "required": "no"})).is_some(),
+        "a non-boolean `required` must fail"
+    );
 
     assert!(is_calendar_date("2026-11-16"));
     assert!(is_calendar_date("2024-02-29"));
