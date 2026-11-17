@@ -46,6 +46,28 @@ cargo fmt --all --check && cargo clippy --locked --all-targets -- -D warnings &&
 
 The property tests use a fixed seed by default, so the same commit gives the same result every run; the seed in use is printed to stderr (`cargo test -- --nocapture` shows it). `GD_PROPTEST_SEED=<number> cargo test --locked -p gd-core` explores a different seed. A failing case is saved under `crates/gd-core/proptest-regressions/` and replayed on every later run; commit that folder when it appears.
 
+## The fact model
+
+Phase 1.1 PR 1 (`crates/gd-core/src/fact.rs`, `view.rs`). Property tests use the fixed seed.
+
+| Test | Where | What it proves |
+|---|---|---|
+| `json_round_trips_and_keeps_the_wrapper`, `debug_and_length_never_show_the_text`, `serialised_text_has_no_raw_control_characters`, `only_the_exact_wrapper_shape_is_read` | `crates/gd-core/tests/untrusted_serde.rs` | Untrusted text is JSON `{"untrusted": ...}`, reads back only from that exact shape, and `Debug` still hides it. |
+| `hostile_strings_never_escape_untrusted` | `crates/gd-core/tests/fact_model.rs` | Hostile text in every outside-text slot never shows in `Debug`, sits only under `"untrusted"` in JSON, and round-trips byte for byte. |
+| `validated_constructors_accept_exactly_their_set`, `hashes_and_digests_are_exactly_lower_hex`, `named_bad_ids_and_versions_are_refused`, `epochs_are_versions_and_digests_are_not` | same | Ids, versions (with PEP 440 epochs), hashes and digests accept exactly their character sets, also when loaded from JSON; a digest is never a version. |
+| `evidence_is_cut_visibly_at_a_character_boundary`, `too_much_evidence_is_dropped_and_oversized_evidence_is_refused_on_load` | same | Evidence is at most 1 KiB with a visible cut marker, at most 4 per fact. |
+| `digests_and_signed_hashes_outrank_self_reports`, `a_digest_beats_a_self_report_in_the_view` | same | Method order, and the view prefers the better method; equal methods that disagree are a conflict. |
+| `every_judge_b_family_is_a_fact_and_comes_back_equal` | same | Both `expected-matches.toml` setups become facts, survive JSON, and fold back to the fixture's values in all families. |
+| `every_lab_manifest_kind_is_a_fact_and_comes_back_equal` | same | Every manifest key is a fact kind or a known note; what it doesn't record stays Unknown. |
+| `every_advisory_condition_fact_has_a_claim` | same | Every condition fact name in the corpus is a claim (six directly, the rest as Settings). |
+| `the_view_is_the_same_whatever_order_facts_arrive_in`, `disagreements_and_gaps_are_unknown_never_a_pick`, `no_exposure_evidence_is_not_checked_never_none` | same | Derived setup facts are deterministic; conflicts and gaps are Unknown. |
+| `unknown_never_moves_exposure_towards_none`, `an_unchecked_port_blocks_a_none_answer` | same | Replacing any exposure fact with Unknown never makes the setup look safer. |
+| `absent_is_seen_only_with_complete_coverage_and_never_unknown` | same | "Not installed" and "service not found" need complete coverage; partial, unlooked or version-less is Unknown, never absent; absent against a found version is a conflict. |
+| `a_stopped_service_is_not_running_and_a_gap_is_not_stopped` | same | Service state is its own observation: Stopped is not Running, a gap is Unknown, two states conflict. |
+| `a_lower_ranked_disagreement_raises_a_blind_spot_and_the_best_method_wins` | same | The best method's version wins; a worse method that disagrees raises a `MethodsDisagree` blind spot; equal-rank disagreement is a conflict; order never matters. |
+| `every_version_in_the_fixtures_parses_and_up_sh_only_text_is_refused` | same | Every version in the manifest and `expected-matches.toml` parses; `:`, `/`, spaces and quotes are refused. |
+| 7 compile-fail cases | `crates/gd-core/tests/ui/` | `Observed` can't be a bool, defaulted, compared with a plain value or `unwrap_or`ed; evidence can't be displayed or built past its cap; a version has no public constructor. |
+
 ## License and supply-chain guard
 
 | Check | Where | What it proves |

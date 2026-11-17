@@ -1,0 +1,1405 @@
+//! The fact model (`crates/gd-core/src/fact.rs`, `view.rs`): hostile text stays
+//! untrusted, checked strings refuse bad input, every fact family Judge B reads
+//! and every kind the lab manifest records has a claim, and setup-level facts
+//! are derived the same way whatever order the facts arrive in.
+//!
+//! The JSON here is only for comparing and for the untrusted-shape check; the
+//! tests are the one place besides `gd-store` that calls `serde_json::to_*` on
+//! facts.
+
+// Test-only crate: failed checks are panics. See expected_matches.rs.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use gd_core::*;
+use proptest::prelude::*;
+use serde_json::Value as Json;
+use toml::{Table, Value};
+
+// ---------------------------------------------------------------- helpers
+
+/// Fixed seed, like every property test here; `GD_PROPTEST_SEED` explores another.
+fn config() -> ProptestConfig {
+    let seed = std::env::var("GD_PROPTEST_SEED")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(0x6764_5f70_726f_7074);
+    ProptestConfig {
+        rng_seed: proptest::test_runner::RngSeed::Fixed(seed),
+        ..ProptestConfig::default()
+    }
+}
+
+fn root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn read(rel: &str) -> String {
+    fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+}
+
+fn cat(id: &str) -> CatalogId {
+    CatalogId::parse(id).unwrap()
+}
+
+fn instance(id: &str) -> InstanceRef {
+    InstanceRef {
+        catalog: cat(id),
+        instance: InstanceName::parse("").unwrap(),
+    }
+}
+
+fn version(v: &str) -> PlainVersion {
+    PlainVersion::parse(v).unwrap()
+}
+
+fn source(sensor: SensorId) -> Source {
+    Source {
+        sensor,
+        backend: Backend::Fake,
+    }
+}
+
+fn fact(subject: Subject, claim: Claim) -> Fact {
+    Fact::new(
+        subject,
+        claim,
+        source(SensorId::Fixture),
+        Timestamp(1_700_000_000),
+        vec![],
+    )
+}
+
+fn container(name: &str) -> RunsAs {
+    RunsAs::Container {
+        name: Untrusted::new(name.to_owned()),
+        image: Untrusted::new("img".to_owned()),
+        digest: None,
+    }
+}
+
+fn service_fact(id: &str, v: &str, method: Method) -> Fact {
+    fact(
+        Subject::Service(instance(id)),
+        Claim::Service {
+            state: Observed::Seen(ServiceState::Running),
+            version: Observed::Seen(version(v)),
+            runs_as: container(id),
+            method,
+        },
+    )
+}
+
+/// The view as text, for equality. Tuples in a list, because JSON object keys
+/// must be strings and the maps are keyed by structs.
+fn render(view: &SetupView) -> String {
+    serde_json::to_string(&(
+        &view.chain,
+        &view.platform,
+        &view.word_size,
+        &view.block_storage,
+        &view.exposure,
+        view.services.iter().collect::<Vec<_>>(),
+        view.packages.iter().collect::<Vec<_>>(),
+    ))
+    .unwrap()
+}
+
+fn json<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_string(value).unwrap()
+}
+
+fn unknown<T>(reason: UnknownReason) -> Observed<T> {
+    Observed::Unknown(Unknown::new(reason))
+}
+
+// -------------------------------------------- hostile text and Untrusted
+
+fn hostile_text() -> impl Strategy<Value = String> {
+    const DANGEROUS: &str = "\u{0}\u{7}\t\n\r\u{1b}\u{7f}\u{85}\u{9b}\\&<>\"'\u{ad}\u{61c}\
+        \u{200b}\u{200d}\u{200f}\u{2028}\u{202e}\u{2066}\u{2069}\u{2800}\u{feff}\u{fe0f}\
+        \u{e0041}\u{e007f}\u{e0100}\u{338}\u{301}\u{1d173}{}[]:,";
+    let dangerous = proptest::sample::select(DANGEROUS.chars().collect::<Vec<_>>());
+    proptest::collection::vec(prop_oneof![any::<char>(), dangerous], 0..64)
+        .prop_map(|chars| chars.into_iter().collect())
+}
+
+/// A fact with `text` in every slot that takes outside text.
+fn hostile_fact(text: &str) -> Fact {
+    let u = |tag: &str| Untrusted::new(format!("ZQX{tag}{text}"));
+    Fact::new(
+        Subject::Service(instance("bitcoin-core")),
+        Claim::Host {
+            os: u("os"),
+            os_version: Observed::Seen(version("12.1")),
+            kernel: Observed::Unknown(Unknown::with_detail(
+                UnknownReason::Unparsable,
+                &format!("ZQXdetail{text}"),
+            )),
+            arch: Observed::Seen(Arch::Other(u("arch"))),
+        },
+        source(SensorId::Nip11),
+        Timestamp(5),
+        vec![
+            Evidence::new(
+                CallId::parse("getnetworkinfo").unwrap(),
+                &format!("ZQXevidence{text}"),
+            ),
+            Evidence::new(CallId::parse("version").unwrap(), text),
+        ],
+    )
+}
+
+fn hostile_other_claims(text: &str) -> Vec<Claim> {
+    let u = |tag: &str| Untrusted::new(format!("ZQX{tag}{text}"));
+    vec![
+        Claim::Unrecognized {
+            runs_as: RunsAs::Container {
+                name: u("name"),
+                image: u("image"),
+                digest: None,
+            },
+            version_label: Some(u("vlabel")),
+            source_label: Some(u("slabel")),
+        },
+        Claim::Unrecognized {
+            runs_as: RunsAs::Unit { name: u("unit") },
+            version_label: None,
+            source_label: None,
+        },
+        Claim::Unrecognized {
+            runs_as: RunsAs::Binary {
+                path: u("path"),
+                sha256: None,
+            },
+            version_label: None,
+            source_label: None,
+        },
+        Claim::BlockStorage(Observed::Seen(FsKind::Other(u("fs")))),
+    ]
+}
+
+/// Every string in `value` that contains the marker must sit directly under an
+/// `"untrusted"` key.
+fn markers_only_under_untrusted(value: &Json, key: Option<&str>) {
+    match value {
+        Json::String(s) => {
+            if s.contains("ZQX") {
+                assert_eq!(
+                    key,
+                    Some("untrusted"),
+                    "outside text outside its wrapper: {s:?}"
+                );
+            }
+        }
+        Json::Array(items) => items
+            .iter()
+            .for_each(|v| markers_only_under_untrusted(v, key)),
+        Json::Object(map) => map
+            .iter()
+            .for_each(|(k, v)| markers_only_under_untrusted(v, Some(k))),
+        _ => {}
+    }
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    #[test]
+    fn hostile_strings_never_escape_untrusted(text in hostile_text()) {
+        let mut facts = vec![hostile_fact(&text)];
+        facts.extend(
+            hostile_other_claims(&text)
+                .into_iter()
+                .map(|claim| fact(Subject::Host, claim)),
+        );
+        for f in &facts {
+            // Debug is for logs: it must hold no outside text and no control character.
+            let debug = format!("{f:?}");
+            prop_assert!(!debug.contains("ZQX"), "{debug}");
+            prop_assert!(!debug.chars().any(char::is_control), "{debug:?}");
+
+            // JSON keeps outside text under its wrapper and round-trips byte for byte.
+            let text_json = json(f);
+            let parsed: Json = serde_json::from_str(&text_json).unwrap();
+            markers_only_under_untrusted(&parsed, None);
+            let back: Fact = serde_json::from_str(&text_json).unwrap();
+            prop_assert_eq!(json(&back), text_json);
+
+            // Evidence stays small, and the terminal form of it is safe.
+            prop_assert!(f.evidence().len() <= MAX_EVIDENCE);
+            for e in f.evidence() {
+                prop_assert!(e.raw().byte_len() <= MAX_EVIDENCE_BYTES);
+                let shown = e.raw().escape_for_terminal();
+                prop_assert!(!shown.chars().any(char::is_control), "{shown:?}");
+            }
+        }
+    }
+}
+
+// ------------------------------------------------- checked constructors
+
+fn reference_slug(t: &str, underscore: bool, empty_ok: bool) -> bool {
+    let cs: Vec<char> = t.chars().collect();
+    if cs.is_empty() {
+        return empty_ok;
+    }
+    cs.len() <= 40
+        && (cs[0].is_ascii_lowercase() || cs[0].is_ascii_digit())
+        && cs
+            .iter()
+            .all(|&c| matches!(c, 'a'..='z' | '0'..='9' | '-') || (underscore && c == '_'))
+}
+
+fn reference_version(t: &str) -> bool {
+    let ok = |s: &str| {
+        !s.is_empty()
+            && s.chars().all(
+                |c| matches!(c, '0'..='9' | 'a'..='z' | 'A'..='Z' | '.' | '+' | '~' | '_' | '-'),
+            )
+    };
+    if !(1..=64).contains(&t.chars().count()) {
+        return false;
+    }
+    match t.split_once('!') {
+        Some((e, rest)) => !e.is_empty() && e.chars().all(|c| c.is_ascii_digit()) && ok(rest),
+        None => ok(t),
+    }
+}
+
+fn mostly_valid() -> impl Strategy<Value = String> {
+    prop_oneof![
+        hostile_text(),
+        "[a-z0-9_-]{0,45}",
+        "[0-9A-Za-z.+~_:/-]{0,70}",
+        "[a-z0-9A-Z.+~_ /:-]{0,70}",
+    ]
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    #[test]
+    fn validated_constructors_accept_exactly_their_set(t in mostly_valid()) {
+        prop_assert_eq!(CatalogId::parse(&t).is_ok(), reference_slug(&t, false, false));
+        prop_assert_eq!(SetupId::parse(&t).is_ok(), reference_slug(&t, false, false));
+        prop_assert_eq!(SettingId::parse(&t).is_ok(), reference_slug(&t, true, false));
+        prop_assert_eq!(CallId::parse(&t).is_ok(), reference_slug(&t, true, false));
+        prop_assert_eq!(HintId::parse(&t).is_ok(), reference_slug(&t, true, false));
+        prop_assert_eq!(InstanceName::parse(&t).is_ok(), reference_slug(&t, false, true));
+        prop_assert_eq!(PlainVersion::parse(&t).is_ok(), reference_version(&t));
+        // Through JSON too: a stored or received string is checked the same way.
+        let via_json = serde_json::from_str::<PlainVersion>(&json(&t)).is_ok();
+        prop_assert_eq!(via_json, reference_version(&t));
+        // An error names the kind, never the text.
+        if let Err(e) = PlainVersion::parse(&t) {
+            prop_assert!(!t.is_empty() && !e.to_string().contains(&t) || t.len() < 4);
+        }
+    }
+
+    #[test]
+    fn hashes_and_digests_are_exactly_lower_hex(t in "[0-9a-fA-F:sha]{0,80}") {
+        let hex64 = t.len() == 64 && t.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'));
+        prop_assert_eq!(Sha256::parse(&t).is_ok(), hex64);
+        let digest_ok = t.strip_prefix("sha256:").is_some_and(|rest| {
+            rest.len() == 64 && rest.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+        });
+        prop_assert_eq!(ImageDigest::parse(&t).is_ok(), digest_ok);
+    }
+}
+
+#[test]
+fn epochs_are_versions_and_digests_are_not() {
+    for good in ["1!2.0", "0!1.0rc1", "12!3.4+local"] {
+        assert!(PlainVersion::parse(good).is_ok(), "{good}");
+    }
+    for bad in ["!2.0", "1!", "a!1.0", "1!2!3", "1!2 .0", "-1!2"] {
+        assert!(PlainVersion::parse(bad).is_err(), "{bad}");
+    }
+    assert!(PlainVersion::parse(&format!("1!{}", "2".repeat(63))).is_err());
+    assert!(PlainVersion::parse(&format!("1!{}", "2".repeat(62))).is_ok());
+    let digest = format!("sha256:{}", "a".repeat(64));
+    assert!(PlainVersion::parse(&digest).is_err());
+    assert!(ImageDigest::parse(&digest).is_ok());
+    assert!(ImageDigest::parse("1!2.0").is_err());
+}
+
+#[test]
+fn absent_is_seen_only_with_complete_coverage_and_never_unknown() {
+    assert!(matches!(
+        Presence::absent(Coverage::Complete),
+        Observed::Seen(Presence::Absent)
+    ));
+    let incomplete = |o: Observed<Presence>| {
+        matches!(
+            o,
+            Observed::Unknown(Unknown {
+                reason: UnknownReason::IncompleteCoverage,
+                ..
+            })
+        )
+    };
+    assert!(incomplete(Presence::absent(Coverage::Partial)));
+    assert!(matches!(
+        ServiceState::not_found(Coverage::Complete),
+        Observed::Seen(ServiceState::NotFound)
+    ));
+    assert!(matches!(
+        ServiceState::not_found(Coverage::Partial),
+        Observed::Unknown(_)
+    ));
+
+    let pkg = |presence: Observed<Presence>, v: Observed<PlainVersion>| {
+        fact(
+            Subject::Service(instance("lnd")),
+            Claim::Package {
+                product: cat("xz-utils"),
+                presence,
+                version: v,
+            },
+        )
+    };
+    let key = (instance("lnd"), cat("xz-utils"));
+    let none = || unknown::<PlainVersion>(UnknownReason::NotChecked);
+    let no_presence = || unknown::<Presence>(UnknownReason::NotChecked);
+    let absent = setup_view(&[pkg(Presence::absent(Coverage::Complete), none())]);
+    assert!(matches!(
+        absent.packages[&key],
+        Observed::Seen(PackageState::NotInstalled)
+    ));
+    // Looked, but not everywhere: unknown, never absent.
+    let partial = setup_view(&[pkg(Presence::absent(Coverage::Partial), none())]);
+    assert!(matches!(partial.packages[&key], Observed::Unknown(_)));
+    // Never looked: unknown.
+    let unlooked = setup_view(&[pkg(no_presence(), none())]);
+    assert!(matches!(unlooked.packages[&key], Observed::Unknown(_)));
+    // Present with no readable version: unknown, not a version.
+    let nov = setup_view(&[pkg(Observed::Seen(Presence::Present), none())]);
+    assert!(matches!(nov.packages[&key], Observed::Unknown(_)));
+    // Absent against a found version is a conflict, not a pick.
+    let both = setup_view(&[
+        pkg(Presence::absent(Coverage::Complete), none()),
+        pkg(
+            Observed::Seen(Presence::Present),
+            Observed::Seen(version("5.4.1")),
+        ),
+    ]);
+    assert!(matches!(
+        both.packages[&key],
+        Observed::Unknown(Unknown {
+            reason: UnknownReason::Conflict,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn a_stopped_service_is_not_running_and_a_gap_is_not_stopped() {
+    let svc = |state: Observed<ServiceState>| {
+        fact(
+            Subject::Service(instance("lnd")),
+            Claim::Service {
+                state,
+                version: Observed::Seen(version("1.0")),
+                runs_as: container("lnd"),
+                method: Method::ServiceReply,
+            },
+        )
+    };
+    let key = instance("lnd");
+    let v = setup_view(&[svc(Observed::Seen(ServiceState::Stopped))]);
+    assert!(matches!(
+        v.states[&key],
+        Observed::Seen(ServiceState::Stopped)
+    ));
+    let v = setup_view(&[svc(unknown(UnknownReason::NoPermission))]);
+    assert!(matches!(v.states[&key], Observed::Unknown(_)));
+    let v = setup_view(&[
+        svc(Observed::Seen(ServiceState::Running)),
+        svc(Observed::Seen(ServiceState::Stopped)),
+    ]);
+    assert!(matches!(
+        v.states[&key],
+        Observed::Unknown(Unknown {
+            reason: UnknownReason::Conflict,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn a_lower_ranked_disagreement_raises_a_blind_spot_and_the_best_method_wins() {
+    let ranked = |a: &str, b: &str| {
+        vec![
+            service_fact("lnd", a, Method::ImageDigest),
+            service_fact("lnd", b, Method::ImageName),
+        ]
+    };
+    let facts = ranked("1.0", "2.0");
+    let view = setup_view(&facts);
+    assert!(matches!(&view.services[&instance("lnd")], Observed::Seen(v) if v.as_str() == "1.0"));
+    assert_eq!(view.blind_spots.len(), 1);
+    assert!(matches!(
+        view.blind_spots[0].what,
+        BlindSpotKind::MethodsDisagree
+    ));
+    // Agreement raises nothing; order never matters.
+    assert!(setup_view(&ranked("1.0", "1.0")).blind_spots.is_empty());
+    let mut reversed = facts.clone();
+    reversed.reverse();
+    assert_eq!(render(&setup_view(&reversed)), render(&view));
+    assert_eq!(setup_view(&reversed).blind_spots, view.blind_spots);
+    // A disagreement at the top rank is a conflict, and not a blind spot.
+    let tie = setup_view(&[
+        service_fact("lnd", "1.0", Method::ImageDigest),
+        service_fact("lnd", "2.0", Method::ImageDigest),
+    ]);
+    assert!(matches!(
+        tie.services[&instance("lnd")],
+        Observed::Unknown(Unknown {
+            reason: UnknownReason::Conflict,
+            ..
+        })
+    ));
+    assert!(tie.blind_spots.is_empty());
+}
+
+#[test]
+fn named_bad_ids_and_versions_are_refused() {
+    for bad in [
+        "",
+        "Bitcoin",
+        "-core",
+        "a b",
+        "a/b",
+        "../x",
+        "a\n",
+        "a\u{0}",
+        "bitcoin_core",
+        "é",
+        &"a".repeat(41),
+    ] {
+        assert!(CatalogId::parse(bad).is_err(), "catalog id {bad:?}");
+    }
+    for bad in [
+        "",
+        "1.0\n",
+        "1.0 ",
+        "v1;rm",
+        "1.0/2",
+        "\u{202e}1.0",
+        "١.٠",
+        &"1".repeat(65),
+    ] {
+        assert!(PlainVersion::parse(bad).is_err(), "version {bad:?}");
+    }
+    for good in [
+        "32.1",
+        "0.21.6-beta",
+        "1.1.2-148-g4cd3cf6",
+        "5.4.1-1+deb12u2",
+        "1~rc1",
+    ] {
+        assert!(PlainVersion::parse(good).is_ok(), "version {good:?}");
+    }
+    assert!(CatalogId::parse(&"a".repeat(40)).is_ok());
+    assert!(PlainVersion::parse(&"1".repeat(64)).is_ok());
+    assert!(InstanceName::parse("").is_ok());
+    assert!(SettingId::parse("option_enabled").is_ok());
+    assert_eq!(
+        PlainVersion::parse("bad one").unwrap_err().to_string(),
+        "not a valid version"
+    );
+    // A planted bad id inside a stored fact is refused on load.
+    let ok = json(&fact(
+        Subject::Host,
+        Claim::Platform {
+            id: cat("docker"),
+            version: unknown(UnknownReason::NotChecked),
+        },
+    ));
+    assert!(serde_json::from_str::<Fact>(&ok).is_ok());
+    let bad = ok.replace("\"docker\"", "\"dock er\"");
+    assert!(serde_json::from_str::<Fact>(&bad).is_err());
+}
+
+// ------------------------------------------------------ evidence limits
+
+proptest! {
+    #![proptest_config(config())]
+
+    #[test]
+    fn evidence_is_cut_visibly_at_a_character_boundary(
+        text in prop_oneof![hostile_text(), "[a-zé🐕]{0,2500}"]
+    ) {
+        let e = Evidence::new(CallId::parse("c").unwrap(), &text);
+        let kept = e.raw().expose_untrusted().clone(); // test reads its own value
+        prop_assert!(kept.len() <= MAX_EVIDENCE_BYTES);
+        if text.len() <= MAX_EVIDENCE_BYTES {
+            prop_assert_eq!(&kept, &text);
+        } else {
+            prop_assert!(kept.ends_with(CUT_MARKER));
+            let head = &kept[..kept.len() - CUT_MARKER.len()];
+            prop_assert!(text.starts_with(head));
+        }
+        // Cutting twice changes nothing, and what we stored loads back.
+        prop_assert_eq!(&Evidence::new(CallId::parse("c").unwrap(), &kept).raw().expose_untrusted().clone(), &kept);
+        let back: Evidence = serde_json::from_str(&json(&e)).unwrap();
+        prop_assert_eq!(back.raw().byte_len(), kept.len());
+    }
+}
+
+#[test]
+fn too_much_evidence_is_dropped_and_oversized_evidence_is_refused_on_load() {
+    let five = (0..5)
+        .map(|i| Evidence::new(CallId::parse("c").unwrap(), &format!("reply {i}")))
+        .collect();
+    let f = Fact::new(
+        Subject::Host,
+        Claim::Chain(unknown(UnknownReason::NoReply)),
+        source(SensorId::BitcoindRpc),
+        Timestamp(0),
+        five,
+    );
+    assert_eq!(f.evidence().len(), MAX_EVIDENCE);
+
+    let big = format!(
+        r#"{{"call":"c","raw":{{"untrusted":"{}"}}}}"#,
+        "x".repeat(2000)
+    );
+    assert!(serde_json::from_str::<Evidence>(&big).is_err());
+    // A fact stored with five items loads with four.
+    let mut doc: Json = serde_json::from_str(&json(&f)).unwrap();
+    let item = doc["evidence"][0].clone();
+    doc["evidence"].as_array_mut().unwrap().push(item.clone());
+    doc["evidence"].as_array_mut().unwrap().push(item);
+    let loaded: Fact = serde_json::from_value(doc).unwrap();
+    assert_eq!(loaded.evidence().len(), MAX_EVIDENCE);
+}
+
+// ----------------------------------------------------- method order, model
+
+#[test]
+fn digests_and_signed_hashes_outrank_self_reports() {
+    use Method::*;
+    let order = [
+        SignedHash,
+        ImageDigest,
+        ServiceReply,
+        ImageName,
+        Binary,
+        Unit,
+        Port,
+        UserEntered,
+    ];
+    for pair in order.windows(2) {
+        assert!(
+            pair[0].outranks(pair[1]),
+            "{:?} over {:?}",
+            pair[0],
+            pair[1]
+        );
+        assert!(!pair[1].outranks(pair[0]));
+    }
+    let mut shuffled = [
+        Port,
+        SignedHash,
+        UserEntered,
+        ServiceReply,
+        Unit,
+        ImageDigest,
+        Binary,
+        ImageName,
+    ];
+    shuffled.sort();
+    assert_eq!(shuffled, order);
+    assert_eq!(FACT_MODEL, 1);
+}
+
+#[test]
+fn a_digest_beats_a_self_report_in_the_view() {
+    let facts = [
+        service_fact("lnd", "0.18.4-beta", Method::ServiceReply),
+        service_fact("lnd", "0.21.6-beta", Method::ImageDigest),
+    ];
+    let view = setup_view(&facts);
+    match &view.services[&instance("lnd")] {
+        Observed::Seen(v) => assert_eq!(v.as_str(), "0.21.6-beta"),
+        Observed::Unknown(_) => panic!("expected the digest's version"),
+    }
+    // Two equally good sources that disagree are a conflict, not a pick.
+    let tie = [
+        service_fact("lnd", "1.0", Method::ServiceReply),
+        service_fact("lnd", "2.0", Method::ServiceReply),
+    ];
+    assert!(matches!(
+        &setup_view(&tie).services[&instance("lnd")],
+        Observed::Unknown(Unknown {
+            reason: UnknownReason::Conflict,
+            ..
+        })
+    ));
+}
+
+// -------------------------- every Judge B family and manifest kind has a claim
+
+const NODE: &str = "bitcoin-core";
+
+fn fs_from(label: &str) -> FsKind {
+    match label {
+        "tmpfs" => FsKind::Tmpfs,
+        "ext4" => FsKind::Ext4,
+        "fat32" => FsKind::Fat32,
+        "btrfs" => FsKind::Btrfs,
+        "xfs" => FsKind::Xfs,
+        "zfs" => FsKind::Zfs,
+        other => panic!("fixture block_storage {other:?} has no FsKind in this test"),
+    }
+}
+
+fn fs_label(kind: &FsKind) -> &'static str {
+    match kind {
+        FsKind::Tmpfs => "tmpfs",
+        FsKind::Ext4 => "ext4",
+        FsKind::Fat32 => "fat32",
+        FsKind::Btrfs => "btrfs",
+        FsKind::Xfs => "xfs",
+        FsKind::Zfs => "zfs",
+        _ => "other",
+    }
+}
+
+fn chain_from(label: &str) -> Chain {
+    match label {
+        "main" => Chain::Main,
+        "testnet3" => Chain::Testnet3,
+        "testnet4" => Chain::Testnet4,
+        "signet" => Chain::Signet,
+        "regtest" => Chain::Regtest,
+        other => panic!("chain {other:?}"),
+    }
+}
+
+fn chain_label(chain: Chain) -> &'static str {
+    match chain {
+        Chain::Main => "main",
+        Chain::Testnet3 => "testnet3",
+        Chain::Testnet4 => "testnet4",
+        Chain::Signet => "signet",
+        Chain::Regtest => "regtest",
+    }
+}
+
+fn backend_from(source_label: &str, setup: &str) -> Backend {
+    let setup = SetupId::parse(setup).unwrap();
+    match source_label {
+        "lab" => Backend::Recorded { setup },
+        "synthetic" => Backend::Fixture { setup },
+        other => panic!("source {other:?}"),
+    }
+}
+
+/// Judge B's view of a setup, as `family -> text`, read back out of a
+/// [`SetupView`] the way the two-back-ends judge will.
+fn judge_text(view: &SetupView) -> Vec<(String, String)> {
+    fn seen<T>(o: &Observed<T>, f: impl Fn(&T) -> String) -> String {
+        match o {
+            Observed::Seen(v) => f(v),
+            Observed::Unknown(u) => format!("unknown ({:?})", u.reason),
+        }
+    }
+    let mut out = vec![
+        (
+            "source".to_owned(),
+            seen(&view.source, |s| match s {
+                BackendKind::Recorded => "lab".to_owned(),
+                BackendKind::Fixture => "synthetic".to_owned(),
+                BackendKind::Live => "live".to_owned(),
+                BackendKind::Fake => "fake".to_owned(),
+            }),
+        ),
+        (
+            "chain".to_owned(),
+            seen(&view.chain, |c| chain_label(*c).to_owned()),
+        ),
+        (
+            "platform".to_owned(),
+            seen(&view.platform, |p| p.as_str().to_owned()),
+        ),
+        (
+            "arch".to_owned(),
+            seen(&view.word_size, |w| match w {
+                WordSize::Bits64 => "64-bit".to_owned(),
+                WordSize::Bits32 => "32-bit".to_owned(),
+            }),
+        ),
+        (
+            "block_storage".to_owned(),
+            seen(&view.block_storage, |k| fs_label(k).to_owned()),
+        ),
+        (
+            "exposure".to_owned(),
+            seen(&view.exposure, |r| {
+                match r {
+                    Reach::NotListening | Reach::Localhost => "none",
+                    Reach::Lan => "lan",
+                    Reach::Tunnel => "tunnel",
+                    Reach::Internet => "internet",
+                }
+                .to_owned()
+            }),
+        ),
+    ];
+    for (inst, v) in &view.services {
+        out.push((
+            format!("service {}", inst.catalog.as_str()),
+            seen(v, |v| v.as_str().to_owned()),
+        ));
+    }
+    for ((inst, product), v) in &view.packages {
+        out.push((
+            format!("package {} {}", inst.catalog.as_str(), product.as_str()),
+            seen(v, |s| match s {
+                PackageState::NotInstalled => "none".to_owned(),
+                PackageState::Version(v) => v.as_str().to_owned(),
+            }),
+        ));
+    }
+    out.sort();
+    out
+}
+
+/// A `[[setup]]` of `expected-matches.toml` as facts, one claim per family.
+fn facts_from_fixture(setup: &Table) -> Vec<Fact> {
+    let text = |t: &Table, k: &str| t[k].as_str().unwrap().to_owned();
+    let id = text(setup, "id");
+    let backend = backend_from(&text(setup, "source"), &id);
+    let method = if text(setup, "source") == "lab" {
+        Method::ServiceReply
+    } else {
+        Method::UserEntered
+    };
+    let mk = |subject: Subject, claim: Claim| {
+        Fact::new(
+            subject,
+            claim,
+            Source {
+                sensor: SensorId::Fixture,
+                backend: backend.clone(),
+            },
+            Timestamp(1),
+            vec![],
+        )
+    };
+    let node = Subject::Service(instance(NODE));
+    let mut facts = vec![
+        mk(
+            node.clone(),
+            Claim::Chain(Observed::Seen(chain_from(&text(setup, "chain")))),
+        ),
+        mk(
+            Subject::Host,
+            Claim::Platform {
+                id: cat(&text(setup, "platform")),
+                version: unknown(UnknownReason::NotChecked),
+            },
+        ),
+        mk(
+            Subject::Host,
+            Claim::Host {
+                os: Untrusted::new("fixture".to_owned()),
+                os_version: unknown(UnknownReason::NotChecked),
+                kernel: unknown(UnknownReason::NotChecked),
+                arch: Observed::Seen(match text(setup, "arch").as_str() {
+                    "64-bit" => Arch::Aarch64,
+                    "32-bit" => Arch::Armv7,
+                    other => panic!("arch {other:?}"),
+                }),
+            },
+        ),
+        mk(
+            node.clone(),
+            Claim::BlockStorage(Observed::Seen(fs_from(&text(setup, "block_storage")))),
+        ),
+        mk(
+            node,
+            Claim::Exposure {
+                port: 8333,
+                proto: Proto::Tcp,
+                reach: Observed::Seen(match text(setup, "exposure").as_str() {
+                    "none" => Reach::NotListening,
+                    "lan" => Reach::Lan,
+                    "tunnel" => Reach::Tunnel,
+                    "internet" => Reach::Internet,
+                    other => panic!("exposure {other:?}"),
+                }),
+            },
+        ),
+    ];
+    for svc in setup["service"].as_array().unwrap() {
+        let svc = svc.as_table().unwrap();
+        facts.push(mk(
+            Subject::Service(instance(&text(svc, "id"))),
+            Claim::Service {
+                state: Observed::Seen(ServiceState::Running),
+                version: Observed::Seen(version(&text(svc, "version"))),
+                runs_as: container(&text(svc, "id")),
+                method,
+            },
+        ));
+    }
+    for pkg in setup
+        .get("package")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let pkg = pkg.as_table().unwrap();
+        let (presence, found) = match text(pkg, "version").as_str() {
+            // The fixture's `none` is a complete search that found nothing.
+            "none" => (
+                Presence::absent(Coverage::Complete),
+                unknown(UnknownReason::NotChecked),
+            ),
+            v => (
+                Observed::Seen(Presence::Present),
+                Observed::Seen(version(v)),
+            ),
+        };
+        facts.push(mk(
+            Subject::Service(instance(&text(pkg, "in"))),
+            Claim::Package {
+                product: cat(&text(pkg, "product")),
+                presence,
+                version: found,
+            },
+        ));
+    }
+    facts
+}
+
+/// What the fixture says, in `judge_text`'s shape.
+fn fixture_text(setup: &Table) -> Vec<(String, String)> {
+    let text = |t: &Table, k: &str| t[k].as_str().unwrap().to_owned();
+    let mut out: Vec<(String, String)> = [
+        "arch",
+        "block_storage",
+        "chain",
+        "exposure",
+        "platform",
+        "source",
+    ]
+    .iter()
+    .map(|k| ((*k).to_owned(), text(setup, k)))
+    .collect();
+    for svc in setup["service"].as_array().unwrap() {
+        let svc = svc.as_table().unwrap();
+        out.push((format!("service {}", text(svc, "id")), text(svc, "version")));
+    }
+    for pkg in setup
+        .get("package")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let pkg = pkg.as_table().unwrap();
+        out.push((
+            format!("package {} {}", text(pkg, "in"), text(pkg, "product")),
+            text(pkg, "version"),
+        ));
+    }
+    out.sort();
+    out
+}
+
+fn fixture_setups() -> Vec<Table> {
+    let doc: Table = toml::from_str(&read("fixtures/expected-matches.toml")).unwrap();
+    doc["setup"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_table().unwrap().clone())
+        .collect()
+}
+
+#[test]
+fn every_judge_b_family_is_a_fact_and_comes_back_equal() {
+    let setups = fixture_setups();
+    assert!(setups.len() >= 2);
+    for setup in &setups {
+        let facts = facts_from_fixture(setup);
+        let kinds: BTreeSet<&str> = facts.iter().map(|f| f.claim.kind()).collect();
+        for needed in [
+            "chain",
+            "platform",
+            "host",
+            "block_storage",
+            "exposure",
+            "service",
+        ] {
+            assert!(kinds.contains(needed), "{}: no {needed} claim", setup["id"]);
+        }
+        // lab-old-synthetic has no packages (no images), so it has seven families.
+        let has_packages = setup.contains_key("package");
+        assert_eq!(kinds.contains("package"), has_packages, "{}", setup["id"]);
+        // All eight families two_backends.rs lists: arch, block_storage, chain, exposure,
+        // package, platform, service, source.
+        let families: BTreeSet<String> = fixture_text(setup)
+            .iter()
+            .map(|(k, _)| k.split(' ').next().unwrap().to_owned())
+            .collect();
+        let expected: Vec<&str> = [
+            "arch",
+            "block_storage",
+            "chain",
+            "exposure",
+            "package",
+            "platform",
+            "service",
+            "source",
+        ]
+        .into_iter()
+        .filter(|f| has_packages || *f != "package")
+        .collect();
+        assert_eq!(
+            families.iter().map(String::as_str).collect::<Vec<_>>(),
+            expected
+        );
+        // Stored and loaded (through JSON) before folding, as the store will.
+        let reloaded: Vec<Fact> = facts
+            .iter()
+            .map(|f| serde_json::from_str(&json(f)).unwrap())
+            .collect();
+        assert_eq!(
+            judge_text(&setup_view(&reloaded)),
+            fixture_text(setup),
+            "setup {}",
+            setup["id"]
+        );
+    }
+}
+
+const MANIFEST_FACT_KINDS: [&str; 4] = ["chain", "platform", "service", "source"];
+const MANIFEST_NOTES: [&str; 3] = ["description", "format", "recorder"];
+
+#[test]
+fn every_lab_manifest_kind_is_a_fact_and_comes_back_equal() {
+    let m: Table = toml::from_str(&read("fixtures/lab-recorded/manifest.toml")).unwrap();
+    // A new manifest key must be added to one of the two lists on purpose.
+    let keys: BTreeSet<&str> = m.keys().map(String::as_str).collect();
+    let known: BTreeSet<&str> = MANIFEST_FACT_KINDS
+        .iter()
+        .chain(&MANIFEST_NOTES)
+        .copied()
+        .collect();
+    assert_eq!(
+        keys, known,
+        "the manifest has a kind this test doesn't know"
+    );
+
+    let text = |t: &Table, k: &str| t[k].as_str().unwrap().to_owned();
+    let backend = backend_from(&text(&m, "source"), "lab-regtest");
+    let mk = |subject: Subject, claim: Claim| {
+        Fact::new(
+            subject,
+            claim,
+            Source {
+                sensor: SensorId::LabManifest,
+                backend: backend.clone(),
+            },
+            Timestamp(1),
+            vec![],
+        )
+    };
+    let mut facts = vec![
+        mk(
+            Subject::Service(instance(NODE)),
+            Claim::Chain(Observed::Seen(chain_from(&text(&m, "chain")))),
+        ),
+        mk(
+            Subject::Host,
+            Claim::Platform {
+                id: cat(&text(&m, "platform")),
+                version: unknown(UnknownReason::NotChecked),
+            },
+        ),
+    ];
+    for svc in m["service"].as_array().unwrap() {
+        let svc = svc.as_table().unwrap();
+        facts.push(mk(
+            Subject::Service(instance(&text(svc, "id"))),
+            Claim::Service {
+                state: Observed::Seen(ServiceState::Running),
+                version: Observed::Seen(version(&text(svc, "version"))),
+                runs_as: container(&text(svc, "id")),
+                method: Method::ServiceReply,
+            },
+        ));
+    }
+    // The manifest's `source` is the fact's Backend: every fact carries it.
+    assert!(
+        facts
+            .iter()
+            .all(|f| matches!(f.source.backend, Backend::Recorded { .. }))
+    );
+
+    let view = judge_text(&setup_view(&facts));
+    for (family, value) in [
+        ("chain", text(&m, "chain")),
+        ("platform", text(&m, "platform")),
+        ("source", text(&m, "source")),
+    ] {
+        assert!(view.contains(&(family.to_owned(), value)), "{family}");
+    }
+    for svc in m["service"].as_array().unwrap() {
+        let svc = svc.as_table().unwrap();
+        assert!(view.contains(&(format!("service {}", text(svc, "id")), text(svc, "version"))));
+    }
+    // What the manifest doesn't record stays Unknown, never a guess.
+    for family in ["arch", "block_storage", "exposure"] {
+        let (_, value) = view.iter().find(|(f, _)| f == family).unwrap();
+        assert!(value.starts_with("unknown"), "{family}: {value}");
+    }
+}
+
+fn condition_names(value: &Json, out: &mut BTreeSet<String>) {
+    match value {
+        Json::Object(map) => {
+            for (k, v) in map {
+                if k == "fact"
+                    && let Some(name) = v.as_str()
+                {
+                    out.insert(name.to_owned());
+                }
+                condition_names(v, out);
+            }
+        }
+        Json::Array(items) => items.iter().for_each(|v| condition_names(v, out)),
+        _ => {}
+    }
+}
+
+/// Corpus condition names that are Settings for now; Phase 2.2 gives each its
+/// real mapping, and `hardware_model` waits for registered things (1.5).
+const SETTING_ONLY: &[&str] = &[
+    "accepts_inbound_p2p",
+    "hardware_model",
+    "multi_store_server",
+    "node_builds_block_templates",
+    "owner_may_open_untrusted_links",
+    "p2p_inbound_or_outbound_peers",
+    "payment_state_trusted_for_fulfilment",
+    "seed_built_with_50_or_more_dice_rolls",
+    "seed_generated_on_firmware_in_range",
+    "web_ui_reachable_from_internet",
+];
+
+#[test]
+fn every_advisory_condition_fact_has_a_claim() {
+    let mut names = BTreeSet::new();
+    let dir = root().join("advisories/corpus");
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "json") {
+            condition_names(
+                &serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap(),
+                &mut names,
+            );
+        }
+    }
+    assert!(names.len() >= 15, "found only {names:?}");
+
+    let id = |s: &str| SettingId::parse(s).unwrap();
+    let mut direct: Vec<(&str, Claim)> = vec![
+        (
+            "service_running",
+            Claim::Service {
+                state: Observed::Seen(ServiceState::Running),
+                version: unknown(UnknownReason::NotChecked),
+                runs_as: container("x"),
+                method: Method::Port,
+            },
+        ),
+        (
+            "package_installed",
+            Claim::Package {
+                product: cat("xz-utils"),
+                presence: unknown(UnknownReason::NotChecked),
+                version: unknown(UnknownReason::NotChecked),
+            },
+        ),
+        (
+            "platform",
+            Claim::Platform {
+                id: cat("umbrelos"),
+                version: unknown(UnknownReason::NotChecked),
+            },
+        ),
+        (
+            "port_exposed_to_internet",
+            Claim::Exposure {
+                port: 9735,
+                proto: Proto::Tcp,
+                reach: Observed::Seen(Reach::Internet),
+            },
+        ),
+    ];
+    for name in [
+        "option_enabled",
+        "option_disabled",
+        "backend_in_use",
+        "feature_enabled",
+    ] {
+        direct.push((
+            name,
+            Claim::Setting {
+                key: id(name),
+                value: Observed::Seen(SettingValue::Enabled),
+            },
+        ));
+    }
+    let direct_names: BTreeSet<&str> = direct.iter().map(|(n, _)| *n).collect();
+    for (name, claim) in &direct {
+        assert!(names.contains(*name), "corpus no longer uses {name}");
+        assert!(!claim.kind().is_empty());
+    }
+    // Pinned: a new condition name must be added here on purpose, either mapped
+    // above or listed as a Setting (hardware_model needs Subject::Registered, 1.5).
+    let rest: BTreeSet<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|n| !direct_names.contains(n))
+        .collect();
+    let pinned: BTreeSet<&str> = SETTING_ONLY.iter().copied().collect();
+    assert_eq!(rest, pinned, "update SETTING_ONLY");
+    // Every other condition is a Setting keyed by its own name, until Phase 2.2
+    // gives it a richer claim.
+    for name in names.iter().filter(|n| !direct_names.contains(n.as_str())) {
+        let claim = Claim::Setting {
+            key: SettingId::parse(name).unwrap(),
+            value: Observed::Seen(SettingValue::Disabled),
+        };
+        assert_eq!(claim.kind(), "setting");
+    }
+}
+
+// ------------------------------------------------- derived views are stable
+
+proptest! {
+    #![proptest_config(config())]
+
+    #[test]
+    fn the_view_is_the_same_whatever_order_facts_arrive_in(
+        shuffled in {
+            let setups = fixture_setups();
+            let mut facts = Vec::new();
+            for setup in &setups {
+                facts.extend(facts_from_fixture(setup));
+            }
+            // Add disagreements and unknowns so the fold has real work to do.
+            facts.push(fact(Subject::Service(instance("lnd")), Claim::Chain(Observed::Seen(Chain::Signet))));
+            facts.push(service_fact("lnd", "9.9", Method::ImageName));
+            facts.push(fact(Subject::Host, Claim::Exposure { port: 1, proto: Proto::Udp, reach: unknown(UnknownReason::NoPermission) }));
+            Just(facts).prop_shuffle()
+        }
+    ) {
+        let reference = {
+            let mut sorted: Vec<Fact> = shuffled.clone();
+            sorted.sort_by_key(json);
+            render(&setup_view(&sorted))
+        };
+        prop_assert_eq!(render(&setup_view(&shuffled)), reference);
+    }
+}
+
+#[test]
+fn disagreements_and_gaps_are_unknown_never_a_pick() {
+    let chain = |c| {
+        fact(
+            Subject::Service(instance("lnd")),
+            Claim::Chain(Observed::Seen(c)),
+        )
+    };
+    let host = |a: Arch| {
+        fact(
+            Subject::Host,
+            Claim::Host {
+                os: Untrusted::new("x".to_owned()),
+                os_version: unknown(UnknownReason::NotChecked),
+                kernel: unknown(UnknownReason::NotChecked),
+                arch: Observed::Seen(a),
+            },
+        )
+    };
+
+    let v = setup_view(&[chain(Chain::Main), chain(Chain::Regtest)]);
+    assert!(matches!(
+        v.chain,
+        Observed::Unknown(Unknown {
+            reason: UnknownReason::Conflict,
+            ..
+        })
+    ));
+    let v = setup_view(&[host(Arch::X86_64), host(Arch::Armv7)]);
+    assert!(matches!(
+        v.word_size,
+        Observed::Unknown(Unknown {
+            reason: UnknownReason::Conflict,
+            ..
+        })
+    ));
+    // x86_64 and aarch64 are both 64-bit: no conflict.
+    let v = setup_view(&[host(Arch::X86_64), host(Arch::Aarch64)]);
+    assert!(matches!(v.word_size, Observed::Seen(WordSize::Bits64)));
+    // An architecture we don't know has no word size.
+    let v = setup_view(&[host(Arch::Other(Untrusted::new("riscv".to_owned())))]);
+    assert!(matches!(
+        v.word_size,
+        Observed::Unknown(Unknown {
+            reason: UnknownReason::Unparsable,
+            ..
+        })
+    ));
+    // No facts at all: nothing is claimed.
+    let v = setup_view(&[]);
+    assert!(matches!(
+        v.chain,
+        Observed::Unknown(Unknown {
+            reason: UnknownReason::NotChecked,
+            ..
+        })
+    ));
+    assert!(matches!(
+        v.exposure,
+        Observed::Unknown(Unknown {
+            reason: UnknownReason::NotChecked,
+            ..
+        })
+    ));
+    assert!(v.services.is_empty() && v.packages.is_empty());
+}
+
+fn reach_facts(items: &[Observed<Reach>]) -> Vec<Fact> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(i, reach)| {
+            fact(
+                Subject::Host,
+                Claim::Exposure {
+                    port: 1000 + i as u16,
+                    proto: Proto::Tcp,
+                    reach: reach.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn any_reach() -> impl Strategy<Value = Observed<Reach>> {
+    prop_oneof![
+        Just(Observed::Seen(Reach::NotListening)),
+        Just(Observed::Seen(Reach::Localhost)),
+        Just(Observed::Seen(Reach::Lan)),
+        Just(Observed::Seen(Reach::Tunnel)),
+        Just(Observed::Seen(Reach::Internet)),
+        Just(unknown(UnknownReason::NotChecked)),
+        Just(unknown(UnknownReason::NoPermission)),
+    ]
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// Replacing any one exposure fact with Unknown never makes the setup look
+    /// safer: the answer is the same as before, or Unknown, never a narrower Seen.
+    #[test]
+    fn unknown_never_moves_exposure_towards_none(
+        items in proptest::collection::vec(any_reach(), 1..8),
+        at in 0usize..8,
+    ) {
+        let at = at % items.len();
+        let before = setup_view(&reach_facts(&items)).exposure;
+        let mut changed = items.clone();
+        changed[at] = unknown(UnknownReason::NotChecked);
+        let after = setup_view(&reach_facts(&changed)).exposure;
+        match after {
+            Observed::Unknown(_) => {}
+            Observed::Seen(r) => match before {
+                Observed::Seen(b) => prop_assert_eq!(r, b),
+                Observed::Unknown(_) => prop_assert!(false, "Unknown turned into Seen({r:?})"),
+            },
+        }
+    }
+
+    /// A port nobody checked can't be reported as "none".
+    #[test]
+    fn an_unchecked_port_blocks_a_none_answer(items in proptest::collection::vec(any_reach(), 1..8)) {
+        let view = setup_view(&reach_facts(&items));
+        let has_unknown = items.iter().any(|o| matches!(o, Observed::Unknown(_)));
+        let has_internet = items.iter().any(|o| matches!(o, Observed::Seen(Reach::Internet)));
+        if has_unknown && !has_internet {
+            prop_assert!(matches!(view.exposure, Observed::Unknown(_)));
+        }
+    }
+}
+
+#[test]
+fn no_exposure_evidence_is_not_checked_never_none() {
+    assert!(matches!(
+        setup_view(&[]).exposure,
+        Observed::Unknown(Unknown {
+            reason: UnknownReason::NotChecked,
+            ..
+        })
+    ));
+}
+
+// ------------------------------------------------ the version character set
+
+#[test]
+fn every_version_in_the_fixtures_parses_and_up_sh_only_text_is_refused() {
+    let mut versions = Vec::new();
+    let m: Table = toml::from_str(&read("fixtures/lab-recorded/manifest.toml")).unwrap();
+    for svc in m["service"].as_array().unwrap() {
+        versions.push(svc["version"].as_str().unwrap().to_owned());
+    }
+    for setup in fixture_setups() {
+        for svc in setup["service"].as_array().unwrap() {
+            versions.push(svc["version"].as_str().unwrap().to_owned());
+        }
+        for pkg in setup
+            .get("package")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let v = pkg["version"].as_str().unwrap();
+            if v != "none" {
+                versions.push(v.to_owned());
+            }
+        }
+    }
+    assert!(versions.len() >= 15, "{versions:?}");
+    for v in &versions {
+        assert!(PlainVersion::parse(v).is_ok(), "fixture version {v:?}");
+    }
+    // `lab/up.sh`'s plain() also lets `:` and `/` through; a version with
+    // either is refused here (a blind spot upstream), never a panic.
+    for v in ["1:2.0", "a/b", "1.0 ", "1.0'", "1;2", "$(x)", "1\n"] {
+        assert!(PlainVersion::parse(v).is_err(), "{v:?}");
+    }
+    for v in ["1.0_rc1", "1~rc1", "1!2.0+local-3"] {
+        assert!(PlainVersion::parse(v).is_ok(), "{v:?}");
+    }
+    // The one shared definition of the extra characters.
+    assert_eq!(VERSION_PUNCTUATION, ".+~_-");
+}
