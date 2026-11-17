@@ -125,23 +125,28 @@ jobs:
           fi
           echo "The two builds are byte-identical."
 
-  # Failure notice: if the scheduled nightly fails, open one GitHub issue with
-  # the run link, or comment on the open one, so a red nightly is never missed.
+  # Failure notice: if the scheduled nightly fails, open one GitHub issue
+  # ("Nightly failures") with the run link, or comment on the open one, so a
+  # red nightly is never missed.
   #
   # - `reproducible` is left out of `needs` on purpose: it is expected red
-  #   until Phase 4.6, and failure() only looks at the jobs listed here and
-  #   the jobs they depend on. A broken release build still counts, because
-  #   both build-repro jobs are listed. Add `reproducible` here in Phase 4.6.
-  # - Scheduled runs only. A manual run has someone watching it, and it can
-  #   run from any branch, which would file issues about unfinished work.
+  #   until Phase 4.6, and this job only looks at the jobs listed here. A
+  #   broken release build still counts, because both build-repro jobs are
+  #   listed. Add `reproducible` here in Phase 4.6.
+  # - A job that hits its timeout ends as `cancelled`, not `failure`, so both
+  #   count. If someone cancels the whole run by hand, `!cancelled()` is false
+  #   and no notice is sent: they already know.
+  # - Scheduled runs on this repository only. A manual run has someone
+  #   watching it and can run from any branch; forks must not file issues.
   # - Only this job can write issues. No checkout, no third-party actions:
   #   just the `gh` that comes on the runner. Every value reaches the shell
   #   through env, and only fixed values (job results, run id, commit id)
   #   are used. No commit message, branch name or PR title is ever read.
+  # - Any gh error turns this job red, so a broken notice is visible too.
   notify-failure:
     name: notify-failure
     needs: [gate, build-repro-2404, build-repro-2204]
-    if: failure() && github.event_name == 'schedule'
+    if: ${{ !cancelled() && github.event_name == 'schedule' && github.repository == 'MaxSikorski/guard-dog' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -181,22 +186,21 @@ jobs:
           ${failed}
           (The reproducible job is not counted: it is expected to fail until Phase 4.6.)"
 
-          # Make sure the label exists. If it can't be made, carry on without it.
-          if ! gh label list --limit 200 --json name --jq '.[].name' | grep -qx "${label}"; then
-            gh label create "${label}" --color B60205 \
-              --description "The scheduled nightly run failed" || true
-          fi
+          # Create the label, or update it if it already exists.
+          gh label create "${label}" --force --color B60205 \
+            --description "The scheduled nightly run failed"
 
-          existing="$(gh issue list --state open --label "${label}" --limit 1 \
-            --json number --jq '.[0].number // empty' || true)"
+          # Read open issues straight from the REST API (not search, which can
+          # lag behind). Pull requests share this list, so drop them.
+          open_issues="$(gh api --paginate \
+            "repos/${GH_REPO}/issues?state=open&labels=${label}&per_page=100" \
+            --jq '.[] | select(.pull_request == null) | .number')"
+          existing="$(printf '%s\n' "${open_issues}" | head -n 1)"
 
           if [ -n "${existing}" ]; then
             gh issue comment "${existing}" --body "${body}"
             echo "Commented on issue #${existing}."
-          elif gh issue create --title "Nightly failed on ${today}" \
-                 --label "${label}" --body "${body}"; then
-            echo "Opened a new issue."
           else
-            gh issue create --title "Nightly failed on ${today}" --body "${body}"
-            echo "Opened a new issue without the label."
+            gh issue create --title "Nightly failures" --label "${label}" --body "${body}"
+            echo "Opened a new issue."
           fi
