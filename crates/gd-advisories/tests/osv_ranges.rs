@@ -914,12 +914,25 @@ fn a_range_cannot_reopen_beyond_its_own_limit() {
         r#"[{"introduced":"0"},{"limit":"2"},{"introduced":"3"}]"#,
         r#"[{"introduced":"3"},{"limit":"3"}]"#,
         r#"[{"introduced":"1"},{"fixed":"2"},{"introduced":"5"},{"limit":"4"}]"#,
-        r#"[{"introduced":"0"},{"fixed":"2"},{"limit":"9"},{"limit":"1"},{"introduced":"3"}]"#,
     ] {
         for reason in all_reasons(r, &["0.5", "1.5", "2.5", "4", "6"]) {
             assert_eq!(reason, UnknownReason::MalformedRange, "{r}");
         }
     }
+}
+
+#[test]
+fn limits_expand_so_a_reopening_below_only_some_limits_is_fine() {
+    // 3 is below the limit 9, so the range may reopen there.
+    let r = r#"[{"introduced":"0"},{"fixed":"2"},{"limit":"9"},{"limit":"1"},{"introduced":"3"}]"#;
+    assert!(is_in(r, "1.5"));
+    assert!(is_out(r, "2.5"));
+    assert!(is_in(r, "3"));
+    assert!(is_in(r, "8"));
+    assert!(is_out(r, "9"));
+    // A star is infinity: nothing is at or above every limit.
+    let star = r#"[{"introduced":"0"},{"limit":"2"},{"limit":"*"},{"introduced":"3"}]"#;
+    assert!(is_in(star, "5"));
 }
 
 #[test]
@@ -1030,9 +1043,11 @@ fn an_interval_candidate_is_out_only_when_nothing_inside_can_open_a_range() {
     assert_eq!(run("8~"), VersionEvidence::OutOfRange);
     assert_eq!(run("8~20"), VersionEvidence::OutOfRange);
     // An opening inside the interval, or an open low end, cannot be decided.
-    for v in ["1~6", "1~", "5~6", "6~", "4~5"] {
+    for v in ["1~6", "1~", "6~", "4~5"] {
         assert_eq!(reason(&run(v)), UnknownReason::CandidateIsAnInterval, "{v}");
     }
+    // Open at the low end with no closing inside: every version in it is in.
+    assert!(matches!(run("5~6"), VersionEvidence::InRange(_)));
     // An exact version is unaffected.
     assert!(matches!(run("6"), VersionEvidence::InRange(_)));
     // A listed version inside the interval keeps it open; outside does not.
@@ -1052,6 +1067,56 @@ fn an_interval_candidate_is_out_only_when_nothing_inside_can_open_a_range() {
         evaluate_entry(&scheme(), &listed_out, 0, Some("1~3")),
         VersionEvidence::OutOfRange
     );
+}
+
+#[test]
+fn an_interval_candidate_is_in_range_when_no_closing_lies_inside() {
+    let between = |events: &str, installed: &str| {
+        let entry = entry_from(
+            json!([eco(serde_json::from_str(events).unwrap())]),
+            json!([]),
+        );
+        evaluate_entry(&scheme(), &entry, 0, Some(installed))
+    };
+    // Core style: a release candidate that may read as a final release.
+    let rc = "28.3-rc0~28.3.1";
+    assert!(matches!(
+        between(r#"[{"introduced":"28.0"},{"fixed":"29.0"}]"#, rc),
+        VersionEvidence::InRange(_)
+    ));
+    // The fix 28.3 lies inside the interval, so it cannot be decided.
+    let e = between(r#"[{"introduced":"28.0"},{"fixed":"28.3"}]"#, rc);
+    assert_eq!(reason(&e), UnknownReason::CandidateIsAnInterval);
+    // No upper end: in only when nothing closes above.
+    assert!(matches!(
+        between(r#"[{"introduced":"0"}]"#, "1.1.2~"),
+        VersionEvidence::InRange(_)
+    ));
+    let e = between(r#"[{"introduced":"0"},{"fixed":"2"}]"#, "1.1.2~");
+    assert_eq!(reason(&e), UnknownReason::CandidateIsAnInterval);
+    // A last_affected at the low end still closes everything above it.
+    let e = between(r#"[{"introduced":"0"},{"last_affected":"1"}]"#, "1~3");
+    assert_eq!(reason(&e), UnknownReason::CandidateIsAnInterval);
+    // The upper end must be within a limit.
+    let limited = r#"[{"introduced":"0"},{"limit":"4"}]"#;
+    assert!(matches!(
+        between(limited, "1~3"),
+        VersionEvidence::InRange(_)
+    ));
+    assert!(matches!(
+        between(limited, "1~4"),
+        VersionEvidence::InRange(_)
+    ));
+    assert_eq!(
+        reason(&between(limited, "1~5")),
+        UnknownReason::CandidateIsAnInterval
+    );
+    assert_eq!(
+        reason(&between(limited, "1~")),
+        UnknownReason::CandidateIsAnInterval
+    );
+    let star = r#"[{"introduced":"0"},{"limit":"*"}]"#;
+    assert!(matches!(between(star, "1~"), VersionEvidence::InRange(_)));
 }
 
 #[test]
@@ -1216,6 +1281,15 @@ fn no_stronger_or_opposite(before: &VersionEvidence, after: &VersionEvidence) ->
     kind(before) == kind(after) || matches!(after, VersionEvidence::Unknown { .. })
 }
 
+/// Exact versions, and intervals (`low~high`, `low~`) the test scheme reads.
+fn installed_or_interval() -> impl Strategy<Value = String> {
+    prop_oneof![
+        6 => installed_strategy(),
+        2 => (0u8..8, 1u8..4).prop_map(|(a, k)| format!("{a}~{}", a + k)),
+        1 => (0u8..8).prop_map(|a| format!("{a}~")),
+    ]
+}
+
 fn installed_strategy() -> impl Strategy<Value = String> {
     prop_oneof![
         (0u8..9).prop_map(|n| n.to_string()),
@@ -1235,7 +1309,7 @@ fn unknown_never_moves_toward_out_of_range() {
     let mut runner = proptest::test_runner::TestRunner::new(config());
     let strategy = (
         spec(),
-        installed_strategy(),
+        installed_or_interval(),
         (any::<usize>(), any::<usize>()),
     );
     runner
@@ -1563,10 +1637,12 @@ fn the_evaluator_agrees_with_a_direct_transcription_of_osv_on_valid_ranges() {
         prop::collection::vec(valid_range(), 1..4),
         prop::collection::vec(1u8..9, 0..4),
         installed_strategy(),
+        (0u8..8, 1u8..4),
     );
     let (ins, outs) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
+    let (b_in, b_out) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
     proptest::test_runner::TestRunner::new(config())
-        .run(&strategy, |(ranges, list, installed)| {
+        .run(&strategy, |(ranges, list, installed, (a, k))| {
             let parts: Vec<_> = ranges.iter().map(valid_parts).collect();
             let json_ranges: Vec<Value> = parts.iter().map(|p| p.3.clone()).collect();
             let versions: Vec<String> = list.iter().map(|n| n.to_string()).collect();
@@ -1583,6 +1659,32 @@ fn the_evaluator_agrees_with_a_direct_transcription_of_osv_on_valid_ranges() {
             } else {
                 outs.set(outs.get() + 1);
             }
+
+            // An interval answer holds for every version inside it, release
+            // candidates included.
+            let interval = format!("{a}~{}", a + k);
+            let got = evaluate_entry(&scheme(), &entry, 0, Some(&interval));
+            let members: Vec<String> = (a..a + k)
+                .map(|n| n.to_string())
+                .chain((a + 1..=a + k).map(|n| format!("{n}-rc1")))
+                .collect();
+            let member_in = |m: &String| {
+                parts
+                    .iter()
+                    .any(|(steps, limits, star, _)| oracle_range(steps, limits, *star, m))
+                    || versions.contains(m)
+            };
+            match kind(&got) {
+                "in" => {
+                    prop_assert!(members.iter().all(member_in), "{ranges:?} {interval}");
+                    b_in.set(b_in.get() + 1);
+                }
+                "out" => {
+                    prop_assert!(!members.iter().any(member_in), "{ranges:?} {interval}");
+                    b_out.set(b_out.get() + 1);
+                }
+                _ => {}
+            }
             Ok(())
         })
         .unwrap();
@@ -1591,6 +1693,12 @@ fn the_evaluator_agrees_with_a_direct_transcription_of_osv_on_valid_ranges() {
         "{} {}",
         ins.get(),
         outs.get()
+    );
+    assert!(
+        b_in.get() >= 10 && b_out.get() >= 10,
+        "{} {}",
+        b_in.get(),
+        b_out.get()
     );
 }
 
