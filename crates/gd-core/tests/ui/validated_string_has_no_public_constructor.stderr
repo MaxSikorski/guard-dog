@@ -1,0 +1,20 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/ui/validated_string_has_no_public_constructor.rs:5:20
+  |
+5 |     let _version = PlainVersion("1.0; rm -rf /".to_owned());
+  |                    ^^^^^^^^^^^^
+  |
+  = note: a struct named `PlainVersion` exists in another namespace
+note: constructor is not visible here due to private fields
+ --> src/fact.rs
+  |
+  |           pub struct $name(String);
+  |                            ^^^^^^ private field
+...
+  | / checked_string!(
+  | |     /// A version as a service reported it: letters, digits and `VERSION_PUNCTUATION`,
+  | |     /// 1 to 64 bytes, with an optional PEP 440 epoch (`1!2.0`).
+  | |     PlainVersion, "version", is_plain_version
+  | | );
+  | |_- in this macro invocation
+  = note: this error originates in the macro `checked_string` (in Nightly builds, run with -Z macro-backtrace for more info)
