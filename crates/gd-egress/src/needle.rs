@@ -406,26 +406,32 @@ impl Scanner<'_> {
         hits
     }
 
+    /// Scans `hay`, then (while the shared two-layer bound allows) every way of
+    /// unwrapping it one step: percent-decoded, JSON-unescaped, reduced to letters
+    /// and digits only, and each base64, base32 or hex token decoded. A secret
+    /// wrapped twice in any mix of these is still found; a third wrap is out of scope.
     fn layer(&self, hay: &[u8], depth: u8, hits: &mut BTreeSet<HitKind>, tokens: &mut usize) {
         if !self.charge(hay.len()) {
             return;
         }
-        let mut views = vec![hay.to_vec()];
-        for candidate in [percent_decode(hay), json_unescape(hay)] {
-            if !views.contains(&candidate) {
-                views.push(candidate);
-            }
-        }
-        for view in &views {
-            self.needles.scan_view(view, hits);
-        }
+        self.needles.scan_view(hay, hits);
         if depth >= MAX_LAYER {
             return;
         }
-        for view in &views {
-            for decoded in self.decode_tokens(view, tokens) {
-                self.layer(&decoded, depth + 1, hits, tokens);
+        let alnum: Vec<u8> = hay
+            .iter()
+            .filter(|b| b.is_ascii_alphanumeric())
+            .copied()
+            .collect();
+        let mut children: Vec<Vec<u8>> = Vec::new();
+        for candidate in [percent_decode(hay), json_unescape(hay), alnum] {
+            if candidate != hay && !children.contains(&candidate) {
+                children.push(candidate);
             }
+        }
+        children.extend(self.decode_tokens(hay, tokens));
+        for child in children {
+            self.layer(&child, depth + 1, hits, tokens);
         }
     }
 

@@ -87,11 +87,17 @@ pub fn ipv6(src: [u8; 16], dst: [u8; 16], next: u8, l4: &[u8]) -> Vec<u8> {
 }
 
 pub fn tcp(sport: u16, dport: u16, seq: u32, flags: u8, payload: &[u8]) -> Vec<u8> {
+    tcp_ack(sport, dport, seq, 0, flags, payload)
+}
+
+/// A TCP segment with an acknowledgement number (what the sender has received so far).
+pub fn tcp_ack(sport: u16, dport: u16, seq: u32, ack: u32, flags: u8, payload: &[u8]) -> Vec<u8> {
     let mut t = Vec::new();
     t.extend(sport.to_be_bytes());
     t.extend(dport.to_be_bytes());
     t.extend(seq.to_be_bytes());
-    t.extend([0, 0, 0, 0, 0x50, flags, 0xff, 0xff, 0, 0, 0, 0]);
+    t.extend(ack.to_be_bytes());
+    t.extend([0x50, flags, 0xff, 0xff, 0, 0, 0, 0]);
     t.extend(payload);
     t
 }
@@ -207,12 +213,16 @@ pub struct Control {
     pub http: bool,
     pub truncated: bool,
     pub payload: bool,
+    /// The first bytes of the control request are captured, the rest is lost, though the
+    /// server's acknowledgement covers all of it.
+    pub lose_tail: bool,
 }
 
 pub const FULL_CONTROL: Control = Control {
     http: true,
     truncated: false,
     payload: true,
+    lose_tail: false,
 };
 
 #[derive(Clone)]
@@ -235,7 +245,11 @@ pub struct Scenario {
     pub cut_post_pcap: bool,
     /// Add a type-4 copy of every loopback record.
     pub lo_duplicate_outgoing: bool,
+    /// Packets tcpdump says the kernel dropped.
+    pub kernel_drops: u64,
     pub next_conn: u64,
+    /// Global request sequence, written as `seq` on http and tcp events.
+    seq: u64,
     next_dns_id: u16,
     next_dns_port: u16,
     /// Bytes already sent per (connection, direction), so later requests follow earlier ones.
@@ -259,7 +273,9 @@ impl Scenario {
             end: true,
             cut_post_pcap: false,
             lo_duplicate_outgoing: false,
+            kernel_drops: 0,
             next_conn: 1,
+            seq: 0,
             next_dns_id: 100,
             next_dns_port: 50_000,
             sent: BTreeMap::new(),
@@ -303,7 +319,13 @@ impl Scenario {
             );
         }
         if opts.payload {
-            self.send(c, OPAQUE);
+            if opts.lose_tail {
+                self.wire_data(c, &[(0, &OPAQUE[..8])]);
+                self.sent
+                    .insert((c.id, false), u32::try_from(OPAQUE.len()).unwrap());
+            } else {
+                self.send(c, OPAQUE);
+            }
             self.reply(c, OPAQUE_REPLY);
         }
         let marker = format!("gd-egress-control {} {phase}\n", self.set.control_token);
@@ -413,7 +435,17 @@ impl Scenario {
                 .to_string(),
         ));
         self.lo(6, tcp(port, 8080, client_isn, SYN, b""));
-        self.lo(6, tcp(8080, port, 900_000_000 + client_isn, SYN_ACK, b""));
+        self.lo(
+            6,
+            tcp_ack(
+                8080,
+                port,
+                900_000_000 + client_isn,
+                client_isn + 1,
+                SYN_ACK,
+                b"",
+            ),
+        );
         Conn {
             id,
             port,
@@ -432,6 +464,11 @@ impl Scenario {
             c.id,
             json!({"event":"tls","conn":c.id,"sni_b64":sni,"ok":ok}).to_string(),
         ));
+    }
+
+    fn next_seq(&mut self) -> u64 {
+        self.seq += 1;
+        self.seq
     }
 
     /// The `http` event only: nothing on the wire.
@@ -482,9 +519,10 @@ impl Scenario {
             .iter()
             .map(|(n, v)| json!([b64(n.as_bytes()), b64(v.as_bytes())]))
             .collect();
+        let seq = self.next_seq();
         self.mitm_lines.push((
             c.id,
-            json!({"event":"http","conn":c.id,"scheme":scheme,"method_b64":b64(method),"host_b64":b64(host),
+            json!({"event":"http","seq":seq,"conn":c.id,"scheme":scheme,"method_b64":b64(method),"host_b64":b64(host),
                    "port":port,"path_b64":b64(path),"headers":pairs,"body_b64":b64(body),"body_truncated":truncated})
             .to_string(),
         ));
@@ -526,9 +564,10 @@ impl Scenario {
     }
 
     pub fn tcp_event(&mut self, c: Conn, data: &[u8]) {
+        let seq = self.next_seq();
         self.mitm_lines.push((
             c.id,
-            json!({"event":"tcp","conn":c.id,"data_b64":b64(data)}).to_string(),
+            json!({"event":"tcp","seq":seq,"conn":c.id,"data_b64":b64(data)}).to_string(),
         ));
     }
 
@@ -545,10 +584,11 @@ impl Scenario {
         let offset = self.sent.get(&(c.id, true)).copied().unwrap_or(0);
         self.lo(
             6,
-            tcp(
+            tcp_ack(
                 8080,
                 c.port,
                 900_000_000 + c.client_isn + 1 + offset,
+                c.client_isn + 1 + self.sent.get(&(c.id, false)).copied().unwrap_or(0),
                 PSH_ACK,
                 bytes,
             ),
@@ -560,9 +600,17 @@ impl Scenario {
     /// Client data on the wire as (offset, bytes) segments, in the order given.
     pub fn wire_data(&mut self, c: Conn, segments: &[(u32, &[u8])]) {
         for (offset, bytes) in segments {
+            let heard = self.sent.get(&(c.id, true)).copied().unwrap_or(0);
             self.lo(
                 6,
-                tcp(c.port, 8080, c.client_isn + 1 + offset, PSH_ACK, bytes),
+                tcp_ack(
+                    c.port,
+                    8080,
+                    c.client_isn + 1 + offset,
+                    900_000_000 + c.client_isn + 1 + heard,
+                    PSH_ACK,
+                    bytes,
+                ),
             );
         }
     }
@@ -697,6 +745,16 @@ impl Scenario {
         )
         .unwrap();
         fs::write(dir.join("pcap/links.txt"), &s.links).unwrap();
+        let written = s.pcap_frames().len();
+        fs::write(
+            dir.join("pcap/tcpdump.log"),
+            format!(
+                "{written} packets captured\n{} packets received by filter\n{} packets dropped by kernel\n",
+                written as u64 + s.kernel_drops,
+                s.kernel_drops
+            ),
+        )
+        .unwrap();
         fs::write(dir.join("pcap/rules.txt"), &s.rules).unwrap();
         dir
     }

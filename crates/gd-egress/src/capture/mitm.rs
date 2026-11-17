@@ -10,6 +10,8 @@ use std::net::IpAddr;
 /// One HTTP request the recorder answered with a 503.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpEvent {
+    /// Global sequence number across all connections: the optional `seq` key, else the line number.
+    pub seq: u64,
     /// The request method, raw bytes.
     pub method: Vec<u8>,
     /// `http` or `https`.
@@ -43,6 +45,8 @@ pub struct Conn {
     pub http: Vec<HttpEvent>,
     /// Raw client-to-server data.
     pub tcp: Vec<Vec<u8>>,
+    /// The global sequence number of each raw TCP event, parallel to `tcp`.
+    pub tcp_seqs: Vec<u64>,
 }
 
 /// The parsed recorder log.
@@ -166,6 +170,7 @@ fn parse_event(obj: &Map<String, Value>, name: &str) -> Result<Event, Fail> {
                 headers.push((decode(pair.first())?, decode(pair.get(1))?));
             }
             let event = HttpEvent {
+                seq: 0,
                 method: b64(obj, "method_b64")?,
                 scheme: scheme.to_string(),
                 host: String::from_utf8_lossy(&b64(obj, "host_b64")?).to_ascii_lowercase(),
@@ -227,9 +232,9 @@ pub fn parse(bytes: &[u8]) -> MitmLog {
     if !lines.next().is_some_and(header_ok) {
         log.errors.insert("bad-header");
     }
-    let mut events: Vec<(u64, Event)> = Vec::new();
+    let mut events: Vec<(u64, u64, Event)> = Vec::new();
     let mut end_seen = false;
-    for line in lines {
+    for (line_no, line) in lines.enumerate() {
         if end_seen {
             log.errors.insert("no-end");
         }
@@ -240,17 +245,21 @@ pub fn parse(bytes: &[u8]) -> MitmLog {
                 _ => None,
             })
             .ok_or("bad-line")
-            .and_then(|obj| {
+            .and_then(|mut obj| {
+                let seq = match obj.remove("seq") {
+                    None => line_no as u64 + 1,
+                    Some(v) => v.as_u64().ok_or("bad-line")?,
+                };
                 let name = obj.get("event").and_then(Value::as_str).ok_or("bad-line")?;
                 let conn = obj
                     .get("conn")
                     .and_then(Value::as_u64)
                     .filter(|c| (*c >= 1) != (name == "end"))
                     .ok_or("bad-line")?;
-                Ok((conn, parse_event(&obj, name)?))
+                Ok((conn, seq, parse_event(&obj, name)?))
             });
         match result {
-            Ok((_, Event::End)) => end_seen = true,
+            Ok((_, _, Event::End)) => end_seen = true,
             Ok(pair) => events.push(pair),
             Err(code) => {
                 log.errors.insert(code);
@@ -260,7 +269,7 @@ pub fn parse(bytes: &[u8]) -> MitmLog {
     if !end_seen {
         log.errors.insert("no-end");
     }
-    for (id, event) in &events {
+    for (id, _, event) in &events {
         if let Event::Connect {
             client_port,
             dst_ip,
@@ -279,7 +288,7 @@ pub fn parse(bytes: &[u8]) -> MitmLog {
             }
         }
     }
-    for (id, event) in events {
+    for (id, seq, event) in events {
         let Some(conn) = log.conns.get_mut(&id) else {
             log.errors.insert("bad-line");
             continue;
@@ -298,9 +307,12 @@ pub fn parse(bytes: &[u8]) -> MitmLog {
                 if encoded(&event) {
                     log.errors.insert("undecoded-content-encoding");
                 }
-                conn.http.push(event);
+                conn.http.push(HttpEvent { seq, ..event });
             }
-            Event::Tcp(data) => conn.tcp.push(data),
+            Event::Tcp(data) => {
+                conn.tcp.push(data);
+                conn.tcp_seqs.push(seq);
+            }
         }
     }
     log

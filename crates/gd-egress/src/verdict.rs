@@ -234,7 +234,7 @@ fn control_seen(phase: &Phase, dns: &dns_log::DnsLog, mitm: &MitmLog, wire: &Wir
             let both = |streams: &[pcap::Stream], key: fn(&pcap::Stream) -> u16| {
                 streams
                     .iter()
-                    .any(|s| key(s) == conn.client_port && !s.data.is_empty())
+                    .any(|s| key(s) == conn.client_port && !s.data.is_empty() && !s.short)
             };
             both(&wire.recorder_streams, |s| s.sport) && both(&wire.server_streams, |s| s.dport)
         });
@@ -245,6 +245,37 @@ fn control_seen(phase: &Phase, dns: &dns_log::DnsLog, mitm: &MitmLog, wire: &Wir
         .find(|p| phase.is_packet(p))
         .map(|p| p.index);
     seen
+}
+
+/// Checks tcpdump's closing summary: all three counts present, nothing dropped, and the number
+/// of packets it says it wrote equal to the records in the file (when the file was readable).
+fn check_stats(text: &str, records: Option<usize>) -> Option<&'static str> {
+    let count = |what: &str| {
+        text.lines().find_map(|line| {
+            let line = line.trim();
+            let (number, rest) = line.split_once(' ')?;
+            (rest.trim() == what)
+                .then(|| number.parse::<u64>().ok())
+                .flatten()
+        })
+    };
+    let (Some(captured), Some(received), Some(dropped)) = (
+        count("packets captured"),
+        count("packets received by filter"),
+        count("packets dropped by kernel"),
+    ) else {
+        return Some("bad-stats");
+    };
+    if dropped != 0
+        || count("packets dropped by interface").is_some_and(|n| n != 0)
+        || received != captured
+    {
+        return Some("capture-drops");
+    }
+    match records {
+        Some(n) if u64::try_from(n).ok() != Some(captured) => Some("stats-mismatch"),
+        _ => None,
+    }
 }
 
 /// Judges a capture. `expected_rules` is the reviewed rules dump.
@@ -310,6 +341,18 @@ pub fn judge(
     let wire: Wire = pcap::analyze(&parsed.packets, &links);
     for code in &wire.errors {
         j.note("pcap", code);
+    }
+    match &raw.stats {
+        Ok(bytes) => {
+            let pcap_clean = raw.pcap.is_ok() && parsed.errors.is_empty();
+            if let Some(code) = check_stats(
+                &String::from_utf8_lossy(bytes),
+                pcap_clean.then_some(parsed.records),
+            ) {
+                j.note("stats", code);
+            }
+        }
+        Err(code) => j.note("stats", code),
     }
     match &raw.rules {
         Ok(bytes) if !rules::same(&String::from_utf8_lossy(bytes), expected_rules) => {
@@ -464,18 +507,19 @@ pub fn judge(
             } else if entry.is_none() {
                 unlisted.insert(short, printed_short);
             } else {
-                let tail = |sni: &str| {
+                let tail = |sni: &str, ip: &str| {
                     format!(
                         "(sni {sni}, ip {}, authority-port {}, dns {})",
-                        conn.dst_ip,
+                        ip,
                         event.port,
                         if dns_seen { "yes" } else { "no" }
                     )
                 };
-                let plain = tail(sni.as_deref().unwrap_or("none"));
+                let plain = tail(sni.as_deref().unwrap_or("none"), &conn.dst_ip);
                 let shown = tail(
                     &sni.as_deref()
                         .map_or_else(|| "none".to_string(), |s| j.safe(s)),
+                    &j.safe(&conn.dst_ip),
                 );
                 unlisted.insert(
                     format!("{short} {plain}"),
@@ -590,8 +634,11 @@ fn scan_everything(j: &mut Judge, dns: &dns_log::DnsLog, mitm: &MitmLog, wire: &
         j.scan(record.name.as_bytes(), "dns-name", "dns");
         j.scan(record.name.replace('.', "").as_bytes(), "dns-name", "dns");
     }
-    // Per destination, in connection order then event order: everything, and bodies only.
-    let mut ordered: BTreeMap<String, (Vec<u8>, Vec<u8>)> = BTreeMap::new();
+    // Per destination, byte for byte in the order the requests were made (the recorder's global
+    // sequence, across connections): every field, and bodies with raw TCP data only.
+    type Piece = (u64, usize, bool, Vec<u8>);
+    let mut ordered: BTreeMap<String, Vec<Piece>> = BTreeMap::new();
+    let mut counter = 0usize;
     for conn in mitm.conns.values() {
         let (host, port) = conn_dest_parts(conn);
         let conn_dest = j.safe_host_port(&host_port(&host, port));
@@ -608,43 +655,48 @@ fn scan_everything(j: &mut Judge, dns: &dns_log::DnsLog, mitm: &MitmLog, wire: &
                 j.scan(value, "http-header", &dest);
             }
             j.scan(&event.body, "http-body", &dest);
-            let (everything, bodies) = ordered.entry(dest).or_default();
-            for field in [&event.method, &event.path] {
-                everything.extend_from_slice(field);
-                everything.push(b'\n');
-            }
+            let pieces = ordered.entry(dest).or_default();
+            let mut add = |body: bool, bytes: &[u8]| {
+                counter += 1;
+                pieces.push((event.seq, counter, body, bytes.to_vec()));
+            };
+            add(false, &event.method);
+            add(false, &event.path);
             for (_, value) in &event.headers {
-                everything.extend_from_slice(value);
-                everything.push(b'\n');
+                add(false, value);
             }
-            everything.extend_from_slice(&event.body);
-            everything.push(b'\n');
-            bodies.extend_from_slice(&event.body);
-            bodies.push(b'\n');
+            add(true, &event.body);
         }
         let mut joined = Vec::new();
-        for data in &conn.tcp {
+        for (data, seq) in conn.tcp.iter().zip(&conn.tcp_seqs) {
             j.scan(data, "tcp-data", &conn_dest);
             joined.extend_from_slice(data);
-            let (everything, bodies) = ordered.entry(conn_dest.clone()).or_default();
-            everything.extend_from_slice(data);
-            everything.push(b'\n');
-            bodies.extend_from_slice(data);
-            bodies.push(b'\n');
+            counter += 1;
+            ordered
+                .entry(conn_dest.clone())
+                .or_default()
+                .push((*seq, counter, true, data.clone()));
         }
         if conn.tcp.len() > 1 {
             j.scan(&joined, "tcp-data", &conn_dest);
         }
     }
-    for (dest, (everything, bodies)) in &ordered {
+    for (dest, pieces) in &mut ordered {
+        pieces.sort_by_key(|p| (p.0, p.1));
+        let everything: Vec<u8> = pieces.iter().flat_map(|p| p.3.iter().copied()).collect();
+        let bodies: Vec<u8> = pieces
+            .iter()
+            .filter(|p| p.2)
+            .flat_map(|p| p.3.iter().copied())
+            .collect();
         if everything.len() > STREAM_BUDGET || bodies.len() > STREAM_BUDGET {
             j.findings
                 .insert("F5 capture-unreadable scan: scan-budget".into());
             continue;
         }
         let seen = j.field_hits.get(dest).cloned().unwrap_or_default();
-        let mut hits = j.scanner.scan(everything);
-        hits.extend(j.scanner.scan(bodies));
+        let mut hits = j.scanner.scan(&everything);
+        hits.extend(j.scanner.scan(&bodies));
         for hit in hits.difference(&seen) {
             j.record(*hit, "destination-stream", dest);
         }

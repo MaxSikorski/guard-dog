@@ -24,6 +24,9 @@ pub struct RawCapture {
     pub links: Result<Vec<u8>, &'static str>,
     /// `pcap/rules.txt`
     pub rules: Result<Vec<u8>, &'static str>,
+    /// `pcap/tcpdump.log`: what tcpdump printed when it stopped (the summary of packets
+    /// captured, received by the filter and dropped by the kernel).
+    pub stats: Result<Vec<u8>, &'static str>,
 }
 
 /// Capture files larger than this are refused (parsers of outside data set limits).
@@ -51,6 +54,7 @@ impl RawCapture {
             pcap: read_limited(&dir.join("pcap/all.pcap"), MAX_BIG),
             links: read_limited(&dir.join("pcap/links.txt"), MAX_SMALL),
             rules: read_limited(&dir.join("pcap/rules.txt"), MAX_SMALL),
+            stats: read_limited(&dir.join("pcap/tcpdump.log"), MAX_SMALL),
         }
     }
 }

@@ -22,6 +22,7 @@ const HOST: u8 = 0;
 pub enum L4 {
     /// TCP, with its flags (`0x02` SYN, `0x10` ACK) and sequence number.
     Tcp {
+        ack: u32,
         sport: u16,
         dport: u16,
         seq: u32,
@@ -58,6 +59,8 @@ pub struct Packet {
 /// The parsed capture file.
 #[derive(Debug, Clone, Default)]
 pub struct PcapParse {
+    /// How many records the file holds (all packet types), to compare with the capture statistics.
+    pub records: usize,
     /// Outgoing packets, in file order.
     pub packets: Vec<Packet>,
     /// Problem codes: `bad-header`, `link-type`, `truncated`, `bad-packet`.
@@ -159,6 +162,7 @@ fn parse_frame(frame: &[u8], index: usize) -> Result<Option<Packet>, &'static st
                 .ok_or(bad)?
                 .to_vec();
             L4::Tcp {
+                ack: be32(l4, 8).ok_or(bad)?,
                 sport: be16(l4, 0).ok_or(bad)?,
                 dport: be16(l4, 2).ok_or(bad)?,
                 seq: be32(l4, 4).ok_or(bad)?,
@@ -255,6 +259,7 @@ pub fn parse(bytes: &[u8]) -> PcapParse {
             break;
         };
         index += 1;
+        out.records = index;
         match parse_frame(data, index - 1) {
             Ok(Some(packet)) => out.packets.push(packet),
             Ok(None) => {}
@@ -354,21 +359,25 @@ pub fn parse_dns(payload: &[u8]) -> Result<DnsMessage, &'static str> {
         questions.push((labels.join("."), qtype));
     }
     let response = flags & 0x8000 != 0;
-    let mut unexpected_section = false;
-    if !response {
-        unexpected_section = an != 0 || ns != 0 || ar > 1;
-        if ar == 1 && !unexpected_section {
-            let first = *payload.get(at).ok_or(framing)?;
-            let type_at = match first {
-                0 => Some(at + 1),
-                b if b & 0xC0 == 0xC0 => Some(at + 2),
-                _ => None,
-            };
-            unexpected_section = match type_at {
-                Some(t) => be16(payload, t).ok_or(framing)? != 41,
-                None => true,
-            };
+    let mut unexpected_section = !response && (an != 0 || ns != 0 || ar > 1);
+    // Every record is read in full (name, type, class, ttl, length, data), and the
+    // message must end exactly where the last record ends.
+    let mut cursor = at;
+    let records = usize::from(an) + usize::from(ns) + usize::from(ar);
+    for index in 0..records {
+        let (rtype, data_start, next) = read_record(payload, cursor).ok_or(framing)?;
+        let additional = index >= usize::from(an) + usize::from(ns);
+        if !response && additional && usize::from(ar) == 1 {
+            if rtype != 41 {
+                unexpected_section = true;
+            } else if !options_fill(payload, data_start, next) {
+                return Err(framing);
+            }
         }
+        cursor = next;
+    }
+    if cursor != payload.len() {
+        return Err(framing);
     }
     Ok(DnsMessage {
         id,
@@ -376,6 +385,47 @@ pub fn parse_dns(payload: &[u8]) -> Result<DnsMessage, &'static str> {
         questions,
         unexpected_section,
     })
+}
+
+/// The end of a (possibly compressed) name that starts at `at`.
+fn skip_name(payload: &[u8], mut at: usize) -> Option<usize> {
+    loop {
+        let b = *payload.get(at)?;
+        if b == 0 {
+            return Some(at + 1);
+        }
+        if b & 0xC0 == 0xC0 {
+            payload.get(at + 1)?;
+            return Some(at + 2);
+        }
+        if b & 0xC0 != 0 {
+            return None;
+        }
+        at += 1 + usize::from(b);
+    }
+}
+
+/// One resource record: (type, start of its data, end of the record).
+fn read_record(payload: &[u8], at: usize) -> Option<(u16, usize, usize)> {
+    let name_end = skip_name(payload, at)?;
+    let rtype = be16(payload, name_end)?;
+    let length = usize::from(be16(payload, name_end + 8)?);
+    let data_start = name_end + 10;
+    let next = data_start + length;
+    payload.get(..next)?;
+    Some((rtype, data_start, next))
+}
+
+/// Whether the options in an OPT record's data (code, length, data, repeated) fill it exactly.
+fn options_fill(payload: &[u8], start: usize, end: usize) -> bool {
+    let mut at = start;
+    while at < end {
+        let Some(length) = be16(payload, at + 2) else {
+            return false;
+        };
+        at += 4 + usize::from(length);
+    }
+    at == end
 }
 
 /// A reassembled one-way TCP stream.
@@ -389,6 +439,8 @@ pub struct Stream {
     pub data: Vec<u8>,
     /// Retransmissions whose bytes differ from what was first seen. Scanned too.
     pub conflicts: Vec<Vec<u8>>,
+    /// The other side acknowledged bytes that this capture does not hold (the tail was lost).
+    pub short: bool,
 }
 
 #[derive(Default)]
@@ -397,6 +449,10 @@ struct Building {
     dport: u16,
     isn: Option<u32>,
     segments: Vec<(u32, Vec<u8>)>,
+    /// Acknowledgement numbers the other side sent for this direction.
+    acks: Vec<u32>,
+    /// A FIN was seen: it uses one sequence number after the data.
+    fin: bool,
 }
 
 impl Building {
@@ -437,12 +493,25 @@ impl Building {
                 end = rel + len;
             }
         }
+        // Everything the receiver acknowledged must be in the capture, up to the FIN.
+        let claimed = self.isn.and_then(|isn| {
+            self.acks
+                .iter()
+                .map(|a| a.wrapping_sub(isn.wrapping_add(1)))
+                .filter(|rel| *rel < 0x8000_0000)
+                .max()
+        });
+        let short = claimed.is_some_and(|c| u64::from(c) > end + u64::from(self.fin));
+        if short {
+            errors.insert("tcp-gap");
+        }
         (
             Stream {
                 sport: self.sport,
                 dport: self.dport,
                 data,
                 conflicts,
+                short,
             },
             errors,
         )
@@ -561,6 +630,7 @@ pub fn analyze(packets: &[Packet], links: &BTreeMap<u32, String>) -> Wire {
                 sport,
                 dport,
                 seq,
+                ack,
                 flags,
                 payload,
             } if is_sink_port(*sport) || is_sink_port(*dport) => {
@@ -585,11 +655,34 @@ pub fn analyze(packets: &[Packet], links: &BTreeMap<u32, String>) -> Wire {
                             dport: *dport,
                             isn: Some(*seq),
                             segments: Vec::new(),
+                            acks: Vec::new(),
+                            fin: false,
                         },
                     );
                     if flags & 0x10 != 0 && *sport == RECORDER_PORT {
                         syn_acks.insert((dst, *dport, *seq));
                     }
+                }
+                if flags & 0x01 != 0 {
+                    building
+                        .entry(key)
+                        .or_insert_with(|| Building {
+                            sport: *sport,
+                            dport: *dport,
+                            ..Building::default()
+                        })
+                        .fin = true;
+                }
+                if flags & 0x10 != 0 {
+                    building
+                        .entry((dst, *dport, src, *sport))
+                        .or_insert_with(|| Building {
+                            sport: *dport,
+                            dport: *sport,
+                            ..Building::default()
+                        })
+                        .acks
+                        .push(*ack);
                 }
                 if !payload.is_empty() {
                     let entry = building.entry(key).or_insert_with(|| Building {

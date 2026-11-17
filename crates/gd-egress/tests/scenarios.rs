@@ -449,6 +449,56 @@ fn all(seed: u64) -> Vec<(&'static str, Scenario)> {
     post(&mut s53, c, "POST", &[], b"x");
     let mut s54 = Scenario::new("s54", seed);
     s54.end = false;
+    let mut s55 = Scenario::bare("s55", seed);
+    s55.control(
+        "pre",
+        Control {
+            lose_tail: true,
+            ..FULL_CONTROL
+        },
+    );
+    let mut s56 = Scenario::new("s56", seed);
+    s56.kernel_drops = 1;
+    let s57 = with_api_body("s57", seed, |s| {
+        s.canary(Class::Nsec)
+            .bytes()
+            .map(|b| format!("%25{b:02x}"))
+            .collect::<String>()
+            .into_bytes()
+    });
+    let s58 = with_api_body("s58", seed, |s| {
+        let hex = HEXLOWER.encode(&s.canary_bytes(Class::Nsec));
+        hex.as_bytes()
+            .chunks(2)
+            .map(|p| String::from_utf8_lossy(p).into_owned())
+            .collect::<Vec<_>>()
+            .join(":")
+            .into_bytes()
+    });
+    let mut s59 = Scenario::new("s59", seed);
+    let ip = s59.canary(Class::Ipv4);
+    let pieces: Vec<String> = ip.split_inclusive('.').map(str::to_string).collect();
+    let first = api_conn(&mut s59, true, "198.18.0.1", 443, API);
+    let second = api_conn(&mut s59, false, "198.18.0.1", 443, API);
+    for (i, piece) in pieces.iter().enumerate() {
+        post(
+            &mut s59,
+            if i % 2 == 0 { first } else { second },
+            "POST",
+            &[],
+            piece.as_bytes(),
+        );
+    }
+    let mut s60 = Scenario::new("s60", seed);
+    s60.raw_lo_udp(
+        51_002,
+        5353,
+        &HEXLOWER.decode(b"000101000000000000000001000029").unwrap(),
+    );
+    let mut s61 = Scenario::new("s61", seed);
+    let planted = s61.canary(Class::Ipv4);
+    let c = api_conn(&mut s61, true, &planted, 443, API);
+    post(&mut s61, c, "POST", &[], b"x");
 
     vec![
         ("S01-clean-baseline", Scenario::new("s01", seed)),
@@ -505,6 +555,13 @@ fn all(seed: u64) -> Vec<(&'static str, Scenario)> {
         ("S52-lo-duplicate-outgoing", s52),
         ("S53-workload-before-pre", s53),
         ("S54-mitm-no-end", s54),
+        ("S55-control-ciphertext-lost", s55),
+        ("S56-kernel-drops", s56),
+        ("S57-nsec-double-percent", s57),
+        ("S58-hex-colon-pairs", s58),
+        ("S59-ipv4-split-bodies", s59),
+        ("S60-dns-truncated-opt", s60),
+        ("S61-dst-ip-redacted", s61),
     ]
 }
 
@@ -519,7 +576,7 @@ fn find(seed: u64, prefix: &str) -> Scenario {
 #[test]
 fn every_synthetic_scenario_gives_its_expected_report() {
     let scenarios = all(1);
-    assert_eq!(scenarios.len(), 54);
+    assert_eq!(scenarios.len(), 61);
     let mut failures = Vec::new();
     for (stem, scenario) in &scenarios {
         let (got, want) = (scenario.report(), expected_report(stem));
@@ -565,5 +622,56 @@ fn report_is_independent_of_event_order() {
         let mut s = find(1, "S49");
         s.reorder_conns(rotate);
         assert_eq!(s.report(), base, "S49 rotated by {rotate}");
+    }
+}
+
+#[test]
+fn capture_statistics_are_required_and_must_be_clean() {
+    use gd_egress::allowlist::Allowlist;
+    use gd_egress::capture::RawCapture;
+    use gd_egress::verdict::judge;
+    let s = Scenario::new("stats", 1);
+    let judged = |edit: &dyn Fn(&std::path::Path)| {
+        let dir = s.write();
+        edit(&dir);
+        let verdict = judge(
+            &RawCapture::load(&dir),
+            &s.set,
+            &Allowlist::parse(EMPTY_ALLOWLIST).unwrap(),
+            &expected_rules(),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        verdict.report
+    };
+    let log = |dir: &std::path::Path| dir.join("pcap/tcpdump.log");
+    assert!(judged(&|_| {}).starts_with("Judge C (egress capture): PASS"));
+    let cases: [(&str, &str); 5] = [
+        ("missing-file", ""),
+        ("bad-stats", "tcpdump: listening on any\n"),
+        (
+            "capture-drops",
+            "22 packets captured\n22 packets received by filter\n3 packets dropped by kernel\n",
+        ),
+        (
+            "capture-drops",
+            "22 packets captured\n25 packets received by filter\n0 packets dropped by kernel\n",
+        ),
+        (
+            "stats-mismatch",
+            "21 packets captured\n21 packets received by filter\n0 packets dropped by kernel\n",
+        ),
+    ];
+    for (code, text) in cases {
+        let report = judged(&|dir| {
+            if code == "missing-file" {
+                std::fs::remove_file(log(dir)).unwrap();
+            } else {
+                std::fs::write(log(dir), text).unwrap();
+            }
+        });
+        assert!(
+            report.contains(&format!("F5 capture-unreadable stats: {code}")),
+            "{code}: {report}"
+        );
     }
 }

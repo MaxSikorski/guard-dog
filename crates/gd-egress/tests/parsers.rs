@@ -370,6 +370,13 @@ fn tcp_gaps_and_conflicts_are_reported() {
     assert_eq!(conflict.recorder_streams[0].data, b"AAAAACC");
 }
 
+fn hex_bytes(text: &str) -> Vec<u8> {
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+        .collect()
+}
+
 #[test]
 fn dns_queries_with_extra_sections_are_rejected() {
     let plain = support::Scenario::dns_query_bytes("a.example.org", 7, 1, None);
@@ -389,11 +396,15 @@ fn dns_queries_with_extra_sections_are_rejected() {
         "the question is still read"
     );
     // Any answer or authority record, or two additional records, in a query.
+    let record = [0u8, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0];
     for (an, ns, ar) in [(1u8, 0u8, 0u8), (0, 1, 0), (0, 0, 2)] {
         let mut q = plain.clone();
         q[7] = an;
         q[9] = ns;
         q[11] = ar;
+        for _ in 0..(an + ns + ar) {
+            q.extend(record);
+        }
         assert!(
             pcap::parse_dns(&q).unwrap().unexpected_section,
             "{an} {ns} {ar}"
@@ -403,7 +414,22 @@ fn dns_queries_with_extra_sections_are_rejected() {
     let mut response = plain.clone();
     response[2] = 0x81;
     response[7] = 1;
+    response.extend(record);
     assert!(!pcap::parse_dns(&response).unwrap().unexpected_section);
+    // Records are read in full: a cut-off OPT, options that do not fill it, trailing bytes.
+    let cut = hex_bytes("000101000000000000000001000029");
+    assert_eq!(pcap::parse_dns(&cut).unwrap_err(), "dns-framing");
+    let mut bad_option = plain.clone();
+    bad_option[11] = 1;
+    bad_option.extend([0u8, 0, 41, 0x10, 0, 0, 0, 0, 0, 0, 3, 0, 8, 0, 9]); // rdlen 3: an option header cut short
+    assert_eq!(pcap::parse_dns(&bad_option).unwrap_err(), "dns-framing");
+    let mut trailing = plain.clone();
+    trailing.push(0);
+    assert_eq!(pcap::parse_dns(&trailing).unwrap_err(), "dns-framing");
+    let mut good_option = plain.clone();
+    good_option[11] = 1;
+    good_option.extend([0u8, 0, 41, 0x10, 0, 0, 0, 0, 0, 0, 4, 0, 8, 0, 0]); // one empty option
+    assert!(!pcap::parse_dns(&good_option).unwrap().unexpected_section);
     // Framing: short header, cut question, compression pointer in a question.
     assert_eq!(pcap::parse_dns(&[0u8; 6]).unwrap_err(), "dns-framing");
     assert_eq!(
