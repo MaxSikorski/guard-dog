@@ -40,6 +40,7 @@ cargo fmt --all --check && cargo clippy --locked --all-targets -- -D warnings &&
 | `release_profile_unwinds_and_checks_overflow` | `crates/gd-core/tests/profile_policy.rs` | The workspace `[profile.release]`, parsed as TOML, has `panic` absent or `"unwind"` and `overflow-checks = true`. |
 | `the_policy_check_cannot_be_dodged_by_toml_spelling` | same | The check rejects abort written with tabs, quoted keys, quoted headers, dotted keys, inline tables and a comment trick, and rejects missing or false overflow checks. |
 | `sensor_panic_is_contained` | same (only when panics unwind) | A panicking closure run under `catch_unwind` returns `Err` and the caller carries on: the containment primitive the daemon will use per sensor. |
+| `public_files_hold_no_local_details`, `the_checker_catches_planted_details_and_leaves_ordinary_text_alone` | `crates/gd-core/tests/public_files.rs` | Every git-tracked text file has no home path (`/Users/<name>`, `/home/<name>` other than the placeholders `user`, `bitcoin`, `admin`, `umbrel`), no macOS temp path, no run of 8 or more small numbers like `id -G` output, no email address outside a short allow list, and not this machine's host or user name (read from the environment, 4+ characters, not a common word). Refusals name `file:line`. The second test plants 12 leaks that must each be caught and 13 ordinary lines (TLS 1.3, version lists, placeholders) that must not. |
 
 ### Property-test seed
 
