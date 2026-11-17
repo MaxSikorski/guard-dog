@@ -30,13 +30,15 @@
 #
 # History:
 # - 2026-11-17 (setup facts, X1): lab-old-synthetic x the LND DNS bootstrap
-#   advisory changed from not-affected / not-met to possibly-affected /
-#   unknown with review = "max". The advisory's required condition is
-#   option_disabled nobootstrap, and the lab does not set --nobootstrap, so on
-#   the facts it is met as written; "regtest has no DNS seeds" is not what the
+#   advisory changed from not-affected / not-met to affected / in-range / met
+#   with review = "max". The advisory's required condition is option_disabled
+#   nobootstrap, the lab does not set --nobootstrap, and the facts say so, so
+#   the condition as written is met; "regtest has no DNS seeds" is not what the
 #   condition says. Max decides whether the advisory should carry a chain
-#   condition. The lab-regtest pair stays not-affected: its version is out of
-#   range.
+#   condition, which would make it not-affected. lab-regtest x the same
+#   advisory stays not-affected (version out of range) but its condition is now
+#   met, so the file follows its own facts. The test refuses any pair whose
+#   condition differs from what its setup's facts say.
 
 format = 1
 
@@ -427,11 +429,10 @@ reason = "LND 0.18.4-beta is below the fix 0.20.0-beta (SEMVER range 0 to fixed 
 [[expect]]
 setup = "lab-old-synthetic"
 advisory = "x_lightning-labs-2026-lnd-dns-bootstrap-type-assertion-panic"
-result = "possibly-affected"
+result = "affected"
 version = "in-range"
-condition = "unknown"
-reason = "LND 0.18.4-beta is below the fix 0.20.2-beta, and the required condition, option_disabled nobootstrap, is met as written: the lab does not set --nobootstrap. The earlier call that regtest has no DNS seeds is not something the advisory's condition says, so whether this node bootstraps from DNS seeds is unknown."
-question = "Does this LND node ever bootstrap peers from DNS seeds?"
+condition = "met"
+reason = "LND 0.18.4-beta is below the fix 0.20.2-beta and the required condition as written (option_disabled nobootstrap) is met: the lab doesn't set --nobootstrap. Whether LND really bootstraps from DNS on regtest (it has no seeds) is not what the condition says; Max decides whether the advisory should carry a chain condition, which would make this not-affected."
 review = "max"
 
 [[expect]]
@@ -618,8 +619,8 @@ setup = "lab-regtest"
 advisory = "x_lightning-labs-2026-lnd-dns-bootstrap-type-assertion-panic"
 result = "not-affected"
 version = "out-of-range"
-condition = "not-met"
-reason = "LND 0.21.6-beta is in neither range 0 to fixed 0.20.2-beta nor 0.21.0-beta to fixed 0.21.1-beta; separately, the required DNS bootstrapping never happens because regtest has no DNS seeds (nobootstrap is not set)."
+condition = "met"
+reason = "LND 0.21.6-beta is in neither range 0 to fixed 0.20.2-beta nor 0.21.0-beta to fixed 0.21.1-beta, so the version is out of range; the required condition as written (option_disabled nobootstrap) is met, because the lab doesn't set --nobootstrap."
 
 [[expect]]
 setup = "lab-regtest"

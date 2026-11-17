@@ -37,11 +37,12 @@ Test material the judges read. Nothing here is live: no network, no Docker.
 - a lab version that differs from `lab/compose.yml`;
 - an unlabelled synthetic setup;
 - a `[[setup.fact]]` with an unknown key, a name no advisory uses, a service the setup doesn't run, a `subject` where there is no argument (or none where there is), a value other than `true`, `false` or `unknown`, empty evidence or evidence that names a local path;
-- a required condition with no fact row where the pair's condition isn't `unknown`.
+- a required condition with no fact row where the pair's condition isn't `unknown`;
+- a `condition` that differs from what the facts say, whenever every required condition has a value (all true is `met`, any false is `not-met`; `service_running` and `package_installed` come from the services and packages). The one exception is an advisory whose conditions the vendor withheld (the Core Lightning 26.06.8 one), which stays `unknown`.
 
 The test also scores a matcher against the file; see `tests/README.md`. The matcher sees only the setup and advisory ids, never the expected result.
 
-History: on 2026-11-17 the pair `lab-old-synthetic` x the LND DNS bootstrap advisory changed from not-affected to possibly-affected (version in-range, condition unknown, `review = "max"`). The advisory's required condition is `option_disabled nobootstrap`, and the lab doesn't set `--nobootstrap`, so on the facts it is met as written. "Regtest has no DNS seeds" is not something the condition says. Max decides whether the advisory should carry a chain condition. The `lab-regtest` pair stays not-affected because its LND version is out of range.
+History: on 2026-11-17 the pair `lab-old-synthetic` x the LND DNS bootstrap advisory changed from not-affected to affected (version in-range, condition met, `review = "max"`). The advisory's required condition is `option_disabled nobootstrap`, the lab doesn't set `--nobootstrap`, and the setup's facts say so, so the condition as written is met. "Regtest has no DNS seeds" is not something the condition says. Max decides whether the advisory should carry a chain condition, which would make it not-affected. The `lab-regtest` pair stays not-affected because its LND version is out of range, but its condition is now `met` too.
 
 Never loosen an expected result to make the matcher pass without a written reason in the PR and in this file's history. A new setup gets one `[[setup]]` and one `[[expect]]` per advisory, and its id goes into `SETUPS` in the test.
 
