@@ -1,0 +1,5 @@
+bitcoind.service loaded active running
+lnd.service loaded active running
+tor@default.service loaded active running
+cron.service loaded active running
+unit-1.service loaded active running

@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability in Guard Dog
+    url: https://github.com/MaxSikorski/guard-dog/security/advisories/new
+    about: Please report vulnerabilities privately, never in a public issue. See SECURITY.md for what's in scope.
+  - name: Ask a question
+    url: https://github.com/MaxSikorski/guard-dog/discussions/categories/q-a
+    about: How do I, does it, should I? Ask in Discussions Q&A so the answer helps the next person too.
+  - name: Share an idea or answer a roadmap question
+    url: https://github.com/MaxSikorski/guard-dog/discussions/categories/ideas
+    about: Early ideas and the open questions in ROADMAP.md fit Discussions best. Once an idea is concrete, it becomes an issue.

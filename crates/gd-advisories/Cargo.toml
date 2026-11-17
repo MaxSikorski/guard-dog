@@ -1,0 +1,20 @@
+[package]
+name = "gd-advisories"
+description = "Guard Dog's advisory intake: OSV records as bounded typed data, and package identities."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gd-core = { path = "../gd-core" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -1,0 +1,13 @@
+error[E0369]: binary operation `==` cannot be applied to type `Observed<u8>`
+ --> tests/ui/observed_eq_plain.rs:5:22
+  |
+5 |     let _same = seen == 1u8;
+  |                 ---- ^^ --- u8
+  |                 |
+  |                 Observed<u8>
+  |
+note: `Observed<u8>` does not implement `PartialEq<u8>`
+ --> src/fact.rs
+  |
+  | pub enum Observed<T> {
+  | ^^^^^^^^^^^^^^^^^^^^ `Observed<u8>` is defined in another crate

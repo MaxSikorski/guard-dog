@@ -30,30 +30,29 @@ use yaml_rust2::YamlLoader;
 
 /// Judge B products with no catalog entry yet. Exact: the test fails when this
 /// differs from the real gap in either direction, so it only shrinks by editing
-/// it here. It shrinks as later pull requests add entries, and is empty once
-/// PR 3 of the catalog plan lands.
-const UNCATALOGUED: [&str; 10] = [
+/// it here. It shrinks as later pull requests add entries. Two products are
+/// still held back: `coldcard` (the format cannot say which model or track a
+/// version belongs to) and `xz-utils` (its version is read from a package
+/// manager, not a service).
+const UNCATALOGUED: [&str; 2] = ["coldcard", "xz-utils"];
+
+/// The ids catalogued so far (PR 1, then PR 3). An id here must keep its entry
+/// and can never appear in `UNCATALOGUED`, so the gap list cannot grow back. Add
+/// to this list when entries land; never remove from it.
+const CATALOGUED_BEFORE: [&str; 13] = [
     "alby-hub",
+    "bitcoin-core",
     "btcpay-server",
-    "coldcard",
+    "core-lightning",
     "fedimintd",
     "gatewayd",
     "lightning-terminal",
-    "rtl",
-    "tapd",
-    "umbrelos",
-    "xz-utils",
-];
-
-/// The ids catalogued when this list was written (PR 1). An id here must keep
-/// its entry and can never appear in `UNCATALOGUED`, so the gap list cannot
-/// grow back. Add to this list when entries land; never remove from it.
-const CATALOGUED_BEFORE: [&str; 5] = [
-    "bitcoin-core",
-    "core-lightning",
     "lnd",
     "nutshell",
+    "rtl",
     "strfry",
+    "tapd",
+    "umbrelos",
 ];
 
 /// Catalog entries that are not in Judge B's product table yet. Exact, like the
@@ -95,6 +94,13 @@ const SHARED_PORTS: [(i64, &str, &str); 1] = [(
     9735,
     "tcp",
     "the Lightning peer-to-peer port is the same default for every Lightning node",
+)];
+
+/// Entries whose version regex may read plain versions of many majors, as (id, reason).
+/// Exact: the test fails if an entry listed here no longer needs it. Add one with a reason.
+const PLAIN_VERSION_OK: [(&str, &str); 1] = [(
+    "strfry",
+    "tagged builds report a plain x.y.z in NIP-11; the relay is recognised by the NIP-11 software probe, not by the version regex",
 )];
 
 /// Reviewed URL prefixes outside an entry's own repo, related repos and website,
@@ -1022,23 +1028,85 @@ fn check_entry(t: &Table, stem: &str) -> Result<(), String> {
     let re = version_regex(v)?;
     let examples = tables(v, "examples", "version")?;
     if examples.is_empty() {
-        return Err("version.examples needs at least one real reply".into());
+        return Err("version.examples needs at least one example".into());
     }
-    for e in examples {
-        check_keys(e, "version.examples", &["raw", "version", "source"], &[])?;
-        check_source(
-            id,
-            up,
-            "version.examples.source",
-            line(e, "source", "version.examples")?,
+    for e in examples.iter() {
+        check_keys(
+            e,
+            "version.examples",
+            &["raw", "version", "source"],
+            &["source_kind"],
         )?;
+        let src = line(e, "source", "version.examples")?;
+        check_source(id, up, "version.examples.source", src)?;
         let raw = string(e, "raw", "version.examples")?;
         let want = line(e, "version", "version.examples")?;
+        if e.contains_key("source_kind") {
+            // An advisory-derived example: the version form comes from an
+            // advisory's affected or fixed value, so it proves the regex reads
+            // that form, not that a product ever sent it. It is marked, points at
+            // the advisory file, and the entry says in `todo` it awaits a recording.
+            one_of(e, "source_kind", "version.examples", &["advisory"])?;
+            if !is_advisory_file(src) {
+                return Err(format!(
+                    "version.examples.source of an advisory example must be an advisory file in the repo: {src}"
+                ));
+            }
+            if raw != want {
+                return Err(format!(
+                    "an advisory example is the bare value: raw `{raw}` must equal version `{want}`"
+                ));
+            }
+            let osv = t
+                .get("advisories")
+                .and_then(Value::as_table)
+                .map(|a| strings(a, "osv_packages", "advisories"))
+                .transpose()?
+                .unwrap_or_default();
+            advisory_has_version(src, want, &osv)?;
+            if !has_todo("recorded-reply:") {
+                return Err(
+                    "an advisory example needs a `recorded-reply:` item in review.todo".into(),
+                );
+            }
+        }
         let got = extract(&re, raw);
         if got.as_deref() != Some(want) {
             return Err(format!(
                 "version.regex on example `{raw}` gives {got:?}, expected `{want}`"
             ));
+        }
+    }
+
+    // No version regex reads plain versions of more than one major number: that would claim
+    // any product's reply. A reviewed exception must still need it.
+    let advisory_only = examples.iter().all(|e| e.contains_key("source_kind"));
+    let majors = major_sweep().iter().filter(|p| re.is_match(p)).count();
+    let excepted = PLAIN_VERSION_OK.iter().any(|(e, _)| *e == id);
+    if majors > 1 && !excepted {
+        return Err(format!(
+            "version.regex reads plain versions of more than one major number, so it would claim any product's reply: {}",
+            string(v, "regex", "version")?
+        ));
+    }
+    if majors <= 1 && excepted {
+        return Err(format!(
+            "`{id}` is in PLAIN_VERSION_OK but its regex no longer reads many majors: remove it"
+        ));
+    }
+    // With no recorded reply there is nothing to recognise the product by: no image,
+    // probe or port yet. They arrive when a recorded example replaces the advisory one.
+    if advisory_only {
+        let has = |k: &str| {
+            rec.get(k)
+                .and_then(Value::as_array)
+                .is_some_and(|a| !a.is_empty())
+        };
+        if has("images") || has("probes") || has("ports") {
+            return Err(
+                "an entry whose examples are all advisory-derived has no images, probes or ports yet"
+                    .into(),
+            );
         }
     }
 
@@ -1162,10 +1230,75 @@ fn check_entry(t: &Table, stem: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The entry's version regex: anchored, length-limited, bounded, with a `version` group.
+/// An advisory example's `source`: a `.json` file under `advisories/corpus/` that exists.
+fn is_advisory_file(src: &str) -> bool {
+    src.starts_with("advisories/corpus/")
+        && Path::new(src)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+        && !src.contains("..")
+        && root().join(src).is_file()
+}
+
+/// Plain versions across many major numbers: `N.2.3` for N in 0 to 40, `100.0.0` and
+/// `2026.1.0`. A regex that reads more than one major claims any product's reply,
+/// whatever way it is spelled.
+fn major_sweep() -> Vec<String> {
+    let mut v: Vec<String> = (0..=40).map(|n| format!("{n}.2.3")).collect();
+    v.push("100.0.0".into());
+    v.push("2026.1.0".into());
+    v
+}
+
+/// Does the advisory file say `want` is an introduced, fixed or last-affected version of
+/// one of the entry's own OSV packages (`<ECOSYSTEM> <name>`)? The file is parsed, not searched.
+fn advisory_has_version(src: &str, want: &str, osv_packages: &[&str]) -> Result<(), String> {
+    let doc: serde_json::Value =
+        serde_json::from_str(&read(src)).map_err(|e| format!("{src} is not valid JSON: {e}"))?;
+    let affected = doc.get("affected").and_then(|a| a.as_array());
+    for a in affected.into_iter().flatten() {
+        let pkg = a.get("package");
+        let name = |k: &str| pkg.and_then(|p| p.get(k)).and_then(|v| v.as_str());
+        let (Some(eco), Some(n)) = (name("ecosystem"), name("name")) else {
+            continue;
+        };
+        if !osv_packages.contains(&format!("{eco} {n}").as_str()) {
+            continue;
+        }
+        let mut found: Vec<&str> = Vec::new();
+        for r in a
+            .get("ranges")
+            .and_then(|r| r.as_array())
+            .into_iter()
+            .flatten()
+        {
+            for ev in r
+                .get("events")
+                .and_then(|e| e.as_array())
+                .into_iter()
+                .flatten()
+            {
+                for k in ["introduced", "fixed", "last_affected"] {
+                    found.extend(ev.get(k).and_then(|v| v.as_str()));
+                }
+            }
+        }
+        let fixed_in = a.get("database_specific").and_then(|d| d.get("fixed_in"));
+        for v in fixed_in.and_then(|f| f.as_array()).into_iter().flatten() {
+            found.extend(v.as_str());
+        }
+        if found.contains(&want) {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "`{want}` is not an introduced, fixed or last-affected version of this entry's osv_packages in {src}"
+    ))
+}
+
 fn version_regex(v: &Table) -> Result<Regex, String> {
-    let re = untrusted_regex(string(v, "regex", "version")?)
-        .map_err(|e| format!("version.regex: {e}"))?;
+    let pattern = string(v, "regex", "version")?;
+    let re = untrusted_regex(pattern).map_err(|e| format!("version.regex: {e}"))?;
     if !re.capture_names().flatten().any(|n| n == "version") {
         return Err("version.regex needs a group named `version`".into());
     }
@@ -1264,12 +1397,17 @@ fn check_recordings(entries: &BTreeMap<String, Table>, rec: &[Recorded]) -> Resu
     Ok(())
 }
 
-/// No entry's version regex or probe pattern may match another entry's recorded or example reply.
+/// No entry's version regex or probe pattern may match another entry's recorded or real
+/// example reply. Advisory-derived examples (`source_kind = "advisory"`) are left out: they
+/// were never sent by a product, so only recorded replies count as the other side.
 fn check_negative(entries: &BTreeMap<String, Table>, rec: &[Recorded]) -> Result<(), String> {
     let mut raws: Vec<(String, String)> =
         rec.iter().map(|r| (r.id.clone(), r.raw.clone())).collect();
     for (id, e) in entries {
         for ex in tables(table(e, "version", id)?, "examples", id)? {
+            if ex.contains_key("source_kind") {
+                continue;
+            }
             raws.push((id.clone(), string(ex, "raw", id)?.to_string()));
         }
     }
@@ -1299,6 +1437,8 @@ fn lab_services() -> Vec<(String, String, String)> {
     let services = docs[0]["services"].as_hash().expect("services");
     services
         .iter()
+        // Tool services (probe, scanner) have a compose profile and are not lab products.
+        .filter(|(_, svc)| svc["profiles"].is_badvalue())
         .map(|(name, svc)| {
             (
                 name.as_str().unwrap().to_string(),
@@ -1319,6 +1459,7 @@ fn lab_texts() -> BTreeMap<String, String> {
         .as_hash()
         .expect("services")
         .iter()
+        .filter(|(_, s)| s["profiles"].is_badvalue())
         .map(|(n, s)| (n.as_str().unwrap().to_string(), format!("{s:?}")))
         .collect()
 }
@@ -1610,7 +1751,20 @@ fn catalog_entries_are_valid() {
         .values()
         .map(|e| e["review"]["todo"].as_array().unwrap().len())
         .sum();
-    println!("{} entries, {todo} open todo items", all.len());
+    let advisory = all
+        .values()
+        .filter(|e| {
+            e["version"]["examples"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|x| x.get("source_kind").is_some())
+        })
+        .count();
+    println!(
+        "{} entries, {todo} open todo items, {advisory} entries with only advisory-derived examples",
+        all.len()
+    );
 }
 
 #[test]
@@ -1688,7 +1842,13 @@ fn lab_ports_match_the_lab_file() {
     // The lab ports are really claimed: at least one entry cites the lab file.
     let cited = all
         .values()
-        .flat_map(|e| e["recognize"]["ports"].as_array().into_iter().flatten())
+        .flat_map(|e| {
+            e["recognize"]
+                .get("ports")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
         .filter(|p| p.get("source").and_then(Value::as_str) == Some(LAB_FILE))
         .count();
     assert!(cited >= 6, "the lab ports are cited, found {cited}");
@@ -1707,10 +1867,10 @@ fn catalog_calls_are_read_only() {
     for (id, e) in entries() {
         let v = e["version"].as_table().unwrap();
         let form = call_form(v["source"].as_str().unwrap());
-        used.insert((
-            form.into(),
-            descriptor(v["call"].as_table().unwrap(), form).unwrap(),
-        ));
+        // image-label and platform-manifest sources make no call, so they use none.
+        if let Some(d) = descriptor(v["call"].as_table().unwrap(), form) {
+            used.insert((form.into(), d));
+        }
         for p in tables(e["recognize"].as_table().unwrap(), "probes", &id).unwrap() {
             let form = call_form(p["kind"].as_str().unwrap());
             used.insert((form.into(), descriptor(p, form).unwrap()));
@@ -2348,6 +2508,139 @@ fn broken_entries_are_refused() {
         ),
     )
     .unwrap();
+
+    advisory_examples_are_refused_when_unbacked();
+}
+
+/// Advisory-derived examples (`source_kind = "advisory"`, entries not yet recorded).
+fn advisory_examples_are_refused_when_unbacked() {
+    let alby = text_of("alby-hub");
+    let btcpay = text_of("btcpay-server");
+    validate("alby-hub", &alby).unwrap();
+    validate("btcpay-server", &btcpay).unwrap();
+    let file = "advisories/corpus/x_alby-hub-2026-09-internet-exposed-takeover.json";
+    let a =
+        |from: &str, to: &str, want: &str| refused("alby-hub", &replaced(&alby, from, to), want);
+    let source = format!("source = \"{file}\"\nsource_kind");
+    // No source file: it does not exist, it is missing, or it is a page instead of an advisory file.
+    a(
+        &source,
+        "source = \"advisories/corpus/no-such-advisory.json\"\nsource_kind",
+        "version.examples.source",
+    );
+    a(&source, "source_kind", "source");
+    a(
+        &source,
+        "source = \"https://github.com/getAlby/hub\"\nsource_kind",
+        "advisory file in the repo",
+    );
+    a(
+        &source,
+        "source = \"README.md\"\nsource_kind",
+        "advisory file in the repo",
+    );
+    // The version is not in the advisory, or the example is not the bare value.
+    a(
+        "raw = \"1.19.0\"\nversion = \"1.19.0\"",
+        "raw = \"1.99.0\"\nversion = \"1.99.0\"",
+        "is not an introduced, fixed or last-affected",
+    );
+    // Another product's advisory (umbrelOS's), a page outside the corpus (the vendored schema).
+    a(
+        &format!("raw = \"1.19.0\"\nversion = \"1.19.0\"\nsource = \"{file}\""),
+        "raw = \"1.2.2\"\nversion = \"1.2.2\"\nsource = \"advisories/corpus/CVE-2024-49379.json\"",
+        "is not an introduced, fixed or last-affected",
+    );
+    a(
+        &source,
+        "source = \"advisories/schema/osv-schema-1.9.2.json\"\nsource_kind",
+        "advisory file in the repo",
+    );
+    a(
+        "raw = \"1.19.0\"\nversion = \"1.19.0\"",
+        "raw = \"v1.19.0\"\nversion = \"1.19.0\"",
+        "bare value",
+    );
+    // An unknown kind; and no `recorded-reply` todo.
+    a(
+        "source_kind = \"advisory\"",
+        "source_kind = \"recorded\"",
+        "source_kind",
+    );
+    a("  \"recorded-reply:", "  \"examples:", "recorded-reply");
+    // A regex that reads plain versions of many majors is refused, however it is spelled.
+    let re_line = "regex = '^(?P<version>1\\.\\d+\\.\\d+)$'";
+    for bare in [
+        "'^(?P<version>\\d+\\.\\d+\\.\\d+)$'",
+        "'^(?P<version>[0-9]+\\.[0-9]+\\.[0-9]+)$'",
+        "'^(?P<version>(?:\\d+\\.){2}\\d+)$'",
+    ] {
+        a(re_line, &format!("regex = {bare}"), "more than one major");
+    }
+    // P4: a regex that reads two majors with a character class is refused too.
+    a(
+        re_line,
+        "regex = '^(?P<version>(?:[0-8]|[1-9]\\d)\\.\\d+\\.\\d+)$'",
+        "more than one major",
+    );
+    // P9: a prefix on the regex, a "real" example with that prefix and an image do not get round it.
+    refused(
+        "alby-hub",
+        &replaced(
+            &replaced(
+                &replaced(
+                    &replaced(
+                        &alby,
+                        re_line,
+                        "regex = '^x?(?P<version>\\d+\\.\\d+\\.\\d+)$'",
+                    ),
+                    "raw = \"1.19.0\"",
+                    "raw = \"x1.19.0\"",
+                ),
+                "source_kind = \"advisory\"\n",
+                "",
+            ),
+            "images = []",
+            "images = [\"docker.io/getalby/hub\"]",
+        ),
+        "more than one major",
+    );
+    // An exception that is not needed any more is refused.
+    refused(
+        "strfry",
+        &replaced(
+            &text_of("strfry"),
+            "regex = '^(?P<version>\\d+\\.\\d+\\.\\d+(?:-\\d+-g[0-9a-f]{7,})?)$'",
+            "regex = '^(?P<version>1\\.\\d+\\.\\d+(?:-\\d+-g[0-9a-f]{7,})?)$'",
+        ),
+        "no longer reads many majors",
+    );
+    refused(
+        "btcpay-server",
+        &replaced(
+            &btcpay,
+            "regex = '^(?P<version>2\\.\\d+\\.\\d+)$'",
+            "regex = '^(?P<version>\\d+\\.\\d+\\.\\d+)$'",
+        ),
+        "more than one major",
+    );
+    // With only advisory-derived examples there is nothing recorded to recognise it by:
+    // no images, no ports, no probes.
+    a(
+        "images = []",
+        "images = [\"docker.io/getalby/hub\"]",
+        "no images, probes or ports yet",
+    );
+    a(
+        "[version]",
+        "[[recognize.ports]]\nport = 8080\nproto = \"tcp\"\nwhat = \"management web interface\"\nexposure = \"never-public\"\n\n[version]",
+        "no images, probes or ports yet",
+    );
+    a(
+        "[version]",
+        "[[recognize.probes]]\nkind = \"http\"\nmethod = \"GET\"\npath = \"/\"\n\n[version]",
+        "no images, probes or ports yet",
+    );
 }
 
 #[test]
@@ -2450,6 +2743,27 @@ fn broken_cross_checks_are_refused() {
         check_negative(&wide_probe, &rec)
             .unwrap_err()
             .contains("probe pattern also matches")
+    );
+
+    // The negative check runs on recorded replies: an advisory-derived example is skipped
+    // (fedimintd's pattern reads rtl's `0.15.12`), but the same reply, once it is not marked
+    // as advisory-derived, is a real reply and is refused.
+    check_negative(&good, &rec).unwrap();
+    let mut unmarked = good.clone();
+    let examples = unmarked
+        .get_mut("rtl")
+        .unwrap()
+        .get_mut("version")
+        .unwrap()
+        .get_mut("examples")
+        .unwrap()
+        .as_array_mut()
+        .unwrap();
+    examples[0].as_table_mut().unwrap().remove("source_kind");
+    assert!(
+        check_negative(&unmarked, &rec)
+            .unwrap_err()
+            .contains("also matches rtl's reply")
     );
 
     // An image no recognize.images pattern covers, and a lab service the map does not know.

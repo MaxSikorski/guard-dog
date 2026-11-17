@@ -1,0 +1,94 @@
+name: Bug report
+description: Guard Dog did something wrong, crashed, or a test or build failed.
+title: "Bug: "
+labels: ["type: bug", "status: needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this.
+
+        **Is it a security problem in Guard Dog itself?** Please don't file it here. Report it privately instead: see [SECURITY.md](https://github.com/MaxSikorski/guard-dog/blob/main/SECURITY.md).
+
+        **Did Guard Dog report the wrong advisory, or miss one?** Use the "False alarm or missed advisory" form instead.
+
+        This issue is public. Remove anything private from logs and output before you paste them.
+  - type: checkboxes
+    id: redacted
+    attributes:
+      label: Before you post
+      options:
+        - label: I removed seeds, nsecs, xpubs, macaroons, passwords, tokens, IP addresses, onion addresses and hostnames from everything below.
+          required: true
+        - label: I searched the existing issues and this hasn't been reported yet.
+          required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did Guard Dog do, in plain words?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to reproduce it
+      description: The exact steps or commands, one per line. If it happens on the regtest lab (`lab/up.sh`), say so; that makes it much easier to reproduce.
+      placeholder: |
+        1. lab/up.sh
+        2. cargo test --locked -p gd-core
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: guard-dog-version
+    attributes:
+      label: Guard Dog version or commit
+      description: A release version, or the output of `git rev-parse --short HEAD` if you built from source.
+      placeholder: "e.g. 0.1.0 or 8ff6ac6"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Where it runs
+      options:
+        - umbrelOS
+        - StartOS
+        - RaspiBlitz
+        - myNode
+        - nix-bitcoin
+        - Plain Docker or Docker Compose
+        - Plain Linux (bare metal or VM)
+        - macOS (building or testing only)
+        - The regtest lab only
+        - Other (say below)
+    validations:
+      required: true
+  - type: textarea
+    id: versions
+    attributes:
+      label: Versions
+      description: Your OS and its version, your platform's version, and the versions of the services involved. For build problems, add `rustc --version` and `cargo --version`.
+      placeholder: |
+        OS: Debian 12
+        Platform: RaspiBlitz 1.11
+        Service: LND 0.18.x
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or output
+      description: Redacted, please. This is pasted as plain text, so you don't need backticks.
+      render: text
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else

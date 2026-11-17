@@ -1,0 +1,5 @@
+error[E0277]: the trait bound `Observed<u8>: Default` is not satisfied
+ --> tests/ui/observed_default.rs:5:34
+  |
+5 |     let _nothing: Observed<u8> = Default::default();
+  |                                  ^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `Observed<u8>`
