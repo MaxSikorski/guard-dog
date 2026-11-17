@@ -23,6 +23,20 @@
 #               "affected"           the version is in range and every required condition is met
 #               "possibly-affected"  anything else; `question` says what would settle it
 # review = "max" marks a pair whose call was not clear-cut.
+#
+# [[setup.fact]]: the closed table of setup facts a matcher reads instead of
+# prose (format: fixtures/README.md). Each row has name, service, subject,
+# value and evidence.
+#
+# History:
+# - 2026-11-17 (setup facts, X1): lab-old-synthetic x the LND DNS bootstrap
+#   advisory changed from not-affected / not-met to possibly-affected /
+#   unknown with review = "max". The advisory's required condition is
+#   option_disabled nobootstrap, and the lab does not set --nobootstrap, so on
+#   the facts it is met as written; "regtest has no DNS seeds" is not what the
+#   condition says. Max decides whether the advisory should carry a chain
+#   condition. The lab-regtest pair stays not-affected: its version is out of
+#   range.
 
 format = 1
 
@@ -133,6 +147,31 @@ version = "0.18.4-beta"
 id = "nutshell"
 version = "0.17.0"
 
+[[setup.fact]]
+name = "p2p_inbound_or_outbound_peers"
+service = "bitcoin-core"
+value = "false"
+evidence = "description: SYNTHETIC setup built from the regtest lab's exact configuration, which has no P2P peers; like the lab, bitcoind runs with -listen=0, -dnsseed=0, -fixedseeds=0 and no addnode or connect"
+
+[[setup.fact]]
+name = "node_builds_block_templates"
+service = "bitcoin-core"
+value = "true"
+evidence = "description: SYNTHETIC setup built from the regtest lab's exact configuration, and the lab mines its own blocks with generatetoaddress"
+
+[[setup.fact]]
+name = "option_disabled"
+service = "lnd"
+subject = "nobootstrap"
+value = "true"
+evidence = "description: SYNTHETIC setup built from the regtest lab's exact configuration, and the lab does not set --nobootstrap for lnd (the expectation for the DNS bootstrap advisory stays unknown: see the header note)"
+
+[[setup.fact]]
+name = "option_enabled"
+subject = "invoice HTLC interceptor (or any HtlcModifier RPC client)"
+value = "false"
+evidence = "description: SYNTHETIC setup built from the regtest lab's exact configuration, which has no tapd and no Lightning Terminal (the service tapd is not in this setup)"
+
 [[setup]]
 id = "lab-regtest"
 source = "lab"
@@ -194,6 +233,31 @@ in = "strfry"
 product = "xz-utils"
 version = "none"
 evidence = "Alpine 3.18 image: no xz, no liblzma file, apk has neither xz nor xz-libs"
+
+[[setup.fact]]
+name = "p2p_inbound_or_outbound_peers"
+service = "bitcoin-core"
+value = "false"
+evidence = "lab/compose.yml: bitcoind runs with -listen=0, -dnsseed=0, -fixedseeds=0, no -connect or -addnode, and the lab network is internal with no published ports"
+
+[[setup.fact]]
+name = "node_builds_block_templates"
+service = "bitcoin-core"
+value = "true"
+evidence = "the lab mines its own blocks with generatetoaddress (the existing expectation for CVE-2025-62861 states it); lab/compose.yml sets no -blocksonly"
+
+[[setup.fact]]
+name = "option_disabled"
+service = "lnd"
+subject = "nobootstrap"
+value = "true"
+evidence = "lab/compose.yml: the lnd command line has no --nobootstrap, so the option is not set"
+
+[[setup.fact]]
+name = "option_enabled"
+subject = "invoice HTLC interceptor (or any HtlcModifier RPC client)"
+value = "false"
+evidence = "lab/compose.yml: no tapd or Lightning Terminal service is defined (the service tapd is not in this setup)"
 
 # Expectations for lab-old-synthetic.
 
@@ -363,10 +427,12 @@ reason = "LND 0.18.4-beta is below the fix 0.20.0-beta (SEMVER range 0 to fixed 
 [[expect]]
 setup = "lab-old-synthetic"
 advisory = "x_lightning-labs-2026-lnd-dns-bootstrap-type-assertion-panic"
-result = "not-affected"
+result = "possibly-affected"
 version = "in-range"
-condition = "not-met"
-reason = "LND 0.18.4-beta is below the fix 0.20.2-beta, but the required DNS bootstrapping never happens: regtest has no DNS seeds (nobootstrap is not set; it doesn't need to be)."
+condition = "unknown"
+reason = "LND 0.18.4-beta is below the fix 0.20.2-beta, and the required condition, option_disabled nobootstrap, is met as written: the lab does not set --nobootstrap. The earlier call that regtest has no DNS seeds is not something the advisory's condition says, so whether this node bootstraps from DNS seeds is unknown."
+question = "Does this LND node ever bootstrap peers from DNS seeds?"
+review = "max"
 
 [[expect]]
 setup = "lab-old-synthetic"
