@@ -1286,7 +1286,7 @@ proptest! {
     #[test]
     fn arbitrary_bytes_never_panic_and_only_url_safe_text_passes_the_rune_decoder(bytes in proptest::collection::vec(any::<u8>(), 0..300)) {
         if rune::check(&bytes).is_ok() {
-            prop_assert!(bytes.iter().all(|b| B64.contains(b) || *b == b'=' || b.is_ascii_whitespace()));
+            prop_assert!(bytes.iter().all(|b| B64.contains(b) || *b == b'=' || matches!(*b, b' ' | b'\t' | b'\r' | b'\n')));
         }
     }
 

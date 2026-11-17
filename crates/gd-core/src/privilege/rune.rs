@@ -4,7 +4,7 @@
 //!
 //! The rune string (at most 1 KiB, trailing whitespace ignored) is URL-safe
 //! base64, with or without `=` padding; any other character is refused. The
-//! first 32 decoded bytes are the rune's unique id hash and are not read. The
+//! first 32 decoded bytes are the rune's SHA-256 state (its authentication code) and are not read. The
 //! rest is the restriction text, and it is decided on its raw bytes:
 //!
 //! - any backslash refuses the rune (Guard Dog won't guess at escaping);

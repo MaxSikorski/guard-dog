@@ -82,10 +82,10 @@ impl fmt::Display for BitcoindRefusal {
 
 impl std::error::Error for BitcoindRefusal {}
 
-/// Harmless, read-only methods that are not on the whitelist Guard Dog asks for.
-/// Each must get HTTP 403. Never a wallet or spending method.
 /// The calls Guard Dog needs; each must get HTTP 200 before the canaries mean anything.
 const NEEDED_METHODS: [&str; 2] = ["getnetworkinfo", "getblockchaininfo"];
+/// Harmless, read-only methods that are not on the whitelist Guard Dog asks for.
+/// Each must get HTTP 403. Never a wallet or spending method.
 const CANARY_METHODS: [&str; 3] = ["getblockcount", "getbestblockhash", "uptime"];
 
 /// Proves a login narrow, or says why not. `user` is the RPC user name; it is
