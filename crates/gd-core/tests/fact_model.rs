@@ -2280,7 +2280,10 @@ fn walking_packages_and_states_never_shows_absence_for_a_candidate() {
         Observed::Seen(PackageState::NotInstalled)
     ));
     // And when the containing service is the candidate, the walk is guarded too.
-    let v = setup_view(&[absent_pkg("zlib"), unrecognized_on(vec![cat("bitcoin-core")])]);
+    let v = setup_view(&[
+        absent_pkg("zlib"),
+        unrecognized_on(vec![cat("bitcoin-core")]),
+    ]);
     for (_, state) in v.packages() {
         assert!(!matches!(state, Observed::Seen(PackageState::NotInstalled)));
     }

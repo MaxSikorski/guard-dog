@@ -197,6 +197,9 @@ pub fn setup_view(facts: &[Fact]) -> SetupView {
                 ..
             } => match &fact.subject {
                 Subject::Service(instance) => {
+                    if has_unidentified(std::slice::from_ref(state)) {
+                        candidates.insert(instance.catalog.clone());
+                    }
                     states
                         .entry(instance.clone())
                         .or_default()
@@ -218,10 +221,15 @@ pub fn setup_view(facts: &[Fact]) -> SetupView {
                 presence,
                 version,
             } => match &fact.subject {
-                Subject::Service(instance) => packages
-                    .entry((instance.clone(), product.clone()))
-                    .or_default()
-                    .push((presence.clone(), version.clone())),
+                Subject::Service(instance) => {
+                    if has_unidentified(std::slice::from_ref(presence)) {
+                        candidates.insert(product.clone());
+                    }
+                    packages
+                        .entry((instance.clone(), product.clone()))
+                        .or_default()
+                        .push((presence.clone(), version.clone()))
+                }
                 other => blind_spots.extend(spot(
                     other,
                     Area::Packages,
@@ -285,6 +293,12 @@ pub fn setup_view(facts: &[Fact]) -> SetupView {
             .into_iter()
             .map(|(key, found)| {
                 let folded = fold_package(&found);
+                let guarded =
+                    unidentified.contains(&key.1) || unidentified.contains(&key.0.catalog);
+                let folded = match folded {
+                    Observed::Seen(PackageState::NotInstalled) if guarded => unidentified_unknown(),
+                    other => other,
+                };
                 (key, folded)
             })
             .collect(),
@@ -440,6 +454,9 @@ fn fold_by_method(
             *method != best && matches!(observed, Observed::Seen(v) if v != chosen)
         })
     {
+        notes.push((BlindSpotKind::MethodsDisagree, "methods-disagree"));
+    }
+    if best_conflict.is_some_and(|conflict| conflict > best) {
         notes.push((BlindSpotKind::MethodsDisagree, "methods-disagree"));
     }
     if best_gap.is_some_and(|gap| gap < best) {

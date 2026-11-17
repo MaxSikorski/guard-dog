@@ -770,6 +770,10 @@ impl TryFrom<FactWire> for Fact {
 }
 
 impl Fact {
+    /// Builds a fact. An `Err` means the claim could not be recorded (today: an
+    /// unrecognised endpoint with more than [`MAX_CANDIDATES`] candidates). A
+    /// sensor must then emit a `BlindSpot` fact, never skip the fact: use
+    /// [`Fact::new_or_blind_spot`].
     pub fn new(
         subject: Subject,
         mut claim: Claim,
@@ -794,6 +798,39 @@ impl Fact {
             observed_at,
             evidence,
         })
+    }
+
+    /// Like [`Fact::new`], but a claim that cannot be recorded becomes a
+    /// `BlindSpot` on the same subject saying so, so the gap is never silent.
+    pub fn new_or_blind_spot(
+        subject: Subject,
+        claim: Claim,
+        source: Source,
+        observed_at: Timestamp,
+        evidence: Vec<Evidence>,
+    ) -> Fact {
+        match Fact::new(
+            subject.clone(),
+            claim,
+            source.clone(),
+            observed_at,
+            evidence,
+        ) {
+            Ok(fact) => fact,
+            Err(_) => Fact {
+                subject,
+                claim: Claim::BlindSpot {
+                    area: Area::Services,
+                    what: BlindSpotKind::TooBig,
+                    // A literal that always parses; the fallback keeps this total.
+                    hint: HintId::parse("unidentified-service-not-recorded")
+                        .unwrap_or_else(|_| HintId(String::from("not-recorded"))),
+                },
+                source,
+                observed_at,
+                evidence: Vec::new(),
+            },
+        }
     }
 
     pub fn evidence(&self) -> &[Evidence] {

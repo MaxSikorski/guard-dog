@@ -79,6 +79,10 @@ Phase 1.1 PR 1 (`crates/gd-core/src/fact.rs`, `view.rs`). Property tests use the
 | `a_stopped_instance_stays_stopped_and_the_product_is_still_flagged` | same | Stopped stays Stopped while `may_be_unidentified` is true. |
 | `products_known_only_from_candidates_are_listed` | same | `unidentified()` lists candidate products, sorted and without repeats; `services()` does not. |
 | `claim_source_and_run_shapes_refuse_unknown_keys` | same | An extra key in a claim, a run description, a source or a subject is refused on load. |
+| `walking_packages_and_states_never_shows_absence_for_a_candidate` | same | Walking `packages()` and `states()` never yields NotInstalled or NotFound for a product (or containing service) an unrecognised endpoint might be. |
+| `a_sensors_own_unidentified_unknown_marks_the_catalog_id` | same | A service state or package presence of `Unknown(Unidentified)` puts that id in the unidentified set, even beside a Stopped fact. |
+| `a_fact_that_cannot_be_built_becomes_a_blind_spot_not_a_gap` | same | `Fact::new_or_blind_spot` turns an over-long candidate list into a loadable `BlindSpot` fact on the same subject. |
+| `a_weaker_conflict_under_a_stronger_version_leaves_a_trace` | same | A weaker method's Conflict under a stronger Seen version raises a `MethodsDisagree` blind spot, in either order. |
 | `wire_structs_refuse_unknown_keys` | same | An extra key in a fact, an Unknown, evidence or a complete search is refused on load. |
 | `settings_are_read_from_facts_and_gaps_are_unknown` | same | Setting facts reach the view; disagreement is a conflict, a gap is Unknown, a never-asked key is `Unknown(NotChecked)`. |
 | `versions_cannot_look_like_options_or_paths` | same | A version must start with a letter or digit (also after `!`): `.`, `..`, `-x`, `0!-x` are refused. |
