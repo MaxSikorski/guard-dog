@@ -81,7 +81,7 @@ If your money and identity live on your own infrastructure, you're your own secu
 "It seems to work" isn't good enough for something that watches your money, so I grade Guard Dog with **judges**. A judge is a test that checks Guard Dog from the outside against real-world truth: real setups, real advisories, real network traffic and hostile text. I write each judge before the feature it grades exists, record a baseline score, and run it in CI, so a score can't quietly go down.
 
 - **Judge A, recorded setups:** does it find every service and its version on a real setup? The recorder and the judge are in; real recordings come next.
-- **Judge B, real advisories:** does it report every advisory that applies, and nothing that doesn't? So far there's a corpus of 23 advisories, checked against the OSV schema, and the expected answers for the lab's two setups. The matching comes later, so recall is 0 of 9 today.
+- **Judge B, real advisories:** does it report every advisory that applies, and nothing that doesn't? So far there's a corpus of 23 advisories, checked against the OSV schema, and the expected answers for the lab's two setups. Guard Dog can now read those advisories and tell whether a version falls in an affected range; the matcher that puts it together with your setup comes next, so recall is 0 of 9 today.
 - **Judge C, egress:** does anything leave the box that shouldn't? The checker is in and passes 88 synthetic captures. It decodes gzip, deflate and brotli with hard limits and fails on any encoding it can't decode. Running it on real captures from the lab comes next.
 - **Judge D, injection:** can hostile text make it do or show something it shouldn't? 48 hostile payloads, and 48 of 48 pass both renderer checks (what Guard Dog shows on a terminal and in HTML). The checks that it takes no action and puts no untrusted text in a privileged prompt are counted but not yet applicable; they need code from later phases. A naive renderer fails 36 of them, so the judge has teeth.
 
@@ -95,7 +95,7 @@ The details are in [tests/README.md](tests/README.md).
 cargo run --locked --example watchdog
 ```
 
-**In your browser, no install:** [`docs/demo/`](docs/demo/) is the same demo as a web page. It goes live on the site with the next release; until then, open `docs/demo/index.html` from a checkout served by any static file server.
+**In your browser, no install:** the same demo runs [on the website](https://maxsikorski.github.io/guard-dog/demo/). Its source is in [`docs/demo/`](docs/demo/). If you'd like to see where Guard Dog is going, there's also a [clickable mock-up](https://maxsikorski.github.io/guard-dog/preview/) of how it will work; it's a picture, not working software.
 
 I plant attacks and you watch the real code catch each one:
 1. a fake changelog full of terminal escape codes and a right-to-left trick is shown safely;
