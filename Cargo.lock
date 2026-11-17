@@ -382,6 +382,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gd-advisories"
+version = "0.0.1"
+dependencies = [
+ "gd-core",
+ "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "gd-core"
 version = "0.0.1"
 dependencies = [
