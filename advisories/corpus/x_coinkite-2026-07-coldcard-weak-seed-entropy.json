@@ -1,0 +1,177 @@
+{
+  "schema_version": "1.9.2",
+  "id": "x_coinkite-2026-07-coldcard-weak-seed-entropy",
+  "modified": "2026-11-16T00:00:00Z",
+  "published": "2026-07-30T12:00:00Z",
+  "summary": "Coldcard: firmware released from 2021 to July 2026 generated seeds with weak randomness; updating does not fix existing seeds",
+  "details": "A build and link mistake made Coldcard firmware use a general-purpose software random number generator instead of the hardware one when creating new seeds. Seeds created on affected firmware can be rebuilt by an attacker offline, and Coinkite reports funds were stolen this way. The devices were not hacked remotely. Affected: Mk2 and Mk3 firmware 4.0.1 (March 2021) through 4.1.9, fixed in 4.2.0; Mk4 and Mk5 standard firmware before 5.6.0 and Edge before 6.6.0X; Q standard before 1.5.0Q and Edge before 6.6.0QX. On Mk4, Mk5 and Q seeds have about 72 bits of entropy instead of 128, which is less severe but still serious. Standard and Edge are separate tracks, so an older Edge 6.x release is not necessarily fixed. TAPSIGNER, OPENDIME and SATSCARD are not affected. Updating the firmware does not repair a seed that already exists: seeds made before the fixed version must be replaced and funds moved, unless the seed was built with at least 50 independent, private dice rolls (then the dice entropy alone covers it; a strong, unique passphrase reduces but does not remove the risk). Published 2026-07-30; Coinkite's blog was updated through 2026-08-30.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "GIT",
+        "name": "https://github.com/Coldcard/firmware"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "4.0.1"
+            },
+            {
+              "fixed": "4.2.0"
+            }
+          ]
+        }
+      ],
+      "database_specific": {
+        "model": "Mk2/Mk3",
+        "last_affected_stated": "4.1.9"
+      }
+    },
+    {
+      "package": {
+        "ecosystem": "GIT",
+        "name": "https://github.com/Coldcard/firmware"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "5.6.0"
+            }
+          ]
+        }
+      ],
+      "database_specific": {
+        "model": "Mk4/Mk5 standard",
+        "range_note": "affected from the 2021 libNgU change; exact first version not stated (0 means unknown)"
+      }
+    },
+    {
+      "package": {
+        "ecosystem": "GIT",
+        "name": "https://github.com/Coldcard/firmware"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "1.5.0Q"
+            }
+          ]
+        }
+      ],
+      "database_specific": {
+        "model": "Q standard",
+        "range_note": "first affected version not stated (0 means unknown)"
+      }
+    },
+    {
+      "package": {
+        "ecosystem": "GIT",
+        "name": "https://github.com/Coldcard/firmware"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "6.6.0X"
+            }
+          ]
+        }
+      ],
+      "database_specific": {
+        "model": "Mk4/Mk5 Edge",
+        "range_note": "first affected version not stated (0 means unknown); do not assume an older 6.x Edge release is fixed"
+      }
+    },
+    {
+      "package": {
+        "ecosystem": "GIT",
+        "name": "https://github.com/Coldcard/firmware"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "6.6.0QX"
+            }
+          ]
+        }
+      ],
+      "database_specific": {
+        "model": "Q Edge",
+        "range_note": "first affected version not stated (0 means unknown)"
+      }
+    }
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://blog.coinkite.com/coldcard-mk3-seed-generation-warning/"
+    },
+    {
+      "type": "ARTICLE",
+      "url": "https://blog.coinkite.com/entropy-technical-backgrounder/"
+    },
+    {
+      "type": "WEB",
+      "url": "https://github.com/Coldcard/firmware/blob/master/README.md"
+    }
+  ],
+  "database_specific": {
+    "guard_dog": {
+      "conditions": [
+        {
+          "fact": "hardware_model",
+          "any_of": [
+            "Mk2",
+            "Mk3",
+            "Mk4",
+            "Mk5",
+            "Q"
+          ],
+          "required": true
+        },
+        {
+          "fact": "seed_generated_on_firmware_in_range",
+          "required": true,
+          "note": "the date or firmware the seed was created on matters, not the firmware running today"
+        },
+        {
+          "fact": "seed_built_with_50_or_more_dice_rolls",
+          "required": false,
+          "effect": "if true, not considered at risk from this bug alone"
+        }
+      ],
+      "conditions_format": "draft format, finalized in Phase 2.2",
+      "playbook": [
+        "Find out which Coldcard model you have and which firmware version created your seed (not the version you run now). Updating will not change an old seed.",
+        "If the seed was created on affected firmware without at least 50 private dice rolls, update the device to the fixed version for your model and track, generate a completely new seed, and move your funds to it (small test first).",
+        "A strong, unique passphrase lowers the immediate risk but does not repair the seed; migrate as soon as practical.",
+        "Keep the old backup until the move is confirmed. Guard Dog only advises; it never holds keys or moves funds."
+      ],
+      "source_checked": "2026-11-16"
+    },
+    "primary_source_kind": "vendor advisory blog and firmware README",
+    "no_cve": true,
+    "updating_is_not_enough": true
+  }
+}

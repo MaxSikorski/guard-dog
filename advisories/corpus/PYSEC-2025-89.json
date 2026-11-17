@@ -1,0 +1,95 @@
+{
+  "schema_version": "1.9.2",
+  "id": "PYSEC-2025-89",
+  "modified": "2026-11-16T00:00:00Z",
+  "published": "2025-11-02T00:00:00Z",
+  "aliases": [
+    "CVE-2025-65548"
+  ],
+  "summary": "Cashu Nutshell before 0.18.0: a mint does not limit the size of a spent token's preimage and can be filled with data",
+  "details": "NUT-14 lets Cashu tokens be locked with a hash of a secret value (a preimage). Nutshell before 0.18.0 does not check the size of the preimage when the token is spent, and the mint stores it. An attacker can use this to fill the mint's database and disk with arbitrary data, taking the mint down. Fixed in 0.18.0. The record carries CVE-2025-65548.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "PyPI",
+        "name": "cashu",
+        "purl": "pkg:pypi/cashu"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "0.18.0"
+            }
+          ]
+        }
+      ],
+      "database_specific": {
+        "range_note": "Start unknown: the source names no first affected version, and the OSV record's 0 is its standard placeholder. Affected until 0.18.0. The PyPI package is named cashu, not nutshell."
+      }
+    }
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://delvingbitcoin.org/t/public-disclosure-denial-of-service-using-htlc-in-cashu/2090"
+    },
+    {
+      "type": "WEB",
+      "url": "https://api.osv.dev/v1/vulns/PYSEC-2025-89"
+    },
+    {
+      "type": "WEB",
+      "url": "https://api.osv.dev/v1/vulns/CVE-2025-65548"
+    },
+    {
+      "type": "EVIDENCE",
+      "url": "https://github.com/cashubtc/nuts/blob/main/14.md"
+    },
+    {
+      "type": "FIX",
+      "url": "https://github.com/cashubtc/nutshell/pull/803"
+    },
+    {
+      "type": "WEB",
+      "url": "https://github.com/jamesob/delving-bitcoin-archive/blob/master/archive/rendered-topics/2025-11-November/2025-11-02-public-disclosure-denial-of-service-using-htlc-in-cashu-id2090.md"
+    }
+  ],
+  "database_specific": {
+    "guard_dog": {
+      "conditions": [
+        {
+          "fact": "service_running",
+          "service": "cashu-nutshell-mint"
+        },
+        {
+          "fact": "feature_enabled",
+          "service": "cashu-nutshell-mint",
+          "feature": "NUT-14 hash-locked tokens",
+          "required": false,
+          "note": "the source does not say whether the feature can be switched off"
+        },
+        {
+          "fact": "port_exposed_to_internet",
+          "required": false,
+          "note": "an exposure factor, not a requirement: anyone who can reach the mint and spend a token can try this, and a mint is normally public"
+        }
+      ],
+      "conditions_format": "draft format, finalized in Phase 2.2",
+      "playbook": [
+        "Check the Nutshell mint version (pip show cashu, or the container tag).",
+        "If it is older than 0.18.0, back up the mint's database, then upgrade the mint to 0.18.0 or later, as the disclosure advises.",
+        "If the upgrade runs into problems, contact the Cashu developers, as the disclosure suggests."
+      ],
+      "source_checked": "2026-11-16"
+    },
+    "primary_source_kind": "public disclosure post; OSV record exists",
+    "affected_party": "mint operators (not wallet users)",
+    "published_basis": "date of the public disclosure post (2025-11-02); the PYSEC and CVE records followed on 2025-12-08",
+    "primary_source_note": "The Delving Bitcoin post returned 404 when checked on 2026-11-16; it was read from the Delving Bitcoin archive copy that the OSV record links."
+  }
+}

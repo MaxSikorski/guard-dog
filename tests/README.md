@@ -21,6 +21,7 @@ cargo fmt --all --check && cargo clippy --locked --all-targets -- -D warnings &&
 | `ordinary_text_passes_through_unchanged` | same (property test) | Escaping never mangles ordinary text. |
 | `untrusted_text_cannot_escape_without_saying_so` | `crates/gd-core/tests/compile_fail.rs` with `tests/ui/*.rs` | Code that prints, formats, `to_string()`s, dereferences, `AsRef`s, `Borrow`s, compares with `==`, converts or reads the field of `Untrusted<T>` does not compile (8 cases). The expected compiler errors are in `tests/ui/*.stderr` and depend on the pinned Rust version. |
 | `version_names_the_release_and_its_source` | `crates/guard-dog/tests/version.rs` | `guard-dog --version` prints `guard-dog <version> (commit <full id>)` when the build was given `GD_GIT_COMMIT` (CI sets it), and `(development build)` otherwise. The expected text comes from the build's input, never from the baked-in value. |
+| `every_advisory_is_valid_osv_json` and 8 more checks | `crates/gd-core/tests/advisory_corpus.rs` (Judge B, corpus part) | The 23 advisories in `advisories/corpus/*.json`, read in sorted order with no network, are exactly the reviewed list in the test (deleting or adding a file fails), are valid against the vendored OSV schema (`advisories/schema/`) with date and web-address formats checked, are named after their `id`, have an `https` primary-source reference, a 2 to 4 step plain-English playbook, a real `source_checked` date and well-formed ranges, and say "unknown" on every unknown range start. Two mutation tests show the schema and these rules reject broken records. The expected-matches half of Judge B waits for Judge A's recorded setups. |
 
 ### Property-test seed
 
@@ -37,7 +38,7 @@ The property tests use a fixed seed by default, so the same commit gives the sam
 The judges measure outcomes from outside the code. They arrive next, each with a recorded baseline:
 
 - **Judge A, recorded real setups:** does Guard Dog find every service and its version?
-- **Judge B, historical advisories:** does it report every advisory that applies, and nothing that doesn't?
+- **Judge B, historical advisories:** does it report every advisory that applies, and nothing that doesn't? (The schema-checked corpus is in the table above; the matcher half arrives in Phase 2.)
 - **Judge C, egress capture:** does anything leave the box that shouldn't, including planted canary secrets?
 - **Judge D, injection corpus:** can hostile text in any channel make Guard Dog do or show anything? Running since Phase 0.7 (see below).
 

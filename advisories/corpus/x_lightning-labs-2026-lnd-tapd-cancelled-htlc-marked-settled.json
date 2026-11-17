@@ -1,0 +1,117 @@
+{
+  "schema_version": "1.9.2",
+  "id": "x_lightning-labs-2026-lnd-tapd-cancelled-htlc-marked-settled",
+  "modified": "2026-11-16T00:00:00Z",
+  "published": "2026-09-21T00:00:00Z",
+  "summary": "LND with Taproot Assets: an invoice can show as paid after its payment was actually sent back",
+  "details": "A Lightning Terminal node running tapd with the invoice HTLC interceptor enabled could record an invoice as settled even though the payment had been cancelled back to the sender. Two faults combine: tapd treated any payment carrying custom wire records as an asset payment, and lnd cancelled the payment on the wire but still marked the invoice settled in its database. Software or an operator reading the invoice state could release goods against money that never arrived; the sender's funds were not at risk. The lnd part affects any client of the HtlcModifier RPC on lnd 0.18.4 and 0.18.5. Fixed in lnd 0.19.0-beta and tapd 0.5.1; both fixes are needed, and Lightning Terminal 0.15.0-alpha is the first release that bundles both (0.14.0-alpha bundles tapd 0.5.0 and lnd 0.18.4-beta). The advisory item is dated 2026-09-21 and rated T1; no CVE listed.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "Go",
+        "name": "github.com/lightningnetwork/lnd"
+      },
+      "ranges": [
+        {
+          "type": "SEMVER",
+          "events": [
+            {
+              "introduced": "0.18.4-beta"
+            },
+            {
+              "fixed": "0.19.0-beta"
+            }
+          ]
+        }
+      ],
+      "database_specific": {
+        "range_note": "Source states lnd 0.18.4-beta to 0.18.5-beta are in scope for any HtlcModifier client (the RPC arrived in 0.18.4-beta), fixed in 0.19.0-beta. The tapd and Lightning Terminal sides are separate entries."
+      }
+    },
+    {
+      "package": {
+        "ecosystem": "Go",
+        "name": "github.com/lightninglabs/taproot-assets"
+      },
+      "ranges": [
+        {
+          "type": "SEMVER",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "0.5.1"
+            }
+          ]
+        }
+      ],
+      "database_specific": {
+        "range_note": "Source: tapd up to and including v0.5.0 is affected, patched in v0.5.1. Start unknown (0 is a placeholder)."
+      }
+    },
+    {
+      "package": {
+        "ecosystem": "Go",
+        "name": "github.com/lightninglabs/lightning-terminal"
+      },
+      "ranges": [
+        {
+          "type": "SEMVER",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "0.15.0-alpha"
+            }
+          ]
+        }
+      ],
+      "database_specific": {
+        "range_note": "Source: Lightning Terminal before v0.15.0-alpha is affected, patched in v0.15.0-alpha. Start unknown (0 is a placeholder)."
+      }
+    }
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://security.lightning.engineering/2026/09/21/lnd-tapd-cancelled-htlc-marked-settled.html"
+    },
+    {
+      "type": "FIX",
+      "url": "https://github.com/lightningnetwork/lnd/pull/9454"
+    }
+  ],
+  "database_specific": {
+    "guard_dog": {
+      "conditions": [
+        {
+          "fact": "service_running",
+          "service": "lnd"
+        },
+        {
+          "fact": "option_enabled",
+          "service": "tapd",
+          "option": "invoice HTLC interceptor (or any HtlcModifier RPC client)",
+          "required": true
+        },
+        {
+          "fact": "payment_state_trusted_for_fulfilment",
+          "required": false,
+          "note": "the harm is releasing goods or credit on a false 'paid' state"
+        }
+      ],
+      "conditions_format": "draft format, finalized in Phase 2.2",
+      "playbook": [
+        "Check whether you run Lightning Terminal or tapd with the invoice interceptor, or any program that uses lnd's HtlcModifier RPC, and the lnd and tapd versions.",
+        "Update lnd to 0.19.0-beta or later and tapd to 0.5.1 or later (both are needed); with Lightning Terminal, update to 0.15.0-alpha or later, which bundles both.",
+        "Until then, do not release goods or credit based only on invoice state; confirm the payment arrived in your balance."
+      ],
+      "source_checked": "2026-11-16"
+    },
+    "vendor_severity_tier": "T1",
+    "primary_source_kind": "vendor advisory site (Atom feed); no CVE",
+    "no_cve": true
+  }
+}
