@@ -4,15 +4,18 @@
 //! A description is `<tag>-<distance>-g<hash>`, optionally followed by a dirty
 //! marker. It is parsed from the right, so the tag may hold hyphens itself. The
 //! tag is a version; the distance and hash are evidence about one build, never a
-//! release: `1.1.2-148-g4cd3cf6` is neither `1.1.2` nor proved below `1.1.3`, and
-//! it must never reach a SemVer parser, where `148-g4cd3cf6` would read as a
-//! prerelease and sort it below `1.1.2`.
+//! release: `1.1.2-148-g4cd3cf6` is neither `1.1.2` nor proved below `1.1.3`. Only
+//! the tag, never the whole description, goes to the SemVer scheme, where
+//! `148-g4cd3cf6` would read as a prerelease and sort it below `1.1.2`.
 
-use std::cmp::Ordering;
 use std::fmt;
 
-use super::calver::{Dec, MAX_COMPONENTS, MAX_LEN};
+use super::semver::{SemVer, SemVerVersion, check_length};
 use super::{Candidate, VersionError, VersionScheme};
+
+/// A strfry release tag is a SemVer version, read by the SemVer scheme. Its
+/// identity is the SemVer one: the tag's own spelling (metadata included).
+pub type TagVersion = SemVerVersion;
 
 /// The commit part of a git description.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,9 +66,7 @@ pub(super) fn split_describe<'a>(
     raw: &'a str,
     markers: &[&str],
 ) -> Result<Split<'a>, VersionError> {
-    if raw.len() > MAX_LEN {
-        return Err(VersionError::TooLong);
-    }
+    check_length(raw)?;
     let mut rest = raw;
     let mut dirty = false;
     for marker in markers {
@@ -119,139 +120,16 @@ fn holds_a_description(s: &str) -> bool {
     })
 }
 
-/// One prerelease identifier: numeric ones sort below text ones.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Ident {
-    Num(Dec),
-    Text(String),
-}
-
-/// A strfry release tag: SemVer `X.Y.Z[-prerelease][+metadata]`.
-///
-/// A small private comparator for tags only, written here so this scheme does
-/// not wait for the SemVer scheme; it is to be unified with that scheme's
-/// parser once both are merged. Metadata is kept but ignored by `Ord`, and `Eq`
-/// agrees with `Ord`.
-#[derive(Clone, Debug)]
-pub struct TagVersion {
-    major: Dec,
-    minor: Dec,
-    patch: Dec,
-    pre: Option<Vec<Ident>>,
-    meta: Option<String>,
-}
-
-impl Ord for TagVersion {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.major
-            .cmp(&other.major)
-            .then_with(|| self.minor.cmp(&other.minor))
-            .then_with(|| self.patch.cmp(&other.patch))
-            .then_with(|| match (&self.pre, &other.pre) {
-                (None, None) => Ordering::Equal,
-                (Some(_), None) => Ordering::Less,
-                (None, Some(_)) => Ordering::Greater,
-                // Identifier by identifier; a shorter equal prefix is first.
-                (Some(a), Some(b)) => a.cmp(b),
-            })
-    }
-}
-
-impl PartialOrd for TagVersion {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl PartialEq for TagVersion {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
-    }
-}
-
-impl Eq for TagVersion {}
-
-/// The tag as written, with numbers normalized: `X.Y.Z[-pre][+metadata]`.
-impl fmt::Display for TagVersion {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)?;
-        if let Some(pre) = &self.pre {
-            let ids: Vec<String> = pre
-                .iter()
-                .map(|i| match i {
-                    Ident::Num(n) => n.to_string(),
-                    Ident::Text(t) => t.clone(),
-                })
-                .collect();
-            write!(f, "-{}", ids.join("."))?;
-        }
-        if let Some(m) = &self.meta {
-            write!(f, "+{m}")?;
-        }
-        Ok(())
-    }
-}
-
-fn identifier_chars(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-}
-
-/// Reads a strfry tag: strict SemVer, no leading `v`.
+/// Reads a strfry tag with the SemVer scheme: strict `X.Y.Z[-pre][+meta]`, no
+/// leading `v` (strfry's own tags have none, so a `v1.1.2` tag is refused until
+/// a real strfry record shows otherwise). A description hidden inside the
+/// tag, or CLN's `-modded` marker (which is not strfry's), is refused instead of
+/// being read as a prerelease.
 fn parse_tag(raw: &str) -> Result<TagVersion, VersionError> {
-    if raw.len() > MAX_LEN {
-        return Err(VersionError::TooLong);
-    }
-    if holds_a_description(raw) {
+    if holds_a_description(raw) || raw.ends_with("-modded") {
         return Err(VersionError::Malformed);
     }
-    let (rest, meta) = match raw.split_once('+') {
-        Some((r, m)) => (r, Some(m)),
-        None => (raw, None),
-    };
-    let (core, pre) = match rest.split_once('-') {
-        Some((c, p)) => (c, Some(p)),
-        None => (rest, None),
-    };
-    let plain = |t: &str| Dec::parse_plain(t).ok_or(VersionError::Malformed);
-    let numbers: Vec<&str> = core.split('.').collect();
-    let [major, minor, patch] = numbers.as_slice() else {
-        return Err(VersionError::Malformed);
-    };
-    let mut count = 3;
-    let pre = match pre {
-        None => None,
-        Some(p) => {
-            let mut ids = Vec::new();
-            for id in p.split('.') {
-                if !identifier_chars(id) {
-                    return Err(VersionError::Malformed);
-                }
-                ids.push(if id.bytes().all(|b| b.is_ascii_digit()) {
-                    Ident::Num(plain(id)?)
-                } else {
-                    Ident::Text(id.to_string())
-                });
-            }
-            count += ids.len();
-            Some(ids)
-        }
-    };
-    if let Some(m) = meta {
-        if !m.split('.').all(identifier_chars) {
-            return Err(VersionError::Malformed);
-        }
-        count += m.split('.').count();
-    }
-    if count > MAX_COMPONENTS {
-        return Err(VersionError::TooLong);
-    }
-    Ok(TagVersion {
-        major: plain(major)?,
-        minor: plain(minor)?,
-        patch: plain(patch)?,
-        pre,
-        meta: meta.map(str::to_string),
-    })
+    SemVer.parse(raw)
 }
 
 /// strfry's version scheme: a SemVer tag plus separate commit evidence.
@@ -292,6 +170,10 @@ impl VersionScheme for GitDescribe {
         parse_tag(split.tag)
     }
 
+    /// Even a bare tag is an interval here (unlike CLN's, whose tarball and
+    /// `getinfo` builds report the release itself): strfry's text comes from
+    /// `git describe`, and a build can be a commit after the tag it names.
+    ///
     /// A clean description descends from its tag: it is at or after the tag and
     /// nothing more is known (distance zero equals the tag only with a verified
     /// tag-to-commit mapping, which is not available; a bare tag has no commit at

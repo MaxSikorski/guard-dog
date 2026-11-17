@@ -11,82 +11,13 @@
 use std::cmp::Ordering;
 use std::fmt;
 
+use super::num::{MAX_COMPONENTS, Num};
 use super::{Candidate, VersionError, VersionScheme};
 use crate::MAX_VERSION_BYTES;
 
-/// Most dot-separated identifiers accepted in a prerelease or in metadata.
-pub(crate) const MAX_COMPONENTS: usize = 64;
-
-/// A non-negative decimal number with no leading zeros (`0` is `"0"`).
-/// Compared by length, then bytes.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Num(String);
-
-impl Num {
-    pub(crate) fn zero() -> Self {
-        Self("0".to_string())
-    }
-
-    pub(crate) fn one() -> Self {
-        Self("1".to_string())
-    }
-
-    /// This number plus one.
-    pub(crate) fn plus_one(&self) -> Self {
-        let mut digits: Vec<u8> = self.0.bytes().collect();
-        let mut i = digits.len();
-        loop {
-            match i.checked_sub(1) {
-                Some(j) => {
-                    if let Some(d) = digits.get_mut(j) {
-                        if *d == b'9' {
-                            *d = b'0';
-                        } else {
-                            *d += 1;
-                            break;
-                        }
-                    }
-                    i = j;
-                }
-                None => {
-                    digits.insert(0, b'1');
-                    break;
-                }
-            }
-        }
-        Self(String::from_utf8_lossy(&digits).into_owned())
-    }
-}
-
-impl Ord for Num {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.0
-            .len()
-            .cmp(&other.0.len())
-            .then_with(|| self.0.as_bytes().cmp(other.0.as_bytes()))
-    }
-}
-impl PartialOrd for Num {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl fmt::Display for Num {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 /// Reads ASCII digits only, nonempty, with no leading zero.
 pub(crate) fn parse_num(s: &str) -> Result<Num, VersionError> {
-    let bytes = s.as_bytes();
-    if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
-        return Err(VersionError::Malformed);
-    }
-    if bytes.len() > 1 && bytes.first() == Some(&b'0') {
-        return Err(VersionError::Malformed);
-    }
-    Ok(Num(s.to_string()))
+    Num::strict(s).ok_or(VersionError::Malformed)
 }
 
 /// Refuses over-long input before any other work.

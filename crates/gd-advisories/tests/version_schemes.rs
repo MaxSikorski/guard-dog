@@ -22,9 +22,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use gd_advisories::{
-    Advisory, Calver, Candidate, ClnVersion, Commit, GitDescribe, Place, Source, TagVersion,
-    UnknownReason, VersionError, VersionEvidence, VersionScheme, evaluate_entry, parse_advisory,
-    parse_advisory_from,
+    Advisory, Calver, Candidate, ClnVersion, Commit, GitDescribe, Place, SemVer, Source,
+    TagVersion, UnknownReason, VersionError, VersionEvidence, VersionScheme, evaluate_entry,
+    parse_advisory, parse_advisory_from,
 };
 use proptest::prelude::*;
 use serde_json::{Value, json};
@@ -374,19 +374,37 @@ fn cln_identity_is_the_canonical_form() {
     assert_eq!(Calver.same_identity("v0.10.2", "0.10.2"), Some(true));
     assert_eq!(Calver.same_identity("24.13", "24.11"), None);
     assert_eq!(Calver.same_identity("24.11", "junk"), None);
-    // Describe forms keep every field in their identity.
+    // A describe string is not a release: no identity answer, never "different".
     let a = "v24.11-12-gabc1234";
-    assert_eq!(Calver.same_identity(a, a), Some(true));
-    assert_eq!(Calver.same_identity(a, "v24.11-12-gabc1235"), Some(false));
-    assert_eq!(Calver.same_identity(a, "v24.11-13-gabc1234"), Some(false));
-    assert_eq!(Calver.same_identity(a, "v24.11"), Some(false));
-    assert_eq!(
-        Calver.same_identity(a, "v24.11-12-gabc1234-modded"),
-        Some(false)
-    );
+    assert_eq!(Calver.same_identity(a, a), None);
+    assert_eq!(Calver.same_identity(a, "v24.11"), None);
+    assert_eq!(Calver.same_identity("v24.11", a), None);
+    assert_eq!(Calver.same_identity("v24.11", "v24.11-modded"), None);
     assert_eq!(
         Calver.same_identity("v24.08.2-modded", "24.08.2-modded"),
-        Some(true)
+        None
+    );
+}
+
+#[test]
+fn cln_a_describe_or_modded_listed_version_is_never_a_miss() {
+    // Installed v24.11 against a list that names a describe or modded build of
+    // it: the scheme cannot say they differ, and the evaluator must not call
+    // that a miss.
+    for listed in ["v24.11-0-gabc1234", "v24.11-modded", "v24.11-5-gabc1234"] {
+        let adv = git_advisory(json!([]), json!([listed]));
+        let e = evaluate_entry(&Calver, &adv, 0, Some("v24.11"));
+        assert_eq!(
+            reason(&e),
+            UnknownReason::UnreadableListedVersion,
+            "{listed}"
+        );
+    }
+    // A readable listed tag that differs is still a clean miss.
+    let adv = git_advisory(json!([]), json!(["v24.11.1", "v25.02"]));
+    assert_eq!(
+        evaluate_entry(&Calver, &adv, 0, Some("v24.11")),
+        VersionEvidence::OutOfRange
     );
 }
 
@@ -1473,4 +1491,50 @@ fn mutant_cln_legacy_misordered_is_caught() {
     );
     let err = cln_legacy_check(&Lexical).unwrap_err();
     assert!(err.starts_with("expected"), "{err}");
+}
+
+// ------------------------------------------------ fix round 1: describe tags
+
+#[test]
+fn describe_refuses_a_modded_marker_everywhere() {
+    // `-modded` is CLN's marker. strfry's reader must not read it as a SemVer
+    // prerelease named `modded`.
+    for s in [
+        "1.1.2-modded",
+        "1.1.2-148-g4cd3cf6-modded",
+        "1.2.0-rc.1-modded",
+    ] {
+        assert!(GitDescribe.parse(s).is_err(), "parse {s}");
+        assert!(GitDescribe.parse_describe(s).is_err(), "parse_describe {s}");
+        assert!(GitDescribe.candidate(s).is_err(), "candidate {s}");
+        assert_eq!(GitDescribe.same_identity(s, s), None, "identity {s}");
+    }
+    // The dirty marker keeps its own spelling in identity: a dirty build is
+    // neither the clean build nor a modded one.
+    let a = "1.1.2-148-g4cd3cf6";
+    assert_eq!(
+        GitDescribe.same_identity(a, "1.1.2-148-g4cd3cf6-dirty"),
+        Some(false)
+    );
+    assert_eq!(
+        GitDescribe.same_identity("1.1.2-148-g4cd3cf6-dirty", "1.1.2-148-g4cd3cf6-dirty"),
+        Some(true)
+    );
+}
+
+#[test]
+fn describe_tags_are_read_by_the_semver_scheme() {
+    for s in ["1.1.2", "1.2.0-rc.1", "1.0.0+a", "1.0.0-alpha.1+b.2"] {
+        let via_describe = GitDescribe.parse(s).unwrap();
+        let via_semver = SemVer.parse(s).unwrap();
+        // Same type, same order, and the identity is the raw spelling.
+        assert_eq!(via_describe.cmp(&via_semver), Ordering::Equal, "{s}");
+        assert_eq!(via_describe.identity(), s);
+        assert_eq!(via_describe.raw(), s);
+    }
+    // What SemVer refuses, the tag reader refuses (leading zeros, a `v`).
+    for s in ["1.01.2", "v1.1.2", "1.1", "1.1.2.3"] {
+        assert!(GitDescribe.parse(s).is_err(), "{s}");
+        assert!(SemVer.parse(s).is_err(), "{s}");
+    }
 }

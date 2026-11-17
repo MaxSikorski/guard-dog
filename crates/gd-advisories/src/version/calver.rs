@@ -9,75 +9,10 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use super::describe::{Described, identity_text, split_describe};
+use super::describe::{Described, split_describe};
+use super::num::Num;
+use super::semver::check_length;
 use super::{Candidate, VersionError, VersionScheme};
-
-/// The longest version string any scheme reads, in bytes (design 2.1, section 1).
-pub(super) const MAX_LEN: usize = 256;
-/// The most dot-separated components any scheme reads (design 2.1, section 1).
-pub(super) const MAX_COMPONENTS: usize = 64;
-
-/// A non-negative decimal number of any size, kept as normalized digits (no
-/// leading zeros) and compared by length, then bytes. No overflow, no bigint
-/// dependency.
-///
-/// Shared by the schemes in this directory; it is to be unified with the
-/// SemVer and Bitcoin Core parsers' own copy once those land.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Dec(String);
-
-impl Dec {
-    /// ASCII digits only, any leading zeros; the stored form has none.
-    pub(super) fn parse(s: &str) -> Option<Self> {
-        if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        let t = s.trim_start_matches('0');
-        Some(Self(if t.is_empty() {
-            "0".to_string()
-        } else {
-            t.to_string()
-        }))
-    }
-
-    /// Like [`Dec::parse`], but a leading zero (other than `0` alone) is refused.
-    pub(super) fn parse_plain(s: &str) -> Option<Self> {
-        if s.len() > 1 && s.starts_with('0') {
-            None
-        } else {
-            Self::parse(s)
-        }
-    }
-
-    pub(super) fn is_zero(&self) -> bool {
-        self.0 == "0"
-    }
-
-    pub(super) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Ord for Dec {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.0
-            .len()
-            .cmp(&other.0.len())
-            .then_with(|| self.0.cmp(&other.0))
-    }
-}
-
-impl PartialOrd for Dec {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl fmt::Display for Dec {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
 
 /// Core Lightning's version scheme.
 ///
@@ -96,13 +31,13 @@ pub struct ClnVersion {
     /// Legacy `0.x.y` releases sit below every calendar release.
     legacy: bool,
     /// Legacy: `x`. Calendar: the two-digit year.
-    a: Dec,
+    a: Num,
     /// Legacy: `y`. Calendar: the month, 1 to 12.
-    b: Dec,
+    b: Num,
     /// Calendar: the patch number (0 when not written). Legacy: 0.
-    c: Dec,
+    c: Num,
     /// The release candidate number, if any.
-    rc: Option<Dec>,
+    rc: Option<Num>,
 }
 
 impl ClnVersion {
@@ -170,19 +105,14 @@ impl fmt::Display for ClnVersion {
 /// Reads one release tag: optional `v`, then legacy or calendar, then an
 /// optional `rcN`. The whole string, or nothing.
 fn parse_tag(raw: &str) -> Result<ClnVersion, VersionError> {
-    if raw.len() > MAX_LEN {
-        return Err(VersionError::TooLong);
-    }
+    check_length(raw)?;
     let s = raw.strip_prefix('v').unwrap_or(raw);
     let (core, rc) = match s.split_once("rc") {
-        Some((core, rc)) => (
-            core,
-            Some(Dec::parse_plain(rc).ok_or(VersionError::Malformed)?),
-        ),
+        Some((core, rc)) => (core, Some(Num::strict(rc).ok_or(VersionError::Malformed)?)),
         None => (s, None),
     };
     let parts: Vec<&str> = core.split('.').collect();
-    let plain = |t: &str| Dec::parse_plain(t).ok_or(VersionError::Malformed);
+    let plain = |t: &str| Num::strict(t).ok_or(VersionError::Malformed);
     match parts.as_slice() {
         ["0", x, y] => Ok(ClnVersion {
             legacy: true,
@@ -201,8 +131,8 @@ fn parse_tag(raw: &str) -> Result<ClnVersion, VersionError> {
             }
             Ok(ClnVersion {
                 legacy: false,
-                a: Dec::parse(yy).ok_or(VersionError::Malformed)?,
-                b: Dec::parse(mm).ok_or(VersionError::Malformed)?,
+                a: Num::trimmed(yy).ok_or(VersionError::Malformed)?,
+                b: Num::trimmed(mm).ok_or(VersionError::Malformed)?,
                 c: patch,
                 rc,
             })
@@ -246,7 +176,10 @@ impl VersionScheme for Calver {
         parse_tag(raw)
     }
 
-    /// A release tag is exact. A clean describe string descends from its tag
+    /// A release tag is exact. (Why a bare CLN tag is exact while strfry's bare
+    /// tag is an interval: the release tarball and `getinfo` report the release
+    /// itself, whereas strfry's version comes from `git describe`, which says
+    /// only that the build is at or after its tag.) A clean describe string descends from its tag
     /// (an interval, whatever its distance: distance zero equals the tag only
     /// with a verified tag-to-commit mapping, which does not exist). A modded or
     /// dirty build gives nothing.
@@ -264,12 +197,13 @@ impl VersionScheme for Calver {
         })
     }
 
-    /// Identity is the canonical text (`v24.11` is `24.11.0`), and for a
-    /// described build every field: tag, distance, hash and dirty marker.
+    /// Identity is the canonical text of a release tag (`v24.11` is `24.11.0`).
+    /// A describe string is not a release: if either side is one (or anything
+    /// else `parse` refuses) the answer is `None`, never "different".
     fn same_identity(&self, a: &str, b: &str) -> Option<bool> {
-        let a = self.parse_describe(a).ok()?;
-        let b = self.parse_describe(b).ok()?;
-        Some(identity_text(&a) == identity_text(&b))
+        let a = parse_tag(a).ok()?;
+        let b = parse_tag(b).ok()?;
+        Some(a.to_string() == b.to_string())
     }
 
     fn reads_semver_ranges(&self) -> bool {

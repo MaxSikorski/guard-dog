@@ -7,11 +7,19 @@
 //! `c`, `pre`, `preview`, `r` and `rev`, omitted numbers (zero), and the
 //! implicit post-release (`1.0-1`). Ordering is version ordering, not pip's
 //! specifier filtering.
+//!
+//! It accepts a strict subset of what `packaging` accepts: only ASCII whitespace
+//! is trimmed (Python's `strip` also trims Unicode whitespace), and only ASCII
+//! letters match (Python's case-insensitive matching also lets the Kelvin sign
+//! stand for `k` and the long s for `s`). Those inputs are refused, never
+//! guessed; `tests/pep440.rs` holds refusal vectors for them. Every string this
+//! scheme accepts reads the same as in `packaging`.
 
 use std::cmp::Ordering;
 use std::fmt;
 
-use super::calver::{Dec, MAX_COMPONENTS, MAX_LEN};
+use super::num::{MAX_COMPONENTS, Num};
+use super::semver::check_length;
 use super::{VersionError, VersionScheme};
 
 /// The kind of a pre-release, in order.
@@ -36,7 +44,7 @@ impl PreKind {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum LocalSegment {
     Text(String),
-    Num(Dec),
+    Num(Num),
 }
 
 /// A missing pre-release is below everything for a dev-only release and above
@@ -44,14 +52,14 @@ enum LocalSegment {
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum PreKey<'a> {
     Below,
-    Pre(PreKind, &'a Dec),
+    Pre(PreKind, &'a Num),
     Above,
 }
 
 /// A missing dev number is above every number.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum DevKey<'a> {
-    Num(&'a Dec),
+    Num(&'a Num),
     Absent,
 }
 
@@ -67,11 +75,11 @@ pub struct Pep440;
 /// [`Pep440::same_identity`].
 #[derive(Clone, Debug)]
 pub struct Pep440Version {
-    epoch: Dec,
-    release: Vec<Dec>,
-    pre: Option<(PreKind, Dec)>,
-    post: Option<Dec>,
-    dev: Option<Dec>,
+    epoch: Num,
+    release: Vec<Num>,
+    pre: Option<(PreKind, Num)>,
+    post: Option<Num>,
+    dev: Option<Num>,
     local: Option<Vec<LocalSegment>>,
 }
 
@@ -85,7 +93,7 @@ impl Pep440Version {
     /// The release numbers as written, with leading zeros removed.
     #[must_use]
     pub fn release(&self) -> Vec<&str> {
-        self.release.iter().map(Dec::as_str).collect()
+        self.release.iter().map(Num::as_str).collect()
     }
 
     /// The pre-release as its normalized letters (`a`, `b` or `rc`) and number.
@@ -97,13 +105,13 @@ impl Pep440Version {
     /// The post-release number.
     #[must_use]
     pub fn post(&self) -> Option<&str> {
-        self.post.as_ref().map(Dec::as_str)
+        self.post.as_ref().map(Num::as_str)
     }
 
     /// The dev-release number.
     #[must_use]
     pub fn dev(&self) -> Option<&str> {
-        self.dev.as_ref().map(Dec::as_str)
+        self.dev.as_ref().map(Num::as_str)
     }
 
     /// The normalized local label (lowercase, dot-separated, numbers without
@@ -134,9 +142,9 @@ impl Pep440Version {
     }
 
     /// The release without its trailing zeros: `1.0` and `1.0.0` compare equal.
-    fn trimmed_release(&self) -> &[Dec] {
+    fn trimmed_release(&self) -> &[Num] {
         let mut end = self.release.len();
-        while end > 0 && self.release.get(end - 1).is_some_and(Dec::is_zero) {
+        while end > 0 && self.release.get(end - 1).is_some_and(Num::is_zero) {
             end -= 1;
         }
         self.release.get(..end).unwrap_or_default()
@@ -280,14 +288,12 @@ const PRE_LABELS: [(&str, PreKind); 8] = [
 
 const POST_LABELS: [&str; 3] = ["post", "rev", "r"];
 
-fn number(d: &str) -> Result<Dec, VersionError> {
-    Dec::parse(d).ok_or(VersionError::Malformed)
+fn number(d: &str) -> Result<Num, VersionError> {
+    Num::trimmed(d).ok_or(VersionError::Malformed)
 }
 
 fn parse_version(raw: &str) -> Result<Pep440Version, VersionError> {
-    if raw.len() > MAX_LEN {
-        return Err(VersionError::TooLong);
-    }
+    check_length(raw)?;
     let lower = raw.trim_ascii().to_ascii_lowercase();
     let mut c = Cursor { s: &lower, i: 0 };
 
@@ -369,7 +375,7 @@ fn parse_version(raw: &str) -> Result<Pep440Version, VersionError> {
         let mut segments = Vec::new();
         loop {
             let seg = c.alphanumerics().ok_or(VersionError::Malformed)?;
-            segments.push(match Dec::parse(seg) {
+            segments.push(match Num::trimmed(seg) {
                 Some(n) => LocalSegment::Num(n),
                 None => LocalSegment::Text(seg.to_string()),
             });
@@ -411,6 +417,30 @@ impl VersionScheme for Pep440 {
         let a = parse_version(a).ok()?;
         let b = parse_version(b).ok()?;
         Some(a.to_string() == b.to_string())
+    }
+
+    /// A boundary cannot carry a local label: `1.0+abc` as `introduced` would
+    /// sit above the public `1.0` that PEP 440 matching treats as the same
+    /// release, so it is refused and the range is `Unknown`.
+    fn parse_boundary(&self, raw: &str) -> Result<Pep440Version, VersionError> {
+        let v = parse_version(raw)?;
+        if v.local.is_some() {
+            return Err(VersionError::Malformed);
+        }
+        Ok(v)
+    }
+
+    /// Precedence equality as PEP 440 matching sees it: when the listed version
+    /// has no local label, the installed version's label is ignored
+    /// (`0.16.0+umbrel1` is a build of `0.16.0`).
+    fn same_version(&self, installed: &Pep440Version, listed: &str) -> Option<bool> {
+        let l = parse_version(listed).ok()?;
+        if l.local.is_none() && installed.local.is_some() {
+            let mut stripped = installed.clone();
+            stripped.local = None;
+            return Some(l == stripped);
+        }
+        Some(l == *installed)
     }
 
     fn reads_semver_ranges(&self) -> bool {

@@ -664,10 +664,12 @@ fn pep_ranges_lists_and_scheme_gates() {
     let r = r#"[{"introduced":"0"},{"fixed":"1!0"}]"#;
     assert_eq!(kind(&ev(r, "9999.0")), "in-range");
     assert_eq!(kind(&ev(r, "1!0")), "out-of-range");
-    // Local labels: introduced inclusive at the public version.
-    let r = r#"[{"introduced":"1.0+abc"},{"fixed":"2.0"}]"#;
-    assert_eq!(kind(&ev(r, "1.0")), "out-of-range");
+    // A local label on a boundary is refused (see
+    // `a_local_label_on_a_boundary_is_unreadable`); on the installed version it
+    // is fine.
+    let r = r#"[{"introduced":"1.0"},{"fixed":"2.0"}]"#;
     assert_eq!(kind(&ev(r, "1.0+abd")), "in-range");
+    assert_eq!(kind(&ev(r, "2.0+abd")), "out-of-range");
 
     // A list identity: the same release spelled another way is a hit; equal by
     // order but written differently is not a hit and not a miss.
@@ -1102,4 +1104,94 @@ fn mutants_dropping_an_epoch_local_post_or_dev_are_caught() {
     }
     // The rebuild itself is faithful when nothing is dropped from a plain version.
     assert_eq!(without(&p("1.0"), Part::Epoch), "1.0");
+}
+
+// ------------------------------------------------ local labels (fix round 1)
+
+#[test]
+fn a_local_build_of_a_listed_public_version_is_never_a_miss() {
+    // Installed `0.16.0+umbrel1` against a list naming `0.16.0`: PEP 440 matching
+    // ignores the installed label, so this is a spelling question, not a miss.
+    let adv = pypi_advisory(json!([]), json!(["0.16.0"]));
+    assert_eq!(
+        reason(&evaluate_entry(&Pep440, &adv, 0, Some("0.16.0+umbrel1"))),
+        UnknownReason::SameVersionDifferentSpelling
+    );
+    // A different public version is still a miss.
+    assert_eq!(
+        evaluate_entry(&Pep440, &adv, 0, Some("0.16.1+umbrel1")),
+        VersionEvidence::OutOfRange
+    );
+    // The same label on both sides is the same identity, a hit.
+    let adv = pypi_advisory(json!([]), json!(["0.16.0+umbrel1"]));
+    assert!(matches!(
+        evaluate_entry(&Pep440, &adv, 0, Some("0.16.0+umbrel1")),
+        VersionEvidence::InRange(_)
+    ));
+    // A listed label that differs from the installed one is a miss (both are
+    // local builds of one release, but not the same build).
+    assert_eq!(
+        evaluate_entry(&Pep440, &adv, 0, Some("0.16.0+umbrel2")),
+        VersionEvidence::OutOfRange
+    );
+    // The hook itself.
+    let v = p("0.16.0+umbrel1");
+    assert_eq!(Pep440.same_version(&v, "0.16.0"), Some(true));
+    assert_eq!(Pep440.same_version(&v, "0.16.1"), Some(false));
+    assert_eq!(Pep440.same_version(&v, "0.16.0+other"), Some(false));
+    assert_eq!(Pep440.same_version(&v, "junk"), None);
+}
+
+#[test]
+fn a_local_label_on_a_boundary_is_unreadable() {
+    for (events, want) in [
+        (
+            r#"[{"introduced":"1.0+abc"},{"fixed":"2.0"}]"#,
+            UnknownReason::UnparseableBoundary,
+        ),
+        (
+            r#"[{"introduced":"1.0"},{"fixed":"2.0+abc"}]"#,
+            UnknownReason::UnparseableBoundary,
+        ),
+        (
+            r#"[{"introduced":"1.0"},{"last_affected":"2.0+abc"}]"#,
+            UnknownReason::UnparseableBoundary,
+        ),
+        (
+            r#"[{"introduced":"1.0"},{"limit":"3.0+abc"}]"#,
+            UnknownReason::UnparseableLimit,
+        ),
+    ] {
+        for installed in ["1.0", "1.5", "2.0"] {
+            assert_eq!(reason(&ev(events, installed)), want, "{events} {installed}");
+        }
+    }
+    // Without a label the same shapes are read.
+    assert_eq!(
+        kind(&ev(r#"[{"introduced":"1.0"},{"fixed":"2.0"}]"#, "1.0")),
+        "in-range"
+    );
+}
+
+#[test]
+fn unicode_whitespace_and_case_folding_tricks_are_refused() {
+    // `packaging` accepts these (Unicode `strip`, Unicode case folding); this
+    // scheme accepts a strict subset and refuses them.
+    for s in [
+        "\u{a0}1.0",
+        "1.0\u{a0}",
+        "\u{2003}1.0\u{2003}",
+        "\u{3000}1.0",
+        "1.0.po\u{17f}t1",
+        "1.0+\u{212a}",
+        "1.0+a\u{212a}",
+    ] {
+        assert_eq!(
+            Pep440.parse(s).err(),
+            Some(VersionError::Malformed),
+            "{s:?}"
+        );
+    }
+    // Plain ASCII whitespace is still trimmed.
+    assert!(Pep440.parse(" \t1.0\r\n").is_ok());
 }

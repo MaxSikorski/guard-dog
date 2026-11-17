@@ -11,6 +11,7 @@ mod bitcoin;
 mod calver;
 mod channel;
 mod describe;
+mod num;
 mod pep440;
 mod semver;
 
@@ -88,6 +89,17 @@ pub trait VersionScheme {
 
     /// Reads one version string.
     fn parse(&self, raw: &str) -> Result<Self::Version, VersionError>;
+
+    /// Reads an advisory's range boundary (`introduced`, `fixed`,
+    /// `last_affected` or a limit). The default is [`VersionScheme::parse`]; a
+    /// scheme overrides it to refuse a version that is fine as an installed or
+    /// listed value but cannot mark a boundary (PEP 440's local labels).
+    ///
+    /// # Errors
+    /// The same as `parse`; a refused boundary makes its range `Unknown`.
+    fn parse_boundary(&self, raw: &str) -> Result<Self::Version, VersionError> {
+        self.parse(raw)
+    }
 
     /// Reads the installed version.
     fn candidate(&self, raw: &str) -> Result<Candidate<Self::Version>, VersionError> {

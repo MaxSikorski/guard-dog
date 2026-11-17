@@ -12,7 +12,8 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use super::semver::{Num, check_length, parse_num};
+use super::num::Num;
+use super::semver::{check_length, parse_num};
 use super::{Candidate, VersionError, VersionScheme};
 
 /// Whether the installed value's source would have shown a release candidate.

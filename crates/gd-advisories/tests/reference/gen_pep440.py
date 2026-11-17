@@ -62,7 +62,12 @@ INPUTS = [
     "18446744073709551616!1.0",
     # refused
     "", " ", "v", "1.", ".1", "1..0", "1.0+", "1.0+a..b", "1.0+a.", "1!",
-    "!1.0", "a1", "1.0.0-", "1.0 1", "1.0xyz", "1.0.1a-", "vv1.0", "1.0++a",
+    "!1.0", "a1", "1.0.0-", "1.0 1", "1.0xyz",
+    # "1.0.1a-" is NOT refused: like "1.0a-" above, a separator after a label
+    # with no number is accepted (it reads as 1.0.1a0). It sits here only so
+    # the recorded vector order stays unchanged.
+    "1.0.1a-",
+    "vv1.0", "1.0++a",
     "1.0.post1.post2", "1.0.dev1.dev2", "1.0a1a2", "1.0-a-b", "1.0+a b",
     "1,0", "١.٠", "1.0é", "1_0", "1.0.dev1.post1", "1.0.post1a1",
 ]

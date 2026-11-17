@@ -8,3 +8,5 @@
 - Specification: [PEP 440](https://peps.python.org/pep-0440/) and [version specifiers](https://packaging.python.org/en/latest/specifications/version-specifiers/).
 
 Generation is a development step. The tests read only the committed JSON; no Python runs at test time, and no new runtime package exists. To regenerate on purpose, change the inputs or the pin in the script, run the command above, review the diff, and commit the script and the output together.
+
+The scheme accepts a strict subset of `packaging`: Unicode whitespace around a version, the Kelvin sign and the long s are refused (`unicode_whitespace_and_case_folding_tricks_are_refused`, which has no recorded vectors, since `packaging` would accept them).
