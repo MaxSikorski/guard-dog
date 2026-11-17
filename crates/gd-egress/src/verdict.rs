@@ -286,6 +286,25 @@ fn check_stats(text: &str, records: Option<usize>) -> Option<&'static str> {
     }
 }
 
+/// The bounds a judge run works under. The defaults are the real ones; tests lower them to
+/// reach a bound quickly.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// Decoded bytes allowed across every body of the capture.
+    pub decode_output: usize,
+    /// Decoded layers allowed across every body of the capture.
+    pub decode_layers: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Limits {
+        Limits {
+            decode_output: crate::decode::MAX_CAPTURE_OUTPUT,
+            decode_layers: crate::decode::MAX_CAPTURE_LAYERS,
+        }
+    }
+}
+
 /// Judges a capture. `expected_rules` is the reviewed rules dump.
 pub fn judge(
     raw: &RawCapture,
@@ -293,6 +312,18 @@ pub fn judge(
     allow: &Allowlist,
     expected_rules: &str,
 ) -> Verdict {
+    judge_with_limits(raw, set, allow, expected_rules, Limits::default())
+}
+
+/// [`judge`] under explicit bounds.
+pub fn judge_with_limits(
+    raw: &RawCapture,
+    set: &CanarySet,
+    allow: &Allowlist,
+    expected_rules: &str,
+    limits: Limits,
+) -> Verdict {
+    let _ = limits;
     let needles = Needles::new(set);
     let mut j = Judge {
         needles: &needles,

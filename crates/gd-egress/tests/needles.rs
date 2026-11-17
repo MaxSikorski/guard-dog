@@ -8,6 +8,8 @@
     clippy::panic
 )]
 
+mod support;
+
 use data_encoding::{BASE32_NOPAD, BASE64, BASE64URL, HEXLOWER};
 use gd_egress::canary::{Class, generate};
 use gd_egress::needle::{HitKind, Needles};
@@ -699,4 +701,150 @@ fn seed_words_as_four_letter_prefixes_and_seedqr_digits_are_found() {
     assert!(classes_found(&needles, &broken).is_empty());
     let other_words: Vec<&str> = other_phrase.split(' ').collect();
     assert!(classes_found(&needles, digits(&other_words).as_bytes()).is_empty());
+}
+
+/// A seed whose nsec key has small bytes (so unpadded hex differs) and bytes above 0x7f.
+fn set_with_small_and_high_bytes() -> gd_egress::canary::CanarySet {
+    (1u64..)
+        .map(generate)
+        .find(|s| {
+            let key = key_bytes(s, Class::Nsec);
+            key.iter().filter(|b| **b < 0x10).count() >= 3
+                && key.iter().filter(|b| **b >= 0x80).count() >= 3
+        })
+        .unwrap()
+}
+
+#[test]
+fn byte_lists_as_real_formatters_print_them_are_found() {
+    let set = set_with_small_and_high_bytes();
+    let needles = Needles::new(&set);
+    let join = |bytes: &[u8], each: &dyn Fn(u8) -> String, sep: &str| {
+        bytes.iter().map(|b| each(*b)).collect::<Vec<_>>().join(sep)
+    };
+    for class in [
+        Class::Nsec,
+        Class::SeedPhrase,
+        Class::Macaroon,
+        Class::ClnRune,
+        Class::Onion,
+        Class::NodePubkey,
+    ] {
+        let bytes = key_bytes(&set, class);
+        let rows = bytes
+            .chunks(4)
+            .map(|c| format!("[{}]", join(c, &|b| b.to_string(), ",")))
+            .collect::<Vec<_>>()
+            .join(",");
+        let json_escapes: String = bytes.iter().map(|b| format!("\\u{b:04x}")).collect();
+        let forms = [
+            ("rust {:x?}", format!("{bytes:x?}")),
+            ("rust {:#x?}", format!("{bytes:#x?}")),
+            ("rust {:X?}", format!("{bytes:X?}")),
+            (
+                "python hex()",
+                format!("[{}]", join(&bytes, &|b| format!("{b:#x}"), ", ")),
+            ),
+            (
+                "java signed",
+                format!("[{}]", join(&bytes, &|b| (b as i8).to_string(), ", ")),
+            ),
+            ("python repr", support::python_bytes_repr(&bytes)),
+            ("rows of four", format!("[{rows}]")),
+            (
+                "typed array",
+                format!(
+                    "Uint8Array({}) [ {} ]",
+                    bytes.len(),
+                    join(&bytes, &|b| b.to_string(), ", ")
+                ),
+            ),
+            ("json escapes", format!("{{\"k\":\"{json_escapes}\"}}")),
+        ];
+        for (label, text) in forms {
+            assert!(
+                classes_found(&needles, text.as_bytes()).contains(&class),
+                "{} as {label}: {text}",
+                class.name()
+            );
+        }
+        // Twins: a byte changed, or only a few bytes.
+        let mut changed = bytes.clone();
+        let last = changed.len() - 1;
+        changed[last] ^= 0x55;
+        let mut twins = vec![
+            format!("{:x?}", &bytes[..6]),
+            support::python_bytes_repr(&bytes[..6]),
+        ];
+        if !matches!(class, Class::Macaroon | Class::NodePubkey) {
+            twins.extend([
+                format!("{changed:x?}"),
+                support::python_bytes_repr(&changed),
+                format!("[{}]", join(&changed, &|b| (b as i8).to_string(), ", ")),
+            ]);
+        }
+        for text in twins {
+            assert!(
+                classes_found(&needles, text.as_bytes()).is_empty(),
+                "{} twin {text}",
+                class.name()
+            );
+        }
+    }
+}
+
+#[test]
+fn an_xpub_with_a_character_in_front_or_next_to_another_key_is_found() {
+    let set = generate(7);
+    let needles = Needles::new(&set);
+    let zpub = xpub_with_version(&set, [0x04, 0xb2, 0x47, 0x46]);
+    let other = generate(8);
+    let foreign = xpub_with_version(&other, [0x04, 0xb2, 0x47, 0x46]);
+    let ypub = xpub_with_version(&set, [0x04, 0x9d, 0x7c, 0xb2]);
+    let long_run = format!("{}{zpub}{}", "A".repeat(150), "B".repeat(150));
+    for (label, text) in [
+        ("one character in front", format!("k{zpub}")),
+        ("three characters in front", format!("abc{zpub}")),
+        ("another key first", format!("{foreign}{zpub}")),
+        ("another key after", format!("{zpub}{foreign}")),
+        ("a long run", long_run),
+        ("ypub in a long run", format!("{}{ypub}", "Z".repeat(300))),
+    ] {
+        assert!(
+            classes_found(&needles, text.as_bytes()).contains(&Class::Xpub),
+            "{label}"
+        );
+    }
+    assert!(classes_found(&needles, format!("k{foreign}{foreign}").as_bytes()).is_empty());
+}
+
+#[test]
+fn compressed_data_inside_text_tokens_is_unpacked() {
+    let set = generate(7);
+    let needles = Needles::new(&set);
+    let nsec = set.text(Class::Nsec).as_bytes().to_vec();
+    let packed = support::gzip(&nsec);
+    let zlib_packed = support::zlib(&nsec);
+    for (label, text) in [
+        (
+            "base64 gzip in JSON",
+            format!("{{\"blob\":\"{}\"}}", BASE64.encode(&packed)),
+        ),
+        ("base64url gzip", BASE64URL.encode(&packed)),
+        ("hex gzip", HEXLOWER.encode(&packed)),
+        ("base32 gzip", BASE32_NOPAD.encode(&packed)),
+        (
+            "base64 zlib",
+            format!("data={}", BASE64.encode(&zlib_packed)),
+        ),
+        ("hex zlib", HEXLOWER.encode(&zlib_packed)),
+    ] {
+        assert!(
+            classes_found(&needles, text.as_bytes()).contains(&Class::Nsec),
+            "{label}"
+        );
+    }
+    // Twin: the same packing of something harmless is nothing.
+    let harmless = support::gzip(b"nothing secret in here at all, just words");
+    assert!(classes_found(&needles, BASE64.encode(&harmless).as_bytes()).is_empty());
 }

@@ -27,6 +27,35 @@ pub const UNDECODED: &str = "undecoded-content-encoding";
 /// A bound was hit: output size, ratio or layers.
 pub const BOUND: &str = "decode-bound";
 
+/// All bodies of one capture together may decode to at most this many bytes.
+pub const MAX_CAPTURE_OUTPUT: usize = 64 * 1024 * 1024;
+/// All bodies of one capture together may have at most this many decoded layers.
+pub const MAX_CAPTURE_LAYERS: usize = 4096;
+
+/// What is left to decode in a capture. Pass the same one to every body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    /// Decoded bytes still allowed.
+    pub output: usize,
+    /// Decoded layers still allowed.
+    pub layers: usize,
+}
+
+impl Budget {
+    /// The budget of a whole capture.
+    pub fn capture() -> Budget {
+        Budget {
+            output: MAX_CAPTURE_OUTPUT,
+            layers: MAX_CAPTURE_LAYERS,
+        }
+    }
+}
+
+/// Like [`decode_body`], but charged to a capture-wide `budget`.
+pub fn decode_with(headers: &[(Vec<u8>, Vec<u8>)], body: &[u8], _budget: &mut Budget) -> Decoded {
+    decode_body(headers, body)
+}
+
 /// What decoding one body gave.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Decoded {

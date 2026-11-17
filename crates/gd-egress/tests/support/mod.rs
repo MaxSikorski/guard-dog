@@ -215,6 +215,25 @@ pub fn brotli_stored(data: &[u8]) -> Vec<u8> {
     out
 }
 
+/// What Python's `repr()` prints for a bytes value: printable ASCII as itself, the usual short
+/// escapes, everything else as `\xNN`.
+pub fn python_bytes_repr(bytes: &[u8]) -> String {
+    let mut out = String::from("b'");
+    for &b in bytes {
+        match b {
+            b'\\' => out.push_str("\\\\"),
+            b'\'' => out.push_str("\\'"),
+            b'\t' => out.push_str("\\t"),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            0x20..=0x7e => out.push(char::from(b)),
+            _ => out.push_str(&format!("\\x{b:02x}")),
+        }
+    }
+    out.push('\'');
+    out
+}
+
 /// One gRPC message frame: a compressed flag, a four-byte big-endian length, the message.
 pub fn grpc_frame(compressed: bool, message: &[u8]) -> Vec<u8> {
     let mut out = vec![u8::from(compressed)];
@@ -832,6 +851,21 @@ impl Scenario {
             &self.set,
             &allow,
             &expected_rules(),
+        );
+        let _ = fs::remove_dir_all(&dir);
+        verdict.report
+    }
+
+    /// Like [`Scenario::report`], under explicit bounds.
+    pub fn report_with(&self, limits: gd_egress::verdict::Limits) -> String {
+        let dir = self.write();
+        let allow = Allowlist::parse(&self.allowlist).unwrap();
+        let verdict = gd_egress::verdict::judge_with_limits(
+            &RawCapture::load(&dir),
+            &self.set,
+            &allow,
+            &expected_rules(),
+            limits,
         );
         let _ = fs::remove_dir_all(&dir);
         verdict.report

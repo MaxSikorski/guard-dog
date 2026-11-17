@@ -285,3 +285,146 @@ fn grpc_messages_are_unpacked_frame_by_frame() {
             .contains(UNDECODED)
     );
 }
+
+fn zlib_stored(data: &[u8], cmf: u8, flg: u8) -> Vec<u8> {
+    // A zlib header with these two bytes, one stored deflate block, and the adler32 checksum.
+    let mut body = vec![cmf, flg, 0x01];
+    body.extend(u16::try_from(data.len()).unwrap().to_le_bytes());
+    body.extend((!u16::try_from(data.len()).unwrap()).to_le_bytes());
+    body.extend(data);
+    let (mut a, mut b) = (1u32, 0u32);
+    for &x in data {
+        a = (a + u32::from(x)) % 65_521;
+        b = (b + a) % 65_521;
+    }
+    body.extend(((b << 16) | a).to_be_bytes());
+    body
+}
+
+#[test]
+fn every_valid_zlib_header_is_found_by_its_first_bytes() {
+    let mut tried = 0;
+    // Every window size (the first byte's top half), every second byte that makes the header
+    // divisible by 31, with no preset dictionary.
+    for cmf in (0..=7u8).map(|w| (w << 4) | 8) {
+        for flg in 0..=255u8 {
+            if ((u32::from(cmf) << 8) + u32::from(flg)) % 31 != 0 || flg & 0x20 != 0 {
+                continue;
+            }
+            tried += 1;
+            let decoded = decode_body(&[], &zlib_stored(SECRET, cmf, flg));
+            assert_eq!(
+                decoded.layers.last().map(Vec::as_slice),
+                Some(SECRET),
+                "{cmf:02x} {flg:02x}"
+            );
+            assert!(decoded.problems.is_empty(), "{cmf:02x} {flg:02x}");
+        }
+    }
+    assert!(tried >= 24, "{tried}");
+}
+
+#[test]
+fn gzip_inside_a_body_is_found_at_any_offset() {
+    let mut multipart = b"--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"debug.gz\"\r\nContent-Type: application/gzip\r\n\r\n".to_vec();
+    multipart.extend(gzip(SECRET));
+    multipart.extend(b"\r\n--B--\r\n");
+    let headers = header("Content-Type", "multipart/form-data; boundary=B");
+    let decoded = decode_body(&headers, &multipart);
+    assert!(decoded.layers.iter().any(|l| l == SECRET), "{decoded:?}");
+    assert!(decoded.problems.is_empty(), "{:?}", decoded.problems);
+    // Two members in one body, and one after a few stray bytes.
+    let mut two = b"xx".to_vec();
+    two.extend(gzip(SECRET));
+    two.extend(b"yy");
+    two.extend(gzip(b"second member"));
+    let decoded = decode_body(&[], &two);
+    assert!(decoded.layers.iter().any(|l| l == SECRET));
+    assert!(decoded.layers.iter().any(|l| l == b"second member"));
+    // The gzip magic by chance, with no stream behind it, is not a problem.
+    let chance = [
+        b"text ".to_vec(),
+        vec![0x1f, 0x8b, 0x08],
+        b" more text".to_vec(),
+    ]
+    .concat();
+    let decoded = decode_body(&[], &chance);
+    assert!(decoded.problems.is_empty(), "{:?}", decoded.problems);
+    // Plain text has nothing to find.
+    assert!(decode_body(&[], b"just text").layers.is_empty());
+}
+
+#[test]
+fn zlib_with_trailing_bytes_keeps_its_output_and_fails() {
+    let mut body = zlib(SECRET);
+    body.extend(b"trailing bytes");
+    let decoded = decode_body(&header("Content-Encoding", "deflate"), &body);
+    assert!(decoded.layers.iter().any(|l| l == SECRET), "{decoded:?}");
+    assert!(decoded.problems.contains(UNDECODED));
+    // Raw deflate is still taken as raw deflate.
+    let decoded = decode_body(&header("Content-Encoding", "deflate"), &deflate_raw(SECRET));
+    assert_eq!(decoded.layers.last().map(Vec::as_slice), Some(SECRET));
+    assert!(decoded.problems.is_empty());
+}
+
+#[test]
+fn grpc_frames_marked_compressed_need_an_encoding() {
+    let body = grpc_frame(true, &gzip(SECRET));
+    for headers in [
+        header("Content-Type", "application/grpc"),
+        header("Content-Type", "application/grpc+proto"),
+        vec![
+            (b"Content-Type".to_vec(), b"application/grpc".to_vec()),
+            (b"grpc-encoding".to_vec(), b"identity".to_vec()),
+        ],
+    ] {
+        let decoded = decode_body(&headers, &body);
+        assert!(decoded.problems.contains(UNDECODED), "{headers:?}");
+    }
+    // Plain frames under the same content type are fine, and a broken frame is not.
+    let plain = decode_body(
+        &header("Content-Type", "application/grpc"),
+        &grpc_frame(false, b"hi"),
+    );
+    assert!(plain.problems.is_empty(), "{:?}", plain.problems);
+    let broken = decode_body(
+        &header("Content-Type", "application/grpc"),
+        b"not a frame at all",
+    );
+    assert!(broken.problems.contains(UNDECODED));
+}
+
+#[test]
+fn the_capture_budget_is_shared_between_bodies() {
+    use gd_egress::decode::{Budget, decode_with};
+    // 40 small, tame-looking bodies that each decode to 100 KiB; the capture may decode 1 MiB.
+    let body = gzip(&vec![0u8; 100 * 1024]);
+    assert!(
+        body.len() * 1000 > 100 * 1024,
+        "the test input must be under the ratio bound"
+    );
+    let headers = header("Content-Encoding", "gzip");
+    let mut budget = Budget {
+        output: 1024 * 1024,
+        layers: 4096,
+    };
+    let (mut kept, mut bounded) = (0usize, 0usize);
+    for _ in 0..40 {
+        let decoded = decode_with(&headers, &body, &mut budget);
+        kept += decoded.layers.iter().map(Vec::len).sum::<usize>();
+        bounded += usize::from(decoded.problems.contains(BOUND));
+    }
+    assert!(kept <= 1024 * 1024, "kept {kept}");
+    assert!(bounded >= 25, "bounded {bounded}");
+    // The layer count is shared too: 300 compressed one-byte messages against a budget of 10.
+    let frames: Vec<u8> = (0..300)
+        .flat_map(|_| grpc_frame(true, &gzip(b"x")))
+        .collect();
+    let mut budget = Budget {
+        output: 1024 * 1024,
+        layers: 10,
+    };
+    let decoded = decode_with(&header("grpc-encoding", "gzip"), &frames, &mut budget);
+    assert!(decoded.problems.contains(BOUND), "{:?}", decoded.problems);
+    assert!(decoded.layers.len() <= 10, "{}", decoded.layers.len());
+}

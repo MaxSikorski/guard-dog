@@ -1,4 +1,4 @@
-//! The 81 synthetic capture scenarios. Each expected report in
+//! The 88 synthetic capture scenarios. Each expected report in
 //! `tests/egress/synthetic/` was written before the code that makes it pass.
 //! None of these is a real capture.
 
@@ -617,6 +617,45 @@ fn all(seed: u64) -> Vec<(&'static str, Scenario)> {
     let mut s80 = Scenario::new("s80", seed);
     s80.raw_lo_tcp_recorder(51_006, b"no handshake before this");
 
+    let s82 = with_api_request(
+        "s82",
+        seed,
+        &[("Content-Type", "multipart/form-data; boundary=B")],
+        |s| {
+            let mut body = b"--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"debug.gz\"\r\nContent-Type: application/gzip\r\n\r\n".to_vec();
+            body.extend(gzip(&nsec_text(s)));
+            body.extend(b"\r\n--B--\r\n");
+            body
+        },
+    );
+    let s83 = with_api_body("s83", seed, |s| {
+        format!("{{\"blob\":\"{}\"}}", b64(&gzip(&nsec_text(s)))).into_bytes()
+    });
+    let s84 = with_api_request("s84", seed, &[("Content-Type", "application/grpc")], |s| {
+        grpc_frame(true, &gzip(&nsec_text(s)))
+    });
+    let s85 = with_api_request("s85", seed, &[("Content-Encoding", "deflate")], |s| {
+        let mut body = zlib(&nsec_text(s));
+        body.extend(b"trailing bytes");
+        body
+    });
+    let s86 = with_api_body("s86", seed, |s| {
+        python_bytes_repr(&s.canary_bytes(Class::Nsec)).into_bytes()
+    });
+    let s87 = with_api_body("s87", seed, |s| {
+        let escaped: String = s
+            .canary_bytes(Class::Nsec)
+            .iter()
+            .map(|b| format!("\\u{b:04x}"))
+            .collect();
+        format!("{{\"k\":\"{escaped}\"}}").into_bytes()
+    });
+    let s88 = with_api_body("s88", seed, |s| {
+        let mut zpub = vec![0x04, 0xb2, 0x47, 0x46];
+        zpub.extend(&s.canary_bytes(Class::Xpub)[4..]);
+        format!("k{}", gd_egress::encode::base58check(&zpub)).into_bytes()
+    });
+
     vec![
         ("S01-clean-baseline", Scenario::new("s01", seed)),
         ("S02-blind-mitm", s02),
@@ -699,6 +738,13 @@ fn all(seed: u64) -> Vec<(&'static str, Scenario)> {
         ("S79-dns-client-response", s79),
         ("S80-tcp-no-syn", s80),
         ("S81-keep-alive-before-post-control", s81(seed)),
+        ("S82-multipart-gzip-part", s82),
+        ("S83-base64-gzip-in-json", s83),
+        ("S84-grpc-compressed-no-encoding", s84),
+        ("S85-zlib-trailing-bytes", s85),
+        ("S86-python-bytes-repr", s86),
+        ("S87-json-u-escapes-of-key-bytes", s87),
+        ("S88-zpub-with-a-character-in-front", s88),
     ]
 }
 
@@ -713,7 +759,7 @@ fn find(seed: u64, prefix: &str) -> Scenario {
 #[test]
 fn every_synthetic_scenario_gives_its_expected_report() {
     let scenarios = all(1);
-    assert_eq!(scenarios.len(), 81);
+    assert_eq!(scenarios.len(), 88);
     let mut failures = Vec::new();
     for (stem, scenario) in &scenarios {
         let (got, want) = (scenario.report(), expected_report(stem));
@@ -904,4 +950,57 @@ fn a_keep_alive_request_after_the_post_control_must_come_later() {
             "seq {seq}: {report}"
         );
     }
+}
+
+#[test]
+fn the_capture_wide_decode_budget_gives_an_f5_quickly() {
+    use gd_egress::verdict::Limits;
+    let tame = gzip(&vec![0u8; 100 * 1024]);
+    let build = |bodies: usize| {
+        let mut s = Scenario::new("budget", 1);
+        let c = api_conn(&mut s, true, "198.18.0.1", 443, API);
+        for _ in 0..bodies {
+            post(&mut s, c, "POST", &[("Content-Encoding", "gzip")], &tame);
+        }
+        s
+    };
+    let limits = Limits {
+        decode_output: 1024 * 1024,
+        decode_layers: 4096,
+    };
+    // 40 bodies of 100 KiB against 1 MiB: the bound is hit, and nothing passes.
+    let report = build(40).report_with(limits);
+    assert!(
+        report.contains("F5 capture-unreadable mitm: decode-bound"),
+        "{report}"
+    );
+    // Three bodies fit.
+    let report = build(3).report_with(limits);
+    assert!(
+        report.starts_with("Judge C (egress capture): PASS"),
+        "{report}"
+    );
+    // The layer count is bounded too.
+    let layers = Limits {
+        decode_output: 1024 * 1024,
+        decode_layers: 2,
+    };
+    let report = build(3).report_with(layers);
+    assert!(
+        report.contains("F5 capture-unreadable mitm: decode-bound"),
+        "{report}"
+    );
+}
+
+#[test]
+fn running_out_of_scan_budget_is_an_f5_with_its_own_code() {
+    // 5000 separate tokens go past the token budget (4096): never a quiet pass.
+    let mut s = Scenario::new("tokens", 1);
+    let body = vec!["aaaaaaaaaaaaaaaa"; 5000].join(" ");
+    api_post(&mut s, body.as_bytes());
+    let report = s.report();
+    assert!(
+        report.contains("F5 capture-unreadable scan: scan-budget"),
+        "{report}"
+    );
 }
