@@ -45,6 +45,8 @@ const ALLOWED_EMAILS: &[&str] = &[
     "git@github.com",
     "noreply@anthropic.com",
     "noreply@github.com",
+    // catalog.rs mutation case: URL userinfo must be refused.
+    "user@bitcoincore.org",
 ];
 
 /// Email domains allowed whatever the name.
@@ -54,6 +56,19 @@ const ALLOWED_EMAIL_DOMAINS: &[&str] = &[
     "example.org",
     "example.net",
 ];
+
+/// Reserved names (RFC 2606 and 6761): an address under any of these, or one of
+/// their subdomains, can never be a real mailbox. Matched as a whole trailing
+/// label, so `x.example` and `example` count but `notexample` does not.
+const RESERVED_SUFFIXES: &[&str] = &["example", "invalid", "test", "localhost"];
+
+/// Is `domain` (lowercase) the allowed domain `allowed`, or a subdomain of it?
+fn under(domain: &str, allowed: &str) -> bool {
+    domain == allowed
+        || domain
+            .strip_suffix(allowed)
+            .is_some_and(|rest| rest.ends_with('.'))
+}
 
 /// Host or user names too common to count as a leak.
 const COMMON_NAMES: &[&str] = &[
@@ -362,7 +377,10 @@ fn emails(line: &str, found: &mut Vec<String>) {
         }
         let address = format!("{local}@{domain}").to_lowercase();
         if ALLOWED_EMAILS.contains(&address.as_str())
-            || ALLOWED_EMAIL_DOMAINS.contains(&domain.to_lowercase().as_str())
+            || ALLOWED_EMAIL_DOMAINS
+                .iter()
+                .chain(RESERVED_SUFFIXES)
+                .any(|allowed| under(&domain.to_lowercase(), allowed))
         {
             continue;
         }
@@ -557,6 +575,9 @@ fn the_checker_catches_planted_details_and_leaves_ordinary_text_alone() {
         format!("mail: Some.Else+tag@{}.", ["gm", "ail.com"].concat()),
         format!("\"{alias}\"@{mail_host}"),
         format!("{{\"to\": \"{alias}@{mail_host}\"}}"),
+        format!("{alias}@{}", ["bitcoin", "core.org"].concat()),
+        format!("x@{}", ["not", "example.com"].concat()),
+        format!("x@example.{}", ["ev", "il"].concat()),
     ];
     for line in &planted_deterministic {
         assert!(
@@ -594,6 +615,9 @@ fn the_checker_catches_planted_details_and_leaves_ordinary_text_alone() {
         format!("tmpfs {root}.lnd and {root}.lightning"),
         format!("placeholder {slash}<name>/ and {home}<you>/ and C:\\{win}\\%USERNAME%\\x"),
         "email you@yourwallet.com or jack@greensock.com".to_string(),
+        "user@evil.example and a@b.invalid and a@x.test and a@h.localhost and a@sub.example.com"
+            .to_string(),
+        "user@bitcoincore.org".to_string(),
         "git@github.com:Owner/repo.git".to_string(),
         "12345+x@users.noreply.github.com and a@example.com".to_string(),
         "import @types/node and serde@1.0.200 and @media".to_string(),
