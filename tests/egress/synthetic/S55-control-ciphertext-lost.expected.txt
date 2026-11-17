@@ -1,0 +1,5 @@
+Judge C (egress capture): FAIL
+control: dns ok, https ok, wire MISSING, blocked-path ok
+destinations: none
+F4 capture-blind wire pre
+F5 capture-unreadable pcap: tcp-gap
