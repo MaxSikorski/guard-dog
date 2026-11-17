@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Start Guard Dog's regtest lab from cold, mine 101 blocks, fund LND and Core
 # Lightning, open one channel between them, prove the least-privileged logins
-# work (and are refused for anything else), and write lab/.data/manifest.toml
-# with each service's version as the service itself reports it, plus the
-# containers' arch, block storage and exposure as docker inspect shows them.
+# work (and are refused for anything else), prove each service can be told apart
+# without a credential, record the raw version replies in lab/.data/replies/
+# <service>/<call>.json, and write lab/.data/manifest.toml with each service's
+# version as the service itself reports it, plus the containers' arch, block
+# storage and exposure as docker inspect shows them.
 #
 # Regtest only. One lab at a time (lab/.lock, shared with lab/down.sh).
 # Remove everything with lab/down.sh. If anything goes wrong before all three
@@ -28,6 +30,8 @@ bcli() { dc exec -T bitcoind bitcoin-cli -chain=regtest -datadir=/data "$@"; }
 bwatch() { printf '%s\n' "$WATCH_PASSWORD" | bcli -rpcuser=gdwatch -stdinrpcpass "$@"; }
 lncli() { dc exec -T lnd lncli --lnddir=/data --network=regtest "$@"; }
 clncli() { dc exec -T cln lightning-cli --lightning-dir=/data --network=regtest "$@"; }
+label() { dc config --format json | jq -er --arg s "$1" --arg k "$2" '.services[$s].labels["org.guard-dog.lab." + $k]'; }
+image_of() { dc config --format json | jq -er --arg s "$1" '.services[$s].image'; }
 
 # State for the exit trap: was the lock taken, were credentials made, were
 # containers started, and have all three chain checks passed.
@@ -189,11 +193,112 @@ if clncli checkrune rune="$RUNE" method=listfunds >/dev/null 2>&1; then fail "th
 printf '%s' "$RUNE" > "$DATA/creds/cln-getinfo.rune"
 step "least-privileged logins: bitcoind gdwatch, LND info:read, CLN getinfo rune (each refused a wider call)"
 
+# 8b. Identification over the lab network, with the probe tool (curl in the pinned
+# probe container). A credential never appears on a command line: headers go to
+# curl on stdin (`-H @-`), read from a pipe, and nothing here writes one to disk
+# except the two creds files above. TLS: the two REST servers use their own
+# self-signed certificates, so the certificate is pinned by its public key
+# (taken from the certificate copied below); a wrong pin must be refused.
+# call [curl arguments]: sets HTTP_STATUS, HTTP_BODY and HTTP_AUTH (the
+# WWW-Authenticate header, if any). Whatever is on stdin goes to curl.
+HTTP_STATUS="" HTTP_BODY="" HTTP_AUTH=""
+probe() { dc run --rm -T probe --silent --show-error --max-time 10 --write-out '\n%{http_code}\n%header{www-authenticate}END' "$@"; }
+call() {
+  local out rest re='^[0-9]{3}$'
+  out="$(probe "$@")" || fail "a request from the probe to the lab failed"
+  HTTP_AUTH="${out##*$'\n'}"
+  HTTP_AUTH="${HTTP_AUTH%END}"
+  rest="${out%$'\n'*}"
+  HTTP_STATUS="${rest##*$'\n'}"
+  HTTP_BODY="${rest%$'\n'*}"
+  [[ $HTTP_STATUS =~ $re ]] || fail "the probe got an unreadable reply"
+}
+# Public key pin for curl, from a PEM certificate: sha256//<base64 of the SHA-256 of the key>.
+pin_of() {
+  local d re='^[A-Za-z0-9+/]{43}=$'
+  d="$(openssl x509 -in "$1" -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl base64)" || fail "could not read a certificate's public key"
+  [[ $d =~ $re ]] || fail "unexpected public key hash"
+  printf 'sha256//%s' "$d"
+}
+# fetch_cert <service> <path in the container> <file>: certificates only, never a key.
+fetch_cert() {
+  local pem
+  pem="$(dc exec -T "$1" cat "$2")" || fail "could not read the $1 certificate"
+  [[ $pem == *"BEGIN CERTIFICATE"* ]] || fail "the $1 certificate file holds no certificate"
+  [[ $pem != *"PRIVATE KEY"* ]] || fail "the $1 certificate file holds a private key: refusing to copy it"
+  printf '%s\n' "$pem" > "$3"
+  chmod 600 "$3"
+}
+# record <service> <call> <body>: keep a raw reply in lab/.data/replies/<service>/<call>.json.
+# Nothing is stripped: a reply holding a credential or a canary fails the run instead.
+REPLIES="$DATA/replies"
+record() {
+  local svc=$1 name=$2 body=$3 secret
+  [[ $svc =~ ^[a-z]+$ ]] && [[ $name =~ ^[a-z0-9-]+$ ]] || fail "unexpected reply name"
+  for secret in "$RPC_PASSWORD" "$WATCH_PASSWORD" "$MINT_KEY" "$MAC_HEX" "$RUNE"; do
+    [[ $body != *"$secret"* ]] || fail "the $svc $name reply holds a credential: not recording it"
+  done
+  [[ $body != *gdlabcanary-* ]] || fail "the $svc $name reply holds a canary: not recording it"
+  printf '%s' "$body" | jq -e . >/dev/null || fail "the $svc $name reply is not JSON"
+  mkdir -p "$REPLIES/$svc"
+  printf '%s\n' "$body" > "$REPLIES/$svc/$name.json"
+}
+MAC_HEX="$(cat "$DATA/creds/lnd-info-read.macaroon.hex")"
+re_hex='^[0-9a-f]{20,}$'
+[[ $MAC_HEX =~ $re_hex ]] || fail "the saved macaroon is not hex"
+
+# bitcoind, no credential: only a 401 with Basic realm="jsonrpc" says "Bitcoin Core's RPC".
+call -H 'Content-Type: application/json' --data '{"jsonrpc":"1.0","id":"gd","method":"getnetworkinfo","params":[]}' http://bitcoind:18443/ </dev/null
+{ [ "$HTTP_STATUS" = 401 ] && [ "$HTTP_AUTH" = 'Basic realm="jsonrpc"' ]; } || fail "bitcoind did not answer an unauthenticated call with 401 and WWW-Authenticate: Basic realm=\"jsonrpc\""
+record bitcoind getnetworkinfo "$(bwatch getnetworkinfo)"
+record bitcoind getblockchaininfo "$(bwatch getblockchaininfo)"
+
+# The two REST certificates (certificates only), and the pins taken from them.
+fetch_cert lnd /data/tls.cert "$DATA/creds/lnd-tls.cert"
+fetch_cert cln /data/regtest/server.pem "$DATA/creds/clnrest-server.cert"
+LND_PIN="$(pin_of "$DATA/creds/lnd-tls.cert")"
+CLN_PIN="$(pin_of "$DATA/creds/clnrest-server.cert")"
+WRONG_PIN='sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
+if probe --insecure --pinnedpubkey "$WRONG_PIN" https://lnd:8080/v1/state </dev/null >/dev/null 2>&1; then fail "curl accepted LND's REST server under a wrong certificate pin"; fi
+if probe --insecure --pinnedpubkey "$WRONG_PIN" https://cln:3010/v1/getinfo </dev/null >/dev/null 2>&1; then fail "curl accepted clnrest under a wrong certificate pin"; fi
+
+# LND, no macaroon: the pinned certificate plus a state reply identify it.
+call --insecure --pinnedpubkey "$LND_PIN" https://lnd:8080/v1/state </dev/null
+[ "$HTTP_STATUS" = 200 ] || fail "LND's REST /v1/state answered HTTP $HTTP_STATUS, not 200"
+printf '%s' "$HTTP_BODY" | jq -e '.state | type == "string"' >/dev/null || fail "LND's /v1/state reply has no state"
+record lnd state "$HTTP_BODY"
+# LND, info:read macaroon: the versioner reads, the balance is refused.
+call --insecure --pinnedpubkey "$LND_PIN" -H @- https://lnd:8080/v2/versioner/version < <(printf 'Grpc-Metadata-macaroon: %s\n' "$MAC_HEX")
+[ "$HTTP_STATUS" = 200 ] || fail "the info:read macaroon could not read LND's versioner over REST (HTTP $HTTP_STATUS)"
+LND_REST_VER="$(plain "$(printf '%s' "$HTTP_BODY" | jq -er .version)")"
+[ "$LND_REST_VER" = "$(label lnd expected-version)" ] || fail "LND's REST versioner says '$LND_REST_VER', not the pinned image's version"
+record lnd versioner-version "$HTTP_BODY"
+call --insecure --pinnedpubkey "$LND_PIN" -H @- https://lnd:8080/v1/balance/blockchain < <(printf 'Grpc-Metadata-macaroon: %s\n' "$MAC_HEX")
+case $HTTP_STATUS in 403 | 500) ;; *) fail "the info:read macaroon was not refused the blockchain balance over REST (HTTP $HTTP_STATUS)" ;; esac
+printf '%s' "$HTTP_BODY" | grep -qi 'permission denied' || fail "LND refused the blockchain balance, but not with a permission error"
+LND_REFUSED_STATUS=$HTTP_STATUS
+# Core Lightning clnrest, getinfo rune: getinfo reads, listfunds is refused.
+call -H 'Content-Type: application/json' --data '{}' --insecure --pinnedpubkey "$CLN_PIN" -H @- https://cln:3010/v1/getinfo < <(printf 'Rune: %s\n' "$RUNE")
+# clnrest answers a successful POST with 201 (Created), not 200.
+case $HTTP_STATUS in 200 | 201) ;; *) fail "the getinfo rune could not call clnrest getinfo (HTTP $HTTP_STATUS)" ;; esac
+CLN_REST_VER="$(plain "$(printf '%s' "$HTTP_BODY" | jq -er .version)")"
+[ "${CLN_REST_VER#v}" = "$(label cln expected-version)" ] || fail "clnrest says '$CLN_REST_VER', not the pinned image's version"
+record cln getinfo "$HTTP_BODY"
+call -H 'Content-Type: application/json' --data '{}' --insecure --pinnedpubkey "$CLN_PIN" -H @- https://cln:3010/v1/listfunds < <(printf 'Rune: %s\n' "$RUNE")
+case $HTTP_STATUS in 2*) fail "the getinfo rune was allowed clnrest listfunds" ;; esac
+CLN_REFUSED_STATUS=$HTTP_STATUS
+# Nutshell and strfry, no credential.
+call http://nutshell:3338/v1/info </dev/null
+[ "$HTTP_STATUS" = 200 ] || fail "Nutshell's /v1/info answered HTTP $HTTP_STATUS, not 200"
+record nutshell info "$HTTP_BODY"
+call -H 'Accept: application/nostr+json' http://strfry:7777/ </dev/null
+[ "$HTTP_STATUS" = 200 ] || fail "strfry's NIP-11 answered HTTP $HTTP_STATUS, not 200"
+record strfry nip11 "$HTTP_BODY"
+step "identification: bitcoind 401 without a login; LND and clnrest answer under a pinned certificate; REST logins read the version and are refused wider calls (LND HTTP $LND_REFUSED_STATUS, clnrest HTTP $CLN_REFUSED_STATUS); 7 replies recorded"
+
 # 9. Versions, read from the services themselves, must match the pinned images' labels.
 # Versions are written as upstream names them: no leading "v", and Bitcoin Core's
 # "32.1.0" is its release "32.1".
-label() { dc config --format json | jq -er --arg s "$1" --arg k "$2" '.services[$s].labels["org.guard-dog.lab." + $k]'; }
-image_of() { dc config --format json | jq -er --arg s "$1" '.services[$s].image'; }
 BTC_CHAIN="$(plain "$(bcli getblockchaininfo | jq -er .chain)")"
 BTC_RAW="$(plain "$(bcli getnetworkinfo | jq -er .subversion)")"
 BTC_VER="$(printf '%s' "$BTC_RAW" | sed -E 's#^/Satoshi:([0-9]+[.][0-9]+)[.]0/$#\1#; s#^/Satoshi:([0-9]+[.][0-9]+[.][0-9]+)/$#\1#')"
@@ -315,5 +420,5 @@ printf '  %-9s %-20s %s\n' lnd "$LND_VER" "1 active channel, $CHANNEL_SATS sats"
 printf '  %-9s %-20s %s\n' cln "$CLN_VER" "CHANNELD_NORMAL"
 printf '  %-9s %-20s %s\n' strfry "$STRFRY_VER" "NIP-11 answers"
 printf '  %-9s %-20s %s\n' nutshell "$NUT_VER" "NUT-06 answers"
-echo "  manifest: lab/.data/manifest.toml   narrow logins: lab/.data/creds/"
+echo "  manifest: lab/.data/manifest.toml   narrow logins: lab/.data/creds/   raw replies: lab/.data/replies/"
 [ "$ELAPSED" -le "$MAX_SECONDS" ] || { echo "lab/up.sh: FAILED: took ${ELAPSED}s, over the ${MAX_SECONDS}s budget" >&2; exit 4; }

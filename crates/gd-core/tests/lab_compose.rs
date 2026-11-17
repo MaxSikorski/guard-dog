@@ -4,7 +4,7 @@
 //! Deterministic by design: no Docker, no network, no clock, nothing random.
 //! `check()` reads `lab/compose.yml` the way Docker does (the file uses no YAML
 //! anchors) and returns every problem it finds, in a stable order. The checker
-//! is itself tested: `every_unsafe_change_is_caught` makes 55 named unsafe
+//! is itself tested: `every_unsafe_change_is_caught` makes 60 named unsafe
 //! edits and requires each one to be refused with its own problem code.
 
 // Test-only crate: its helper functions (not just `#[test]` ones) read files and
@@ -68,8 +68,23 @@ const EXPECTED: [(&str, &str, &str, &str, &str); 5] = [
         "1000:1000",
     ),
 ];
+/// The two tool services: (compose name, exact image, user, compose profile).
+/// Neither is started by `lab/up.sh` without its profile. `probe` is a pinned
+/// curl image; `scanner` is built locally from `lab/scanner/Dockerfile` and
+/// carries a fixed local tag, so it is built once, not per run.
+const TOOLS: [(&str, &str, &str, &str); 2] = [
+    (
+        "probe",
+        "curlimages/curl@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93",
+        "100:101",
+        "probe",
+    ),
+    ("scanner", "gd-lab-scanner:local", "65532:65532", "scan"),
+];
+/// The one tmpfs entry the scanner may have: its state folder.
+const SCANNER_STATE_TMPFS: &str = "/state:uid=65532,gid=65532,mode=0700,size=1m";
 /// The only keys a lab service may use.
-const ALLOWED_SERVICE_KEYS: [&str; 20] = [
+const ALLOWED_SERVICE_KEYS: [&str; 21] = [
     "image",
     "labels",
     "user",
@@ -90,9 +105,11 @@ const ALLOWED_SERVICE_KEYS: [&str; 20] = [
     "memswap_limit",
     "cpus",
     "pids_limit",
+    "profiles",
 ];
 /// Keys that have their own problem code, so they never also count as `unknown-key`.
-const SPECIFIC_KEYS: [&str; 13] = [
+const SPECIFIC_KEYS: [&str; 14] = [
+    "build",
     "platform",
     "ports",
     "expose",
@@ -121,7 +138,9 @@ const SECRET_WORDS: [&str; 7] = [
 const CANARY: &str = "gdlabcanary-";
 
 /// The reviewed `entrypoint` per service; `None` means it must be absent.
-const ENTRYPOINTS: [(&str, Option<&str>); 5] = [
+const ENTRYPOINTS: [(&str, Option<&str>); 7] = [
+    ("probe", Some("curl")),
+    ("scanner", None),
     ("bitcoind", Some("bitcoind")),
     ("cln", None),
     ("lnd", None),
@@ -129,7 +148,9 @@ const ENTRYPOINTS: [(&str, Option<&str>); 5] = [
     ("strfry", None),
 ];
 /// Every tmpfs mount each service must have, and no others.
-const TMPFS_TARGETS: [(&str, &[&str]); 5] = [
+const TMPFS_TARGETS: [(&str, &[&str]); 7] = [
+    ("probe", &[]),
+    ("scanner", &["/state"]),
     ("bitcoind", &["/data", "/home/bitcoin/.bitcoin"]),
     ("cln", &["/data", "/tmp", "/root/.lightning"]),
     ("lnd", &["/data", "/root/.lnd"]),
@@ -423,7 +444,11 @@ fn check(text: &str) -> Vec<Problem> {
     // The set of services.
     let services = &doc["services"];
     let names: BTreeSet<String> = keys(services).into_iter().collect();
-    let want: BTreeSet<String> = EXPECTED.iter().map(|e| e.0.to_owned()).collect();
+    let want: BTreeSet<String> = EXPECTED
+        .iter()
+        .map(|e| e.0.to_owned())
+        .chain(TOOLS.iter().map(|t| t.0.to_owned()))
+        .collect();
     if names != want {
         out.push(problem(
             "unexpected-services",
@@ -439,6 +464,17 @@ fn check(text: &str) -> Vec<Problem> {
             continue;
         }
         check_service(&mut out, name, id, image, version, user, svc);
+        if let Some(m) = svc["mem_limit"].as_str().and_then(mem_mib) {
+            total_mib += m;
+        }
+    }
+    // The tool services, counted in the budget as if they ran with the rest.
+    for (name, image, user, _) in TOOLS {
+        let svc = &services[name];
+        if svc.as_hash().is_none() {
+            continue;
+        }
+        check_service(&mut out, name, "", image, "", user, svc);
         if let Some(m) = svc["mem_limit"].as_str().and_then(mem_mib) {
             total_mib += m;
         }
@@ -536,8 +572,17 @@ fn check_service(
     };
 
     // Image.
+    let tool = TOOLS.iter().find(|t| t.0 == name);
     let found = svc["image"].as_str().unwrap_or("");
-    if !is_pinned(found) {
+    if name == "scanner" {
+        // Built locally: the fixed tag, never a registry name.
+        if found != image {
+            add(
+                "wrong-image",
+                format!("image {found:?} is not the fixed local tag {image:?}"),
+            );
+        }
+    } else if !is_pinned(found) {
         add(
             "unpinned-image",
             format!("image {found:?} is not name@sha256:<64 hex>"),
@@ -551,6 +596,17 @@ fn check_service(
 
     // Labels.
     let labels = &svc["labels"];
+    if tool.is_some() {
+        // A tool has only the service label, so it is never taken for a lab service.
+        if keys(labels) != ["org.guard-dog.lab.service"]
+            || labels["org.guard-dog.lab.service"].as_str() != Some(name)
+        {
+            add(
+                "wrong-labels",
+                "a tool has exactly the label org.guard-dog.lab.service".into(),
+            );
+        }
+    }
     let mut label_keys = keys(labels);
     label_keys.sort();
     let mut want_keys = [
@@ -564,15 +620,53 @@ fn check_service(
     let software_ok = labels["org.guard-dog.lab.software"]
         .as_str()
         .is_some_and(|s| !s.is_empty());
-    if label_keys != want_keys
-        || labels["org.guard-dog.lab.service"].as_str() != Some(name)
-        || labels["org.guard-dog.lab.id"].as_str() != Some(id)
-        || labels["org.guard-dog.lab.expected-version"].as_str() != Some(version)
-        || !software_ok
+    if tool.is_none()
+        && (label_keys != want_keys
+            || labels["org.guard-dog.lab.service"].as_str() != Some(name)
+            || labels["org.guard-dog.lab.id"].as_str() != Some(id)
+            || labels["org.guard-dog.lab.expected-version"].as_str() != Some(version)
+            || !software_ok)
     {
         add(
             "wrong-labels",
             format!("labels must be the four org.guard-dog.lab.* keys for {id} {version}"),
+        );
+    }
+
+    // Profiles: a tool is started only by its own profile; a lab service has none.
+    let profiles = strings(&svc["profiles"]);
+    match tool {
+        Some(t) => {
+            if profiles.as_deref() != Some(&[t.3.to_owned()]) {
+                add("profile", format!("profiles must be exactly [{}]", t.3));
+            }
+        }
+        None => {
+            if !svc["profiles"].is_badvalue() {
+                add("profile", "a lab service must have no profiles".into());
+            }
+        }
+    }
+    // A build is allowed only for the scanner, from the one reviewed Dockerfile.
+    let build = &svc["build"];
+    if name == "scanner" {
+        if keys(build).len() != 2
+            || build["context"].as_str() != Some("..")
+            || build["dockerfile"].as_str() != Some("lab/scanner/Dockerfile")
+        {
+            add(
+                "build",
+                "build must be exactly {context: .., dockerfile: lab/scanner/Dockerfile}".into(),
+            );
+        }
+    } else if !build.is_badvalue() {
+        add("build", "only the scanner may be built".into());
+    }
+    // Credentials never go in a tool's environment: they arrive on stdin.
+    if tool.is_some() && !svc["environment"].is_badvalue() {
+        add(
+            "tool-environment",
+            "a tool has no environment: credentials arrive on stdin".into(),
         );
     }
 
@@ -677,7 +771,12 @@ fn check_service(
         add("no-pids-limit", "pids_limit must be from 1 to 1024".into());
     }
     let mem_cap = svc["mem_limit"].as_str().and_then(mem_mib).unwrap_or(0);
-    let tmpfs_ok = strings(&svc["tmpfs"]).is_some_and(|v| {
+    let tmpfs_list = if svc["tmpfs"].is_badvalue() && name == "probe" {
+        Some(Vec::new())
+    } else {
+        strings(&svc["tmpfs"])
+    };
+    let tmpfs_ok = tmpfs_list.is_some_and(|v| {
         v.iter().all(|t| {
             t.starts_with('/')
                 && t.split_once(':').is_some_and(|(_, opts)| {
@@ -719,6 +818,14 @@ fn check_service(
         add(
             "tmpfs-missing",
             format!("tmpfs targets are {targets:?}, expected {want_targets:?}"),
+        );
+    }
+    if name == "scanner"
+        && strings(&svc["tmpfs"]).as_deref() != Some(&[SCANNER_STATE_TMPFS.to_owned()])
+    {
+        add(
+            "tmpfs-unbounded",
+            format!("the scanner's tmpfs must be exactly {SCANNER_STATE_TMPFS}"),
         );
     }
 
@@ -912,7 +1019,7 @@ fn describe(problems: &[Problem]) -> String {
 
 /// Unsafe edits to the real file: (text to find, text to put there, the
 /// problem code that must catch it). An empty `from` appends `to` to the end.
-const MUTATIONS: [(&str, &str, &str); 55] = [
+const MUTATIONS: [(&str, &str, &str); 60] = [
     (
         "    user: \"101:101\"\n",
         "    user: \"101:101\"\n    platform: linux/386\n",
@@ -1164,6 +1271,36 @@ const MUTATIONS: [(&str, &str, &str); 55] = [
         "# comment\r    cap_drop: !reset [ALL]\n",
         "control-char",
     ),
+    // A published REST port: LND's REST must stay on the internal network.
+    (
+        "    image: lightninglabs/lnd@sha256:54b3c87ad0bc3fea3fab8af23ace6421147ea97e6b56bf3911592d7853c185b8\n",
+        "    image: lightninglabs/lnd@sha256:54b3c87ad0bc3fea3fab8af23ace6421147ea97e6b56bf3911592d7853c185b8\n    ports: [\"8080:8080\"]\n",
+        "host-port",
+    ),
+    // The probe without cap_drop.
+    (
+        "    entrypoint: [\"curl\"]\n    networks: [lab]\n    read_only: true\n    cap_drop: [ALL]\n",
+        "    entrypoint: [\"curl\"]\n    networks: [lab]\n    read_only: true\n",
+        "capabilities-not-dropped",
+    ),
+    // The scanner with a volume.
+    (
+        "    profiles: [scan]\n",
+        "    profiles: [scan]\n    volumes: [\"./data:/state\"]\n",
+        "host-mount",
+    ),
+    // The scanner on a network that is not the internal lab one.
+    (
+        "    tmpfs:\n      - /state:uid=65532,gid=65532,mode=0700,size=1m\n    networks: [lab]\n",
+        "    tmpfs:\n      - /state:uid=65532,gid=65532,mode=0700,size=1m\n    networks: [bridge]\n",
+        "wrong-network",
+    ),
+    // An unpinned probe image.
+    (
+        "curlimages/curl@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93",
+        "curlimages/curl:8.23.0",
+        "unpinned-image",
+    ),
 ];
 
 /// The real compose file passes every check.
@@ -1220,7 +1357,17 @@ fn lab_readme_lists_every_pinned_image() {
             }
         }
     }
-    for needle in ["GPL-3.0", "lab/up.sh", "lab/down.sh"] {
+    for (_, image, _, _) in TOOLS {
+        if image.contains("@sha256:") && !readme.contains(image) {
+            missing.push(image);
+        }
+    }
+    for needle in [
+        "GPL-3.0",
+        "lab/up.sh",
+        "lab/down.sh",
+        "gd-lab-scanner:local",
+    ] {
         if !readme.contains(needle) {
             missing.push(needle);
         }
@@ -1588,4 +1735,123 @@ fn no_generated_secret_is_committed() {
         ignore.lines().any(|l| l == "lab/.data/"),
         ".gitignore must list lab/.data/"
     );
+}
+
+/// The scanner image: two stages, both pinned by digest, the Rust version of
+/// `rust-toolchain.toml`, a locked release build, only the binary copied over,
+/// a non-root user, and a `.dockerignore` that keeps secrets and state out.
+#[test]
+fn the_scanner_dockerfile_is_pinned_and_minimal() {
+    let docker = read("lab/scanner/Dockerfile");
+    let channel = read("rust-toolchain.toml")
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("channel = \"")?
+                .strip_suffix('"')
+                .map(str::to_owned)
+        })
+        .expect("rust-toolchain.toml has a channel");
+    let froms: Vec<&str> = docker
+        .lines()
+        .filter_map(|l| l.strip_prefix("FROM "))
+        .collect();
+    let mut problems = Vec::new();
+    if froms.len() != 2 {
+        problems.push(format!("{} FROM lines, expected 2", froms.len()));
+    }
+    for (n, from) in froms.iter().enumerate() {
+        let image = from.split_whitespace().next().unwrap_or("");
+        if !is_pinned(image) {
+            problems.push(format!("FROM #{} is not pinned by digest", n + 1));
+        }
+    }
+    let want_build = format!("rust:{channel}-slim-bookworm@sha256:");
+    if !froms
+        .first()
+        .is_some_and(|f| f.starts_with(&want_build) && f.ends_with(" AS build"))
+    {
+        problems.push(format!(
+            "the build stage must start FROM {want_build}... AS build"
+        ));
+    }
+    if !froms
+        .get(1)
+        .is_some_and(|f| f.starts_with("gcr.io/distroless/cc-debian12:nonroot@sha256:"))
+    {
+        problems.push("the runtime stage must be distroless cc-debian12:nonroot".to_owned());
+    }
+    for needle in [
+        "CARGO_BUILD_JOBS=8",
+        "cargo build --locked --release -p guard-dog",
+        "COPY --from=build /src/target/release/guard-dog /usr/local/bin/guard-dog",
+        "USER nonroot",
+        "ENTRYPOINT [\"/usr/local/bin/guard-dog\"]",
+    ] {
+        if !docker.contains(needle) {
+            problems.push(format!("the Dockerfile lacks {needle:?}"));
+        }
+    }
+    if docker.matches("COPY --from=").count() != 1 {
+        problems.push("exactly one COPY --from (the binary) is allowed".to_owned());
+    }
+    for banned in [
+        "\nADD ",
+        "curl ",
+        "wget ",
+        "sudo",
+        "--privileged",
+        "USER root",
+    ] {
+        if docker.contains(banned) {
+            problems.push(format!("the Dockerfile contains {banned:?}"));
+        }
+    }
+    let ignore = read(".dockerignore");
+    for line in [
+        "target/",
+        "lab/.data/",
+        ".claude/",
+        ".git/",
+        "fixtures/private-setups/",
+    ] {
+        if !ignore.lines().any(|l| l == line) {
+            problems.push(format!(".dockerignore lacks {line}"));
+        }
+    }
+    assert!(problems.is_empty(), "problems:\n{}", problems.join("\n"));
+}
+
+/// `up.sh` proves identification without a credential, then each narrow
+/// credential against the REST ports, and passes credentials to curl only on
+/// stdin. A text check: the live run is the real one.
+#[test]
+fn up_sh_proves_rest_identification_and_keeps_credentials_off_the_command_line() {
+    let up = read("lab/up.sh");
+    let mut problems = Vec::new();
+    for needle in [
+        "WWW-Authenticate: Basic realm=\\\"jsonrpc\\\"",
+        "https://lnd:8080/v1/state",
+        "https://lnd:8080/v2/versioner/version",
+        "https://lnd:8080/v1/balance/blockchain",
+        "https://cln:3010/v1/getinfo",
+        "https://cln:3010/v1/listfunds",
+        "http://nutshell:3338/v1/info",
+        "Accept: application/nostr+json",
+        "-H @-",
+        "Grpc-Metadata-macaroon",
+        "Rune: ",
+        "gdlabcanary-",
+        "lab/.data/replies",
+    ] {
+        if !up.contains(needle) {
+            problems.push(format!("up.sh lacks {needle:?}"));
+        }
+    }
+    // A credential variable must never sit in a curl argument or an `-H` argument.
+    for banned in ["-H \"Grpc", "-H \"Rune", "-H 'Rune", "-H 'Grpc", "--cacert"] {
+        if up.contains(banned) {
+            problems.push(format!("up.sh contains {banned:?}"));
+        }
+    }
+    assert!(problems.is_empty(), "problems:\n{}", problems.join("\n"));
 }

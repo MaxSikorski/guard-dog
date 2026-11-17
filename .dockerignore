@@ -1,0 +1,6 @@
+# What the lab's scanner image build (lab/scanner/Dockerfile) never sees.
+target/
+lab/.data/
+.claude/
+.git/
+fixtures/private-setups/
