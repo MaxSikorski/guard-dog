@@ -958,11 +958,11 @@ fn every_corpus_endpoint_for_cln_and_strfry_parses_in_its_scheme() {
     let cln_values = corpus_values_for("ElementsProject/lightning");
     assert!(cln_values.contains(&"26.06.8".to_string()));
     let mut parsed = 0;
-    for v in &cln_values {
+    for (i, v) in cln_values.iter().enumerate() {
         if v == "0" || v == "*" {
             continue;
         }
-        assert!(Calver.parse(v).is_ok(), "{v}");
+        assert!(Calver.parse(v).is_ok(), "cln corpus value {i}");
         parsed += 1;
     }
     assert!(parsed >= 1);
@@ -975,7 +975,7 @@ fn every_corpus_endpoint_for_cln_and_strfry_parses_in_its_scheme() {
 fn every_fixture_and_catalog_version_for_cln_and_strfry_parses() {
     for setup in ["lab-old-synthetic", "lab-regtest"] {
         let v = service_version(setup, "core-lightning");
-        assert!(Calver.parse(&v).is_ok(), "{setup} {v}");
+        assert!(Calver.parse(&v).is_ok(), "cln fixture version in {setup}");
         assert_eq!(Calver.candidate(&v).unwrap(), Candidate::Exact(cln(&v)));
     }
     let v = service_version("lab-regtest", "strfry");
@@ -989,15 +989,24 @@ fn every_fixture_and_catalog_version_for_cln_and_strfry_parses() {
 
     let examples = catalog_examples("core-lightning");
     assert!(!examples.is_empty());
-    for (raw, version) in examples {
-        assert!(Calver.parse(&raw).is_ok(), "{raw}");
-        assert!(Calver.parse(&version).is_ok(), "{version}");
+    for (i, (raw, version)) in examples.iter().enumerate() {
+        assert!(Calver.parse(raw).is_ok(), "cln catalog example {i} raw");
+        assert!(
+            Calver.parse(version).is_ok(),
+            "cln catalog example {i} version"
+        );
     }
     let examples = catalog_examples("strfry");
     assert!(!examples.is_empty());
-    for (raw, version) in examples {
-        assert!(GitDescribe.parse_describe(&raw).is_ok(), "{raw}");
-        assert!(GitDescribe.parse_describe(&version).is_ok(), "{version}");
+    for (i, (raw, version)) in examples.iter().enumerate() {
+        assert!(
+            GitDescribe.parse_describe(raw).is_ok(),
+            "strfry catalog example {i} raw"
+        );
+        assert!(
+            GitDescribe.parse_describe(version).is_ok(),
+            "strfry catalog example {i} version"
+        );
     }
 }
 
@@ -1014,7 +1023,7 @@ fn cln_fixture_pairs_give_the_version_subresult_the_fixture_states() {
         assert_eq!(kind(&got), expected, "{setup} {advisory}");
         // The same version spelled as the lab reports it (with `v`).
         let got = evaluate_entry(&Calver, &adv, 0, Some(&format!("v{installed}")));
-        assert_eq!(kind(&got), expected, "{setup} v{installed}");
+        assert_eq!(kind(&got), expected, "{setup} with a v prefix");
     }
     // The in-range answer is decided by the `fixed` event of the one range.
     assert_eq!(
@@ -1564,13 +1573,16 @@ fn cln_a_modded_value_through_the_evaluator_is_never_out_of_range() {
 }
 
 #[test]
-fn describe_refuses_the_broken_marker_and_markers_before_metadata() {
+fn describe_refuses_the_broken_marker_and_markers_on_either_side_of_metadata() {
     for s in [
         "2.0.0-broken",
         "1.1.2-148-g4cd3cf6-broken",
         "1.1.2-modded+meta",
         "1.1.2-dirty+meta",
         "1.1.2-broken+meta",
+        "1.1.2+meta-broken",
+        "1.1.2+meta-modded",
+        "2.0.0+vendor-broken",
         "1.2.0-rc.1-broken",
         "1.1.2-dirty-dirty",
     ] {
@@ -1607,6 +1619,25 @@ fn describe_refuses_the_broken_marker_and_markers_before_metadata() {
         reason(&evaluate_entry(&GitDescribe, &adv, 0, Some("2.0.0"))),
         UnknownReason::UnreadableListedVersion
     );
+    // Markers after build metadata: boundary and list entry.
+    for s in [
+        "1.1.2+meta-broken",
+        "1.1.2+meta-modded",
+        "2.0.0+vendor-broken",
+    ] {
+        let events = format!(r#"[{{"introduced":"0"}},{{"fixed":"{s}"}}]"#);
+        assert_eq!(
+            reason(&describe_ev(&events, "2.0.0")),
+            UnknownReason::UnparseableBoundary,
+            "boundary {s}"
+        );
+        let adv = git_advisory(json!([]), json!([s]));
+        assert_eq!(
+            reason(&evaluate_entry(&GitDescribe, &adv, 0, Some("2.0.0"))),
+            UnknownReason::UnreadableListedVersion,
+            "listed {s}"
+        );
+    }
     // CLN.
     for s in ["24.11-broken", "v24.11-12-gabc1234-broken"] {
         assert!(Calver.parse(s).is_err(), "parse {s}");

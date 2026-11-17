@@ -551,11 +551,11 @@ fn every_corpus_endpoint_for_cashu_parses_in_pep440() {
         }
     }
     assert!(seen.contains(&"0.18.0".to_string()));
-    for s in &seen {
+    for (i, s) in seen.iter().enumerate() {
         if s == "0" || s == "*" {
             continue;
         }
-        assert!(Pep440.parse(s).is_ok(), "{s}");
+        assert!(Pep440.parse(s).is_ok(), "cashu corpus value {i}");
     }
 }
 
@@ -563,7 +563,10 @@ fn every_corpus_endpoint_for_cashu_parses_in_pep440() {
 fn every_fixture_and_catalog_version_for_nutshell_parses_in_pep440() {
     for setup in ["lab-old-synthetic", "lab-regtest"] {
         let v = service_version(setup, "nutshell");
-        assert!(Pep440.parse(&v).is_ok(), "{setup} {v}");
+        assert!(
+            Pep440.parse(&v).is_ok(),
+            "nutshell fixture version in {setup}"
+        );
         assert!(Pep440.candidate(&v).is_ok());
     }
     let text = fs::read_to_string(root().join("catalog/nutshell.toml")).unwrap();
@@ -578,8 +581,8 @@ fn every_fixture_and_catalog_version_for_nutshell_parses_in_pep440() {
         }
     }
     assert!(!versions.is_empty());
-    for v in versions {
-        assert!(Pep440.parse(&v).is_ok(), "{v}");
+    for (i, v) in versions.iter().enumerate() {
+        assert!(Pep440.parse(v).is_ok(), "nutshell catalog example {i}");
     }
 }
 
