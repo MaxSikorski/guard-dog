@@ -2,7 +2,7 @@
 //! version (design 2.1, section 3).
 
 use crate::VersionScheme;
-use crate::osv::{AffectedEntry, Event, Range, RangeKind};
+use crate::osv::{Advisory, AffectedEntry, Event, Range, RangeKind};
 
 /// Where a piece of evidence comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +61,14 @@ pub enum UnknownReason {
     UnreadableListedVersion,
     /// The entry has no usable range and no listed version.
     NoUsableRangeOrVersions,
+    /// The record as a whole is uncertain.
+    RecordUncertain,
+    /// The scheme has no order, so ranges cannot be evaluated.
+    SchemeDoesNotOrder,
+    /// A listed version equals the installed one by order but is spelled differently.
+    SameVersionDifferentSpelling,
+    /// The installed version is only known to lie in an interval.
+    CandidateIsAnInterval,
 }
 
 /// What the advisory says about one installed version.
@@ -120,6 +128,10 @@ fn question(reason: UnknownReason) -> &'static str {
         UnknownReason::UnreadableListedVersion => {
             "A version listed in this advisory could not be compared with the installed one. Which versions does the advisory's source say are affected?"
         }
+        UnknownReason::RecordUncertain
+        | UnknownReason::SchemeDoesNotOrder
+        | UnknownReason::SameVersionDifferentSpelling
+        | UnknownReason::CandidateIsAnInterval => "stub",
         UnknownReason::NoUsableRangeOrVersions => {
             "This advisory lists no usable range or version for this package. Which versions does the advisory's source say are affected?"
         }
@@ -149,6 +161,22 @@ enum Outcome {
 /// installed version is the answer [`VersionEvidence::OutOfRange`]. The scheme is
 /// the caller's choice; the range type never selects a parser.
 pub fn evaluate_entry<S: VersionScheme + ?Sized>(
+    scheme: &S,
+    advisory: &Advisory,
+    entry_index: usize,
+    installed: Option<&str>,
+) -> VersionEvidence {
+    match advisory.affected.get(entry_index) {
+        Some(entry) => evaluate_inner(scheme, entry_index, entry, installed),
+        None => unknown(
+            entry_index,
+            Place::Entry,
+            UnknownReason::NoUsableRangeOrVersions,
+        ),
+    }
+}
+
+fn evaluate_inner<S: VersionScheme + ?Sized>(
     scheme: &S,
     entry_index: usize,
     entry: &AffectedEntry,

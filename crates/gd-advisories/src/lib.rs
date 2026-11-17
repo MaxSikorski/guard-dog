@@ -19,4 +19,4 @@ pub use osv::{
 };
 pub use package::{Ecosystem, MAX_PACKAGE_NAME, PackageError, PackageKey, canonical_package};
 pub use range::{Location, Place, UnknownReason, VersionEvidence, evaluate_entry};
-pub use version::{VersionError, VersionScheme};
+pub use version::{Candidate, VersionError, VersionScheme};

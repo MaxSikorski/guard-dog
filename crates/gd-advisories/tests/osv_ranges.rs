@@ -20,8 +20,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use gd_advisories::{
-    AffectedEntry, Location, Place, RangeKind, Source, UnknownReason, VersionError,
-    VersionEvidence, VersionScheme, evaluate_entry, parse_advisory, parse_advisory_from,
+    Advisory, Candidate, GapKind, Location, MAX_GAPS, Place, RangeKind, Source, UnknownReason,
+    VersionError, VersionEvidence, VersionScheme, evaluate_entry, parse_advisory,
+    parse_advisory_from,
 };
 use proptest::prelude::*;
 use serde_json::{Value, json};
@@ -66,17 +67,19 @@ impl PartialEq for V {
 impl Eq for V {}
 
 /// `semver` says whether the scheme has declared SemVer compatibility;
-/// `poison` lists raw strings the scheme refuses to read.
+/// `poison` lists raw strings the scheme refuses to read; `unordered` makes it
+/// an identity-only scheme.
 #[derive(Clone, Default)]
 struct TestScheme {
     semver: bool,
+    unordered: bool,
     poison: Vec<String>,
 }
 
 fn scheme() -> TestScheme {
     TestScheme {
         semver: true,
-        poison: vec![],
+        ..TestScheme::default()
     }
 }
 
@@ -87,6 +90,7 @@ impl VersionScheme for TestScheme {
         if self.poison.iter().any(|p| p == raw) {
             return Err(VersionError::Malformed);
         }
+        let raw = raw.strip_prefix('v').unwrap_or(raw);
         let (core, rc) = match raw.split_once("-rc") {
             Some((c, r)) => (
                 c,
@@ -112,14 +116,33 @@ impl VersionScheme for TestScheme {
         Some(a == b)
     }
 
+    /// `low~high` (or `low~`) is an installed value known only to lie in an interval.
+    fn candidate(&self, raw: &str) -> Result<Candidate<V>, VersionError> {
+        match raw.split_once('~') {
+            Some((low, "")) => Ok(Candidate::Between {
+                low: self.parse(low)?,
+                high: None,
+            }),
+            Some((low, high)) => Ok(Candidate::Between {
+                low: self.parse(low)?,
+                high: Some(self.parse(high)?),
+            }),
+            None => self.parse(raw).map(Candidate::Exact),
+        }
+    }
+
     fn reads_semver_ranges(&self) -> bool {
         self.semver
+    }
+
+    fn orders(&self) -> bool {
+        !self.unordered
     }
 }
 
 // ---------------------------------------------------------------- helpers
 
-fn entry_from(ranges: Value, versions: Value) -> AffectedEntry {
+fn entry_from(ranges: Value, versions: Value) -> Advisory {
     let mut e = json!({"package": {"ecosystem": "PyPI", "name": "cashu"}});
     if ranges.as_array().is_some_and(|r| !r.is_empty()) {
         e["ranges"] = ranges;
@@ -127,9 +150,12 @@ fn entry_from(ranges: Value, versions: Value) -> AffectedEntry {
     if versions.as_array().is_some_and(|r| !r.is_empty()) {
         e["versions"] = versions;
     }
-    let record = json!({"id": "x_test-1", "modified": "2026-11-17T00:00:00Z", "affected": [e]});
-    let mut adv = parse_advisory(record.to_string().as_bytes()).unwrap();
-    adv.affected.remove(0)
+    // The same entry at indices 0 to 7, so tests can check an index is carried.
+    let big = e.to_string().len() > 4096;
+    let affected: Vec<Value> = (0..if big { 1 } else { 8 }).map(|_| e.clone()).collect();
+    let record =
+        json!({"id": "x_test-1", "modified": "2026-11-17T00:00:00Z", "affected": affected});
+    parse_advisory(record.to_string().as_bytes()).unwrap()
 }
 
 fn eco(events: Value) -> Value {
@@ -139,7 +165,7 @@ fn eco(events: Value) -> Value {
 fn ev(s: &str, installed: &str) -> VersionEvidence {
     let events: Value = serde_json::from_str(s).unwrap();
     let entry = entry_from(json!([eco(events)]), json!([]));
-    evaluate_entry(&scheme(), 0, &entry, Some(installed))
+    evaluate_entry(&scheme(), &entry, 0, Some(installed))
 }
 
 fn kind(e: &VersionEvidence) -> &'static str {
@@ -216,7 +242,7 @@ fn row_introduced_zero_alone() {
         assert!(is_in(r, v), "{v}");
     }
     let entry = entry_from(json!([eco(serde_json::from_str(r).unwrap())]), json!([]));
-    let e = evaluate_entry(&scheme(), 0, &entry, None);
+    let e = evaluate_entry(&scheme(), &entry, 0, None);
     assert_eq!(reason(&e), UnknownReason::InstalledVersionUnknown);
 }
 
@@ -226,7 +252,7 @@ fn row_list_and_range_are_a_union() {
         json!([eco(json!([{"introduced": "0"}, {"fixed": "1.0.2"}]))]),
         json!(["1.0.2"]),
     );
-    let e = evaluate_entry(&scheme(), 0, &entry, Some("1.0.2"));
+    let e = evaluate_entry(&scheme(), &entry, 0, Some("1.0.2"));
     assert_eq!(
         e,
         VersionEvidence::InRange(Location {
@@ -235,7 +261,7 @@ fn row_list_and_range_are_a_union() {
         })
     );
     assert_eq!(
-        evaluate_entry(&scheme(), 0, &entry, Some("1.0.3")),
+        evaluate_entry(&scheme(), &entry, 0, Some("1.0.3")),
         VersionEvidence::OutOfRange
     );
 }
@@ -249,7 +275,7 @@ fn row_core_style_ranges() {
         ]),
         json!([]),
     );
-    let run = |v| evaluate_entry(&scheme(), 0, &entry, Some(v));
+    let run = |v| evaluate_entry(&scheme(), &entry, 0, Some(v));
     assert!(matches!(run("28.2"), VersionEvidence::InRange(_)));
     assert_eq!(run("28.3"), VersionEvidence::OutOfRange);
     assert!(matches!(run("29.1"), VersionEvidence::InRange(_)));
@@ -265,7 +291,7 @@ fn evidence_carries_entry_range_and_event_indices() {
         ]),
         json!([]),
     );
-    let e = evaluate_entry(&scheme(), 7, &entry, Some("3.5"));
+    let e = evaluate_entry(&scheme(), &entry, 7, Some("3.5"));
     assert_eq!(
         e,
         VersionEvidence::InRange(Location {
@@ -327,7 +353,7 @@ fn event_order_never_changes_the_result() {
         .iter()
         .map(|c| {
             let entry = entry_from(json!([eco(Value::Array(events.to_vec()))]), json!([]));
-            kind(&evaluate_entry(&scheme(), 0, &entry, Some(c)))
+            kind(&evaluate_entry(&scheme(), &entry, 0, Some(c)))
         })
         .collect();
     assert_eq!(
@@ -344,7 +370,7 @@ fn event_order_never_changes_the_result() {
         let entry = entry_from(json!([eco(Value::Array(shuffled))]), json!([]));
         let got: Vec<&str> = cands
             .iter()
-            .map(|c| kind(&evaluate_entry(&scheme(), 0, &entry, Some(c))))
+            .map(|c| kind(&evaluate_entry(&scheme(), &entry, 0, Some(c))))
             .collect();
         assert_eq!(got, expected, "{p:?}");
     });
@@ -418,7 +444,6 @@ fn conflicting_kinds_at_equal_coordinates_are_unknown() {
     for r in [
         r#"[{"introduced":"1"},{"fixed":"1"}]"#,
         r#"[{"fixed":"1"},{"introduced":"1"}]"#,
-        r#"[{"introduced":"1"},{"last_affected":"1"}]"#,
         r#"[{"introduced":"0"},{"fixed":"2"},{"introduced":"2"}]"#,
         // Equal by precedence, spelled differently.
         r#"[{"introduced":"1.0"},{"fixed":"1.0.0"}]"#,
@@ -465,8 +490,8 @@ fn range_level_extension_data_never_changes_membership() {
     );
     for c in ["0.5", "1", "1.5", "2", "3"] {
         assert_eq!(
-            kind(&evaluate_entry(&scheme(), 0, &plain, Some(c))),
-            kind(&evaluate_entry(&scheme(), 0, &noted, Some(c))),
+            kind(&evaluate_entry(&scheme(), &plain, 0, Some(c))),
+            kind(&evaluate_entry(&scheme(), &noted, 0, Some(c))),
             "{c}"
         );
     }
@@ -496,14 +521,14 @@ fn limits_none_one_two_and_star() {
 
 // ------------------------------------------------------------------ lists
 
-fn listed(versions: Value) -> AffectedEntry {
+fn listed(versions: Value) -> Advisory {
     entry_from(json!([]), versions)
 }
 
 #[test]
 fn a_complete_list_only_entry_clears_what_it_does_not_name() {
     let entry = listed(json!(["1.0.0", "1.0.1"]));
-    let run = |v| evaluate_entry(&scheme(), 3, &entry, Some(v));
+    let run = |v| evaluate_entry(&scheme(), &entry, 3, Some(v));
     assert_eq!(
         run("1.0.1"),
         VersionEvidence::InRange(Location {
@@ -515,34 +540,24 @@ fn a_complete_list_only_entry_clears_what_it_does_not_name() {
 }
 
 #[test]
-fn list_identity_is_not_precedence_equality() {
-    let entry = listed(json!(["1.0.0"]));
-    // 1.0 and 1.0.0 compare equal in this ordering but are different identities.
-    assert_eq!(
-        evaluate_entry(&scheme(), 0, &entry, Some("1.0")),
-        VersionEvidence::OutOfRange
-    );
-}
-
-#[test]
 fn a_list_cannot_clear_without_a_known_installed_identity() {
     let entry = listed(json!(["1.0.0"]));
-    let none = evaluate_entry(&scheme(), 0, &entry, None);
+    let none = evaluate_entry(&scheme(), &entry, 0, None);
     assert_eq!(reason(&none), UnknownReason::InstalledVersionUnknown);
-    let junk = evaluate_entry(&scheme(), 0, &entry, Some("banana"));
+    let junk = evaluate_entry(&scheme(), &entry, 0, Some("banana"));
     assert_eq!(reason(&junk), UnknownReason::InstalledVersionUnparseable);
-    let empty = evaluate_entry(&scheme(), 0, &entry, Some(""));
+    let empty = evaluate_entry(&scheme(), &entry, 0, Some(""));
     assert!(matches!(empty, VersionEvidence::Unknown { .. }));
 }
 
 #[test]
 fn an_unreadable_listed_version_keeps_the_answer_open() {
     let entry = listed(json!(["1.0.0", "banana"]));
-    let e = evaluate_entry(&scheme(), 0, &entry, Some("2.0.0"));
+    let e = evaluate_entry(&scheme(), &entry, 0, Some("2.0.0"));
     assert_eq!(reason(&e), UnknownReason::UnreadableListedVersion);
     // A hit elsewhere in the list is still positive evidence.
     assert!(matches!(
-        evaluate_entry(&scheme(), 0, &entry, Some("1.0.0")),
+        evaluate_entry(&scheme(), &entry, 0, Some("1.0.0")),
         VersionEvidence::InRange(_)
     ));
 }
@@ -553,11 +568,11 @@ fn a_list_miss_does_not_clear_when_a_range_is_unknown() {
         json!([eco(json!([{"introduced": "x"}, {"fixed": "2"}]))]),
         json!(["1.0.0"]),
     );
-    let e = evaluate_entry(&scheme(), 0, &entry, Some("5"));
+    let e = evaluate_entry(&scheme(), &entry, 0, Some("5"));
     assert_eq!(reason(&e), UnknownReason::UnparseableBoundary);
     // And a list hit still wins the union.
     assert!(matches!(
-        evaluate_entry(&scheme(), 0, &entry, Some("1.0.0")),
+        evaluate_entry(&scheme(), &entry, 0, Some("1.0.0")),
         VersionEvidence::InRange(_)
     ));
 }
@@ -568,7 +583,7 @@ fn ranges_and_list_both_must_exclude() {
         json!([eco(json!([{"introduced": "1"}, {"fixed": "2"}]))]),
         json!(["7"]),
     );
-    let run = |v| evaluate_entry(&scheme(), 0, &entry, Some(v));
+    let run = |v| evaluate_entry(&scheme(), &entry, 0, Some(v));
     assert!(matches!(run("7"), VersionEvidence::InRange(_)));
     assert!(matches!(run("1.5"), VersionEvidence::InRange(_)));
     assert_eq!(run("5"), VersionEvidence::OutOfRange);
@@ -577,18 +592,18 @@ fn ranges_and_list_both_must_exclude() {
 #[test]
 fn an_entry_with_nothing_usable_is_unknown() {
     let entry = entry_from(json!([]), json!([]));
-    let e = evaluate_entry(&scheme(), 2, &entry, Some("1"));
+    let e = evaluate_entry(&scheme(), &entry, 2, Some("1"));
     assert_eq!(reason(&e), UnknownReason::NoUsableRangeOrVersions);
     let entry = entry_from(json!([eco(json!([]))]), json!([]));
     assert!(matches!(
-        evaluate_entry(&scheme(), 0, &entry, Some("1")),
+        evaluate_entry(&scheme(), &entry, 0, Some("1")),
         VersionEvidence::Unknown { .. }
     ));
 }
 
 // ------------------------------------------------------------ GIT ranges
 
-fn git_entry(versions: Value) -> AffectedEntry {
+fn git_entry(versions: Value) -> Advisory {
     entry_from(
         json!([{
             "type": "GIT",
@@ -602,8 +617,8 @@ fn git_entry(versions: Value) -> AffectedEntry {
 #[test]
 fn a_git_range_is_unknown_and_asks_for_a_release() {
     let entry = git_entry(json!([]));
-    assert!(matches!(entry.ranges[0].kind, RangeKind::Git));
-    let e = evaluate_entry(&scheme(), 0, &entry, Some("1.2.3"));
+    assert!(matches!(entry.affected[0].ranges[0].kind, RangeKind::Git));
+    let e = evaluate_entry(&scheme(), &entry, 0, Some("1.2.3"));
     match &e {
         VersionEvidence::Unknown {
             reason, question, ..
@@ -621,14 +636,14 @@ fn a_git_range_still_checks_the_versions_list() {
     let entry = git_entry(json!(["1.2.3", "1.2.4"]));
     // A list hit is positive evidence.
     assert_eq!(
-        evaluate_entry(&scheme(), 0, &entry, Some("1.2.4")),
+        evaluate_entry(&scheme(), &entry, 0, Some("1.2.4")),
         VersionEvidence::InRange(Location {
             entry: 0,
             place: Place::Listed { index: 1 }
         })
     );
     // A list miss cannot clear the unresolved GIT range.
-    let miss = evaluate_entry(&scheme(), 0, &entry, Some("9.9.9"));
+    let miss = evaluate_entry(&scheme(), &entry, 0, Some("9.9.9"));
     assert_eq!(reason(&miss), UnknownReason::NoCommitGraph);
 }
 
@@ -643,11 +658,11 @@ fn a_git_range_never_hides_a_hit_in_another_range() {
         json!([]),
     );
     assert!(matches!(
-        evaluate_entry(&scheme(), 0, &entry, Some("1.5")),
+        evaluate_entry(&scheme(), &entry, 0, Some("1.5")),
         VersionEvidence::InRange(_)
     ));
     assert!(matches!(
-        evaluate_entry(&scheme(), 0, &entry, Some("5")),
+        evaluate_entry(&scheme(), &entry, 0, Some("5")),
         VersionEvidence::Unknown { .. }
     ));
 }
@@ -660,17 +675,14 @@ fn semver_range_on_a_scheme_without_semver_compatibility_is_unknown() {
         json!([{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "2"}]}]),
         json!([]),
     );
-    let strict = TestScheme {
-        semver: false,
-        poison: vec![],
-    };
+    let strict = TestScheme::default();
     for c in ["1", "3"] {
-        let e = evaluate_entry(&strict, 0, &entry, Some(c));
+        let e = evaluate_entry(&strict, &entry, 0, Some(c));
         assert_eq!(reason(&e), UnknownReason::SchemeMismatch, "{c}");
     }
     // The same range on a SemVer-compatible scheme is evaluated.
     assert!(matches!(
-        evaluate_entry(&scheme(), 0, &entry, Some("1")),
+        evaluate_entry(&scheme(), &entry, 0, Some("1")),
         VersionEvidence::InRange(_)
     ));
     // ECOSYSTEM ranges are in the product's own scheme, whatever it declares.
@@ -679,11 +691,11 @@ fn semver_range_on_a_scheme_without_semver_compatibility_is_unknown() {
         json!([]),
     );
     assert!(matches!(
-        evaluate_entry(&strict, 0, &eco_entry, Some("1")),
+        evaluate_entry(&strict, &eco_entry, 0, Some("1")),
         VersionEvidence::InRange(_)
     ));
     assert_eq!(
-        evaluate_entry(&strict, 0, &eco_entry, Some("3")),
+        evaluate_entry(&strict, &eco_entry, 0, Some("3")),
         VersionEvidence::OutOfRange
     );
 }
@@ -694,7 +706,7 @@ fn an_unsupported_range_type_is_unknown() {
         json!([{"type": "WIBBLE", "events": [{"introduced": "0"}, {"fixed": "2"}]}]),
         json!([]),
     );
-    let e = evaluate_entry(&scheme(), 0, &entry, Some("5"));
+    let e = evaluate_entry(&scheme(), &entry, 0, Some("5"));
     assert!(matches!(e, VersionEvidence::Unknown { .. }));
 }
 
@@ -704,7 +716,7 @@ fn unknown_installed_version_is_never_out_of_range() {
         json!([eco(json!([{"introduced": "1"}, {"fixed": "2"}]))]),
         json!([]),
     );
-    let e = evaluate_entry(&scheme(), 4, &entry, None);
+    let e = evaluate_entry(&scheme(), &entry, 4, None);
     match e {
         VersionEvidence::Unknown {
             reason,
@@ -717,7 +729,7 @@ fn unknown_installed_version_is_never_out_of_range() {
         }
         other => panic!("{other:?}"),
     }
-    let junk = evaluate_entry(&scheme(), 0, &entry, Some("not a version"));
+    let junk = evaluate_entry(&scheme(), &entry, 0, Some("not a version"));
     assert_eq!(reason(&junk), UnknownReason::InstalledVersionUnparseable);
 }
 
@@ -757,22 +769,338 @@ fn a_maximum_size_record_evaluates() {
     let entry = entry_from(json!([eco(Value::Array(events))]), Value::Array(versions));
     // 500 is between introduced 500 and fixed 501.
     assert!(matches!(
-        evaluate_entry(&scheme(), 0, &entry, Some("500")),
+        evaluate_entry(&scheme(), &entry, 0, Some("500")),
         VersionEvidence::InRange(_)
     ));
     assert_eq!(
-        evaluate_entry(&scheme(), 0, &entry, Some("501")),
+        evaluate_entry(&scheme(), &entry, 0, Some("501")),
         VersionEvidence::OutOfRange
     );
     assert!(matches!(
-        evaluate_entry(&scheme(), 0, &entry, Some("7.9999")),
+        evaluate_entry(&scheme(), &entry, 0, Some("7.9999")),
         VersionEvidence::InRange(_)
     ));
     // Past the last fix, nothing in the list or the ranges names it.
     assert_eq!(
-        evaluate_entry(&scheme(), 0, &entry, Some("5000")),
+        evaluate_entry(&scheme(), &entry, 0, Some("5000")),
         VersionEvidence::OutOfRange
     );
+}
+
+// ------------------------------------------------- fix round: new rules
+
+fn all_reasons(r: &str, cands: &[&str]) -> Vec<UnknownReason> {
+    cands
+        .iter()
+        .map(|c| {
+            let e = ev(r, c);
+            assert!(
+                matches!(e, VersionEvidence::Unknown { .. }),
+                "{r} {c}: {e:?}"
+            );
+            reason(&e)
+        })
+        .collect()
+}
+
+#[test]
+fn zero_on_a_limit_is_malformed_never_out() {
+    for r in [
+        r#"[{"introduced":"0"},{"limit":"0"}]"#,
+        r#"[{"introduced":"1"},{"fixed":"2"},{"limit":"0"}]"#,
+        r#"[{"introduced":"0"},{"fixed":"2"},{"limit":" 0"}]"#,
+        r#"[{"introduced":"0"},{"fixed":"2"},{"limit":"0 "}]"#,
+        r#"[{"introduced":"0"},{"fixed":" 0 "}]"#,
+        r#"[{"introduced":"0"},{"last_affected":"\t0"}]"#,
+    ] {
+        for reason in all_reasons(r, &["0", "0.5", "1", "5"]) {
+            assert_eq!(reason, UnknownReason::MalformedRange, "{r}");
+        }
+    }
+}
+
+#[test]
+fn outer_whitespace_is_trimmed_before_the_zero_and_star_rules() {
+    // " 0" is the "from the start" introduction, not a string for a parser.
+    let r = r#"[{"introduced":" 0 "},{"fixed":" 2"}]"#;
+    assert!(is_in(r, "0"));
+    assert!(is_in(r, "1"));
+    assert!(is_out(r, "2"));
+    let star = r#"[{"introduced":"0"},{"limit":" * "}]"#;
+    assert!(is_in(star, "1000"));
+    // Ordinary boundaries with outer whitespace read as the bare version.
+    let padded = r#"[{"introduced":" 1 "},{"fixed":"\t3\n"}]"#;
+    assert!(is_in(padded, "2"));
+    assert!(is_out(padded, "3"));
+    // Listed versions are trimmed too.
+    let entry = listed(json!([" 1.0.0 "]));
+    assert!(matches!(
+        evaluate_entry(&scheme(), &entry, 0, Some("1.0.0")),
+        VersionEvidence::InRange(_)
+    ));
+}
+
+#[test]
+fn a_single_release_range_names_exactly_that_release() {
+    let r = r#"[{"introduced":"1"},{"last_affected":"1"}]"#;
+    assert!(is_in(r, "1"));
+    assert!(is_out(r, "0.5"));
+    assert!(is_out(r, "1-rc1"));
+    assert!(is_out(r, "2"));
+    assert_eq!(
+        ev(r, "1"),
+        VersionEvidence::InRange(Location {
+            entry: 0,
+            place: Place::Range {
+                range: 0,
+                event: Some(0)
+            }
+        })
+    );
+    // After a closed interval, the same shape is still a point.
+    let r = r#"[{"introduced":"0"},{"fixed":"1"},{"introduced":"3"},{"last_affected":"3"}]"#;
+    assert!(is_in(r, "0.5"));
+    assert!(is_out(r, "2"));
+    assert!(is_in(r, "3"));
+    assert!(is_out(r, "4"));
+    // Written in any order.
+    let r = r#"[{"last_affected":"1"},{"introduced":"1"}]"#;
+    assert!(is_in(r, "1"));
+    assert!(is_out(r, "2"));
+}
+
+#[test]
+fn a_tie_with_an_interval_open_below_is_unknown() {
+    for r in [
+        r#"[{"introduced":"0"},{"last_affected":"2"},{"introduced":"2"}]"#,
+        r#"[{"introduced":"0"},{"fixed":"2"},{"introduced":"2"}]"#,
+        r#"[{"introduced":"1"},{"fixed":"1"}]"#,
+        r#"[{"introduced":"1"},{"fixed":"1"},{"last_affected":"1"}]"#,
+    ] {
+        for c in ["0.5", "1", "2", "3"] {
+            assert!(is_unknown(r, c), "{r} {c}");
+        }
+    }
+}
+
+#[test]
+fn events_must_alternate_opening_and_closing() {
+    for r in [
+        // Reversed bounds.
+        r#"[{"introduced":"5"},{"fixed":"3"}]"#,
+        r#"[{"introduced":"5"},{"last_affected":"3"}]"#,
+        // Two closings in a row.
+        r#"[{"introduced":"1"},{"fixed":"2"},{"fixed":"3"}]"#,
+        // A closing before any opening.
+        r#"[{"fixed":"1"},{"introduced":"2"}]"#,
+        r#"[{"introduced":"3"},{"fixed":"2"},{"introduced":"4"}]"#,
+    ] {
+        for reason in all_reasons(r, &["0.5", "1.5", "2.5", "4", "6"]) {
+            assert_eq!(reason, UnknownReason::MalformedRange, "{r}");
+        }
+    }
+    // Openings in a row and a trailing opening are fine.
+    let ok = r#"[{"introduced":"1"},{"introduced":"3"},{"fixed":"5"},{"introduced":"7"}]"#;
+    assert!(is_out(ok, "0.5"));
+    assert!(is_in(ok, "4"));
+    assert!(is_out(ok, "6"));
+    assert!(is_in(ok, "9"));
+}
+
+#[test]
+fn a_range_cannot_reopen_beyond_its_own_limit() {
+    for r in [
+        r#"[{"introduced":"0"},{"limit":"2"},{"introduced":"3"}]"#,
+        r#"[{"introduced":"3"},{"limit":"3"}]"#,
+        r#"[{"introduced":"1"},{"fixed":"2"},{"introduced":"5"},{"limit":"4"}]"#,
+        r#"[{"introduced":"0"},{"fixed":"2"},{"limit":"9"},{"limit":"1"},{"introduced":"3"}]"#,
+    ] {
+        for reason in all_reasons(r, &["0.5", "1.5", "2.5", "4", "6"]) {
+            assert_eq!(reason, UnknownReason::MalformedRange, "{r}");
+        }
+    }
+}
+
+#[test]
+fn a_listed_version_spelled_differently_is_never_a_miss() {
+    // 1.0 and 1.0.0 are equal in order and different identities.
+    let entry = listed(json!(["1.0.0"]));
+    let e = evaluate_entry(&scheme(), &entry, 0, Some("1.0"));
+    match &e {
+        VersionEvidence::Unknown {
+            reason, question, ..
+        } => {
+            assert_eq!(*reason, UnknownReason::SameVersionDifferentSpelling);
+            assert!(!question.trim().is_empty());
+        }
+        other => panic!("{other:?}"),
+    }
+    // Next to a range that excludes it, still not a clearance.
+    let entry = entry_from(
+        json!([eco(json!([{"introduced": "5"}, {"fixed": "6"}]))]),
+        json!(["1.0.0"]),
+    );
+    let e = evaluate_entry(&scheme(), &entry, 0, Some("1.0"));
+    assert_eq!(reason(&e), UnknownReason::SameVersionDifferentSpelling);
+    // The same spelling is a hit; a genuinely different version is a miss.
+    assert!(matches!(
+        evaluate_entry(&scheme(), &entry, 0, Some("1.0.0")),
+        VersionEvidence::InRange(_)
+    ));
+    assert_eq!(
+        evaluate_entry(&scheme(), &entry, 0, Some("1.0.1")),
+        VersionEvidence::OutOfRange
+    );
+}
+
+fn record_with(extra: Value) -> Advisory {
+    let mut record = json!({
+        "id": "x_test-1",
+        "modified": "2026-11-17T00:00:00Z",
+        "affected": [{
+            "package": {"ecosystem": "PyPI", "name": "cashu"},
+            "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "1"}, {"fixed": "2"}]}]
+        }]
+    });
+    for (k, v) in extra.as_object().unwrap() {
+        record[k] = v.clone();
+    }
+    parse_advisory(record.to_string().as_bytes()).unwrap()
+}
+
+#[test]
+fn a_record_that_is_uncertain_as_a_whole_never_clears() {
+    let plain = record_with(json!({}));
+    assert_eq!(
+        evaluate_entry(&scheme(), &plain, 0, Some("5")),
+        VersionEvidence::OutOfRange
+    );
+
+    let schema = record_with(json!({"schema_version": "1.0.0"}));
+    assert!(
+        schema
+            .gaps
+            .iter()
+            .any(|g| g.kind == GapKind::UnexpectedSchemaVersion)
+    );
+
+    let mut many = serde_json::Map::new();
+    for i in 0..(MAX_GAPS + 20) {
+        many.insert(format!("zz_unknown_{i}"), json!(1));
+    }
+    let truncated = record_with(Value::Object(many));
+    assert!(
+        truncated
+            .gaps
+            .iter()
+            .any(|g| g.kind == GapKind::GapsTruncated)
+    );
+
+    for adv in [&schema, &truncated] {
+        let e = evaluate_entry(&scheme(), adv, 0, Some("5"));
+        assert_eq!(reason(&e), UnknownReason::RecordUncertain);
+        // Positive evidence still stands.
+        assert!(matches!(
+            evaluate_entry(&scheme(), adv, 0, Some("1.5")),
+            VersionEvidence::InRange(_)
+        ));
+    }
+}
+
+#[test]
+fn an_entry_index_outside_the_record_is_unknown() {
+    let adv = record_with(json!({}));
+    assert!(matches!(
+        evaluate_entry(&scheme(), &adv, 9, Some("1")),
+        VersionEvidence::Unknown { .. }
+    ));
+}
+
+#[test]
+fn an_interval_candidate_is_out_only_when_nothing_inside_can_open_a_range() {
+    let entry = entry_from(
+        json!([eco(json!([{"introduced": "5"}, {"fixed": "7"}]))]),
+        json!([]),
+    );
+    let run = |v| evaluate_entry(&scheme(), &entry, 0, Some(v));
+    // Below the range, and the interval ends before it opens.
+    assert_eq!(run("1~3"), VersionEvidence::OutOfRange);
+    // Past the fix, with nothing above that opens.
+    assert_eq!(run("8~"), VersionEvidence::OutOfRange);
+    assert_eq!(run("8~20"), VersionEvidence::OutOfRange);
+    // An opening inside the interval, or an open low end, cannot be decided.
+    for v in ["1~6", "1~", "5~6", "6~", "4~5"] {
+        assert_eq!(reason(&run(v)), UnknownReason::CandidateIsAnInterval, "{v}");
+    }
+    // An exact version is unaffected.
+    assert!(matches!(run("6"), VersionEvidence::InRange(_)));
+    // A listed version inside the interval keeps it open; outside does not.
+    let listed_in = entry_from(
+        json!([eco(json!([{"introduced": "5"}, {"fixed": "7"}]))]),
+        json!(["2"]),
+    );
+    assert_eq!(
+        reason(&evaluate_entry(&scheme(), &listed_in, 0, Some("1~3"))),
+        UnknownReason::CandidateIsAnInterval
+    );
+    let listed_out = entry_from(
+        json!([eco(json!([{"introduced": "5"}, {"fixed": "7"}]))]),
+        json!(["9"]),
+    );
+    assert_eq!(
+        evaluate_entry(&scheme(), &listed_out, 0, Some("1~3")),
+        VersionEvidence::OutOfRange
+    );
+}
+
+#[test]
+fn a_scheme_without_an_order_makes_ranges_unknown_and_still_checks_the_list() {
+    let none = TestScheme {
+        unordered: true,
+        semver: true,
+        ..TestScheme::default()
+    };
+    let ranges = entry_from(
+        json!([eco(json!([{"introduced": "0"}, {"fixed": "2"}]))]),
+        json!([]),
+    );
+    for c in ["1", "5"] {
+        let e = evaluate_entry(&none, &ranges, 0, Some(c));
+        assert_eq!(reason(&e), UnknownReason::SchemeDoesNotOrder, "{c}");
+    }
+    let both = entry_from(
+        json!([eco(json!([{"introduced": "0"}, {"fixed": "2"}]))]),
+        json!(["9"]),
+    );
+    assert!(matches!(
+        evaluate_entry(&none, &both, 0, Some("9")),
+        VersionEvidence::InRange(_)
+    ));
+    assert!(matches!(
+        evaluate_entry(&none, &both, 0, Some("1")),
+        VersionEvidence::Unknown { .. }
+    ));
+    // A complete list-only entry is decided by identity alone.
+    let only = listed(json!(["9"]));
+    assert_eq!(
+        evaluate_entry(&none, &only, 0, Some("1")),
+        VersionEvidence::OutOfRange
+    );
+}
+
+#[test]
+fn the_smallest_reason_wins_whatever_the_order() {
+    let git = json!({"type": "GIT", "repo": "https://github.com/example/project",
+        "events": [{"introduced": "0"}, {"fixed": "4cd3cf6a1b2c3d4e5f60718293a4b5c6d7e8f901"}]});
+    let bad_limit = eco(json!([{"introduced": "0"}, {"limit": "banana"}]));
+    for ranges in [json!([git, bad_limit]), json!([bad_limit, git])] {
+        let entry = entry_from(ranges, json!(["banana"]));
+        let e = evaluate_entry(&scheme(), &entry, 0, Some("1"));
+        assert_eq!(reason(&e), UnknownReason::NoCommitGraph);
+    }
+    // Within one range too: an unparseable boundary beats a malformed shape.
+    let r = r#"[{"introduced":"x"},{"fixed":"2"},{"fixed":"1"}]"#;
+    assert_eq!(reason(&ev(r, "1")), UnknownReason::UnparseableBoundary);
 }
 
 // ---------------------------------------------------- property: monotonicity
@@ -816,6 +1144,7 @@ fn coordinate() -> impl Strategy<Value = String> {
         8 => (0u8..8).prop_map(|n| n.to_string()),
         2 => (1u8..8).prop_map(|n| format!("{n}-rc1")),
         1 => Just("0".to_string()),
+        1 => Just(" 0 ".to_string()),
         1 => Just("*".to_string()),
         1 => Just("banana".to_string()),
     ]
@@ -832,133 +1161,436 @@ fn spec() -> impl Strategy<Value = Spec> {
         .prop_map(|(ranges, versions)| Spec { ranges, versions })
 }
 
-/// `replace` swaps one event's value for text the scheme cannot read.
-fn build(spec: &Spec, replace: Option<(usize, usize)>) -> Option<AffectedEntry> {
-    let ranges: Vec<Value> = spec
-        .ranges
+fn range_json(r: &RangeSpec, range_index: usize, replace: Option<(usize, usize)>) -> Value {
+    let events: Vec<Value> = r
+        .events
         .iter()
         .enumerate()
-        .map(|(i, r)| {
-            let events: Vec<Value> = r
-                .events
-                .iter()
-                .enumerate()
-                .map(|(j, e)| {
-                    let v = if replace == Some((i, j)) {
-                        "not-a-version".to_string()
-                    } else {
-                        e.value.clone()
-                    };
-                    let key = ["introduced", "fixed", "last_affected", "limit"][e.kind as usize];
-                    json!({ key: v })
-                })
-                .collect();
-            let ty = ["ECOSYSTEM", "SEMVER", "GIT", "WIBBLE"][r.range_type as usize];
-            if ty == "GIT" {
-                json!({"type": ty, "repo": "https://github.com/example/project", "events": events})
+        .map(|(j, e)| {
+            let v = if replace == Some((range_index, j)) {
+                "not-a-version".to_string()
             } else {
-                json!({"type": ty, "events": events})
-            }
+                e.value.clone()
+            };
+            let key = ["introduced", "fixed", "last_affected", "limit"][e.kind as usize];
+            json!({ key: v })
         })
+        .collect();
+    let ty = ["ECOSYSTEM", "SEMVER", "GIT", "WIBBLE"][r.range_type as usize];
+    if ty == "GIT" {
+        json!({"type": ty, "repo": "https://github.com/example/project", "events": events})
+    } else {
+        json!({"type": ty, "events": events})
+    }
+}
+
+/// `replace` swaps one event's value for text the scheme cannot read.
+fn build_from(
+    ranges: &[RangeSpec],
+    versions: &[String],
+    replace: Option<(usize, usize)>,
+) -> Option<Advisory> {
+    let ranges: Vec<Value> = ranges
+        .iter()
+        .enumerate()
+        .map(|(i, r)| range_json(r, i, replace))
         .collect();
     let mut e = json!({"package": {"ecosystem": "PyPI", "name": "cashu"}});
     if !ranges.is_empty() {
         e["ranges"] = Value::Array(ranges);
     }
-    if !spec.versions.is_empty() {
-        e["versions"] = json!(spec.versions);
+    if !versions.is_empty() {
+        e["versions"] = json!(versions);
     }
     let record = json!({"id": "x_test-1", "modified": "2026-11-17T00:00:00Z", "affected": [e]});
-    let mut adv = parse_advisory(record.to_string().as_bytes()).ok()?;
-    if adv.affected.is_empty() {
-        return None;
-    }
-    Some(adv.affected.remove(0))
+    parse_advisory(record.to_string().as_bytes()).ok()
 }
 
-fn not_out(before: &VersionEvidence, after: &VersionEvidence) -> bool {
-    *before == VersionEvidence::OutOfRange || *after != VersionEvidence::OutOfRange
+fn build(spec: &Spec, replace: Option<(usize, usize)>) -> Option<Advisory> {
+    build_from(&spec.ranges, &spec.versions, replace)
 }
 
-proptest! {
-    #![proptest_config(config())]
+/// A result can lose certainty but never swap it for the opposite answer.
+fn no_stronger_or_opposite(before: &VersionEvidence, after: &VersionEvidence) -> bool {
+    kind(before) == kind(after) || matches!(after, VersionEvidence::Unknown { .. })
+}
 
-    /// Unknown never moves a result toward not-affected: an installed version,
-    /// a boundary, or the scheme's reading of a string replaced by something
-    /// unreadable never turns InRange or Unknown into OutOfRange.
-    #[test]
-    fn unknown_never_moves_toward_out_of_range(
-        spec in spec(),
-        installed in prop_oneof![(0u8..9).prop_map(|n| n.to_string()), (1u8..9).prop_map(|n| format!("{n}-rc1"))],
-        pick in (any::<usize>(), any::<usize>()),
-    ) {
-        let Some(entry) = build(&spec, None) else { return Ok(()); };
-        let s = scheme();
-        let base = evaluate_entry(&s, 0, &entry, Some(&installed));
-        prop_assert!(base != VersionEvidence::NotApplicable);
+fn installed_strategy() -> impl Strategy<Value = String> {
+    prop_oneof![
+        (0u8..9).prop_map(|n| n.to_string()),
+        (1u8..9).prop_map(|n| format!("{n}-rc1"))
+    ]
+}
 
-        // The installed version becomes unknown or unreadable.
-        for gone in [None, Some("banana"), Some("")] {
-            let after = evaluate_entry(&s, 0, &entry, gone);
-            prop_assert!(after != VersionEvidence::OutOfRange, "{gone:?}");
-            prop_assert!(after != VersionEvidence::NotApplicable);
-        }
-
-        // One boundary becomes unreadable.
-        let total: usize = spec.ranges.iter().map(|r| r.events.len()).sum();
-        if total > 0 {
-            let mut n = pick.0 % total;
-            let mut at = (0, 0);
-            for (i, r) in spec.ranges.iter().enumerate() {
-                if n < r.events.len() { at = (i, n); break; }
-                n -= r.events.len();
-            }
-            if let Some(mutated) = build(&spec, Some(at)) {
-                let after = evaluate_entry(&s, 0, &mutated, Some(&installed));
-                prop_assert!(not_out(&base, &after), "{base:?} -> {after:?}");
-                prop_assert!(after != VersionEvidence::NotApplicable);
-            }
-
-            // The scheme refuses to read that same boundary text.
-            let (i, j) = at;
-            let poisoned = TestScheme {
-                semver: true,
-                poison: vec![spec.ranges[i].events[j].value.clone()],
+/// Unknown never moves a result toward not-affected: an installed version, a
+/// boundary, a listed version or the scheme's reading replaced by something
+/// unreadable never turns InRange or Unknown into OutOfRange, and never makes
+/// an OutOfRange base into a positive answer either. The run also counts what
+/// it reached, so a generator that stops producing one kind of base fails.
+#[test]
+fn unknown_never_moves_toward_out_of_range() {
+    use std::cell::Cell;
+    let (ins, outs, unknowns, mutated) = (Cell::new(0), Cell::new(0), Cell::new(0), Cell::new(0));
+    let mut runner = proptest::test_runner::TestRunner::new(config());
+    let strategy = (
+        spec(),
+        installed_strategy(),
+        (any::<usize>(), any::<usize>()),
+    );
+    runner
+        .run(&strategy, |(spec, installed, pick)| {
+            let Some(entry) = build(&spec, None) else {
+                return Ok(());
             };
-            let after = evaluate_entry(&poisoned, 0, &entry, Some(&installed));
-            prop_assert!(not_out(&base, &after), "{base:?} -> {after:?}");
-        }
-
-        // The scheme refuses to read a listed version.
-        if let Some(v) = spec.versions.get(pick.1 % spec.versions.len().max(1)) {
-            let poisoned = TestScheme { semver: true, poison: vec![v.clone()] };
-            let after = evaluate_entry(&poisoned, 0, &entry, Some(&installed));
-            prop_assert!(not_out(&base, &after), "{base:?} -> {after:?}");
-        }
-
-        // A scheme that has not declared SemVer compatibility never clears.
-        let strict = TestScheme { semver: false, poison: vec![] };
-        let after = evaluate_entry(&strict, 0, &entry, Some(&installed));
-        prop_assert!(not_out(&base, &after), "{base:?} -> {after:?}");
-    }
-
-    /// Shuffling the events of every range never changes the kind of result.
-    #[test]
-    fn shuffling_events_never_changes_the_result(spec in spec(), installed in (0u8..9).prop_map(|n| n.to_string()), rot in any::<usize>()) {
-        let Some(entry) = build(&spec, None) else { return Ok(()); };
-        let mut shuffled = spec.clone();
-        for r in &mut shuffled.ranges {
-            if !r.events.is_empty() {
-                let k = rot % r.events.len();
-                r.events.rotate_left(k);
-                r.events.reverse();
+            let s = scheme();
+            let base = evaluate_entry(&s, &entry, 0, Some(&installed));
+            prop_assert!(base != VersionEvidence::NotApplicable);
+            match base {
+                VersionEvidence::InRange(_) => ins.set(ins.get() + 1),
+                VersionEvidence::OutOfRange => outs.set(outs.get() + 1),
+                _ => unknowns.set(unknowns.get() + 1),
             }
+
+            // The installed version becomes unknown or unreadable.
+            for gone in [None, Some("banana"), Some("")] {
+                let after = evaluate_entry(&s, &entry, 0, gone);
+                prop_assert!(
+                    matches!(after, VersionEvidence::Unknown { .. }),
+                    "{gone:?} {after:?}"
+                );
+            }
+
+            // One boundary becomes unreadable.
+            let total: usize = spec.ranges.iter().map(|r| r.events.len()).sum();
+            if total > 0 {
+                let mut n = pick.0 % total;
+                let mut at = (0, 0);
+                for (i, r) in spec.ranges.iter().enumerate() {
+                    if n < r.events.len() {
+                        at = (i, n);
+                        break;
+                    }
+                    n -= r.events.len();
+                }
+                if let Some(changed) = build(&spec, Some(at)) {
+                    let after = evaluate_entry(&s, &changed, 0, Some(&installed));
+                    prop_assert!(
+                        no_stronger_or_opposite(&base, &after),
+                        "{base:?} -> {after:?}"
+                    );
+                    mutated.set(mutated.get() + 1);
+                }
+                // The scheme refuses to read that same boundary text.
+                let (i, j) = at;
+                let poisoned = TestScheme {
+                    semver: true,
+                    poison: vec![spec.ranges[i].events[j].value.clone()],
+                    ..TestScheme::default()
+                };
+                let after = evaluate_entry(&poisoned, &entry, 0, Some(&installed));
+                prop_assert!(
+                    no_stronger_or_opposite(&base, &after),
+                    "{base:?} -> {after:?}"
+                );
+            }
+
+            // The scheme refuses to read a listed version.
+            if let Some(v) = spec.versions.get(pick.1 % spec.versions.len().max(1)) {
+                let poisoned = TestScheme {
+                    semver: true,
+                    poison: vec![v.clone()],
+                    ..TestScheme::default()
+                };
+                let after = evaluate_entry(&poisoned, &entry, 0, Some(&installed));
+                prop_assert!(
+                    no_stronger_or_opposite(&base, &after),
+                    "{base:?} -> {after:?}"
+                );
+            }
+
+            // A scheme without SemVer compatibility, or without an order.
+            for weaker in [
+                TestScheme::default(),
+                TestScheme {
+                    semver: true,
+                    unordered: true,
+                    ..TestScheme::default()
+                },
+            ] {
+                let after = evaluate_entry(&weaker, &entry, 0, Some(&installed));
+                prop_assert!(
+                    no_stronger_or_opposite(&base, &after),
+                    "{base:?} -> {after:?}"
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+    // The generator reaches every kind of base, and boundary mutations.
+    assert!(ins.get() >= 100, "in-range bases: {}", ins.get());
+    assert!(outs.get() >= 100, "out-of-range bases: {}", outs.get());
+    assert!(unknowns.get() >= 100, "unknown bases: {}", unknowns.get());
+    assert!(mutated.get() >= 300, "mutated entries: {}", mutated.get());
+}
+
+/// Known-invalid patterns are never out of range, whatever else is around them.
+#[test]
+fn a_known_invalid_range_is_never_out_of_range() {
+    let pattern = (0u8..8, 0u8..4, 1u8..4, 0u8..3).prop_map(|(shape, a, k, ws)| {
+        let pad = ["", " ", "\t"][ws as usize];
+        let (lo, hi) = (a, a + k);
+        let events = match shape {
+            0 => json!([{"introduced": "0"}, {"limit": format!("{pad}0{pad}")}]),
+            1 => json!([{"introduced": lo.to_string()}, {"fixed": hi.to_string()}, {"limit": format!("{pad}0")}]),
+            2 => json!([{"introduced": hi.to_string()}, {"fixed": lo.to_string()}]),
+            3 => json!([{"introduced": lo.to_string()}, {"fixed": hi.to_string()}, {"fixed": (hi + 1).to_string()}]),
+            4 => json!([{"fixed": lo.to_string()}, {"introduced": hi.to_string()}]),
+            5 => json!([{"introduced": "0"}, {"limit": hi.to_string()}, {"introduced": (hi + 1).to_string()}]),
+            6 => json!([{"introduced": "0"}, {"fixed": format!("{pad}0{pad}")}]),
+            _ => json!([{"introduced": lo.to_string()}, {"last_affected": hi.to_string()}, {"last_affected": (hi + 1).to_string()}]),
+        };
+        eco(events)
+    });
+    let strategy = (
+        pattern,
+        prop::collection::vec(spec(), 0..1),
+        installed_strategy(),
+        any::<bool>(),
+    );
+    proptest::test_runner::TestRunner::new(config())
+        .run(&strategy, |(bad, other, installed, first)| {
+            let mut ranges: Vec<Value> = other
+                .first()
+                .map(|s| {
+                    s.ranges
+                        .iter()
+                        .enumerate()
+                        .map(|(i, r)| range_json(r, i, None))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if first {
+                ranges.insert(0, bad);
+            } else {
+                ranges.push(bad);
+            }
+            let versions = other
+                .first()
+                .map(|s| s.versions.clone())
+                .unwrap_or_default();
+            let entry = entry_from(Value::Array(ranges), json!(versions));
+            let after = evaluate_entry(&scheme(), &entry, 0, Some(&installed));
+            prop_assert!(after != VersionEvidence::OutOfRange, "{after:?}");
+            prop_assert!(after != VersionEvidence::NotApplicable);
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Shuffling the events of every range never changes the kind of result.
+#[test]
+fn shuffling_events_never_changes_the_result() {
+    let strategy = (spec(), installed_strategy(), any::<usize>());
+    proptest::test_runner::TestRunner::new(config())
+        .run(&strategy, |(spec, installed, rot)| {
+            let Some(entry) = build(&spec, None) else {
+                return Ok(());
+            };
+            let mut shuffled = spec.clone();
+            for r in &mut shuffled.ranges {
+                if !r.events.is_empty() {
+                    let k = rot % r.events.len();
+                    r.events.rotate_left(k);
+                    r.events.reverse();
+                }
+            }
+            let Some(other) = build(&shuffled, None) else {
+                return Ok(());
+            };
+            let a = evaluate_entry(&scheme(), &entry, 0, Some(&installed));
+            let b = evaluate_entry(&scheme(), &other, 0, Some(&installed));
+            prop_assert_eq!(kind(&a), kind(&b));
+            Ok(())
+        })
+        .unwrap();
+}
+
+// ------------------------------------------------- differential oracle
+
+/// A valid range: openings and closings alternate in increasing order, limits
+/// lie above every opening, and a point range is an introduced and a
+/// last_affected at one release.
+#[derive(Clone, Debug)]
+enum Valid {
+    Normal {
+        zero_start: bool,
+        coords: Vec<u8>,
+        last_affected: bool,
+        limits: Vec<u8>,
+        star: bool,
+        range_type: u8,
+        rot: usize,
+    },
+    Point {
+        at: u8,
+    },
+}
+
+fn valid_range() -> impl Strategy<Value = Valid> {
+    prop_oneof![
+        3 => (
+            any::<bool>(),
+            prop::collection::btree_set(1u8..9, 1..6),
+            any::<bool>(),
+            prop::collection::vec(1u8..12, 0..3),
+            any::<bool>(),
+            0u8..2,
+            any::<usize>(),
+        )
+            .prop_map(|(zero_start, coords, last_affected, limits, star, range_type, rot)| {
+                Valid::Normal {
+                    zero_start,
+                    coords: coords.into_iter().collect(),
+                    last_affected,
+                    limits,
+                    star,
+                    range_type,
+                    rot,
+                }
+            }),
+        1 => (1u8..9).prop_map(|at| Valid::Point { at }),
+    ]
+}
+
+type Step = (char, Option<u8>);
+
+/// The events as (kind, coordinate) with `None` for "from the start", the
+/// limits, and the JSON of the range.
+fn valid_parts(v: &Valid) -> (Vec<Step>, Vec<u8>, bool, Value) {
+    match v {
+        Valid::Point { at } => {
+            let steps = vec![('I', Some(*at)), ('L', Some(*at))];
+            let json =
+                eco(json!([{"last_affected": at.to_string()}, {"introduced": at.to_string()}]));
+            (steps, vec![], false, json)
         }
-        let Some(other) = build(&shuffled, None) else { return Ok(()); };
-        let a = evaluate_entry(&scheme(), 0, &entry, Some(&installed));
-        let b = evaluate_entry(&scheme(), 0, &other, Some(&installed));
-        prop_assert_eq!(kind(&a), kind(&b));
+        Valid::Normal {
+            zero_start,
+            coords,
+            last_affected,
+            limits,
+            star,
+            range_type,
+            rot,
+        } => {
+            let close = if *last_affected { 'L' } else { 'F' };
+            let mut steps: Vec<Step> = Vec::new();
+            let mut open = true;
+            if *zero_start {
+                steps.push(('I', None));
+                open = false;
+            }
+            for c in coords {
+                steps.push((if open { 'I' } else { close }, Some(*c)));
+                open = !open;
+            }
+            let max_open = steps
+                .iter()
+                .filter(|(k, _)| *k == 'I')
+                .filter_map(|(_, c)| *c)
+                .max()
+                .unwrap_or(0);
+            let limits: Vec<u8> = limits.iter().copied().filter(|l| *l > max_open).collect();
+            let mut events: Vec<Value> = steps
+                .iter()
+                .map(|(k, c)| {
+                    let text = c.map_or("0".to_string(), |c| c.to_string());
+                    match k {
+                        'I' => json!({"introduced": text}),
+                        'F' => json!({"fixed": text}),
+                        _ => json!({"last_affected": text}),
+                    }
+                })
+                .collect();
+            for l in &limits {
+                events.push(json!({"limit": l.to_string()}));
+            }
+            if *star {
+                events.push(json!({"limit": "*"}));
+            }
+            let k = rot % events.len();
+            events.rotate_left(k);
+            if rot % 2 == 1 {
+                events.reverse();
+            }
+            let ty = ["ECOSYSTEM", "SEMVER"][*range_type as usize];
+            (steps, limits, *star, json!({"type": ty, "events": events}))
+        }
     }
+}
+
+/// OSV's evaluation, written out directly: walk the events in version order,
+/// applying each one that the candidate has reached.
+fn oracle_range(steps: &[Step], limits: &[u8], star: bool, candidate: &str) -> bool {
+    let s = scheme();
+    let cand = s.parse(candidate).unwrap();
+    let key = |c: &Option<u8>| c.map(|c| s.parse(&c.to_string()).unwrap());
+    let mut sorted = steps.to_vec();
+    sorted.sort_by(|a, b| key(&a.1).cmp(&key(&b.1)).then(a.0.cmp(&b.0)));
+    let mut affected = false;
+    for (k, c) in &sorted {
+        let reached_incl = key(c).is_none_or(|v| v <= cand);
+        let reached_strict = key(c).is_none_or(|v| v < cand);
+        match k {
+            'I' if reached_incl => affected = true,
+            'F' if reached_incl => affected = false,
+            'L' if reached_strict => affected = false,
+            _ => {}
+        }
+    }
+    let below_a_limit = star
+        || limits.is_empty()
+        || limits
+            .iter()
+            .any(|l| cand < s.parse(&l.to_string()).unwrap());
+    affected && below_a_limit
+}
+
+#[test]
+fn the_evaluator_agrees_with_a_direct_transcription_of_osv_on_valid_ranges() {
+    let strategy = (
+        prop::collection::vec(valid_range(), 1..4),
+        prop::collection::vec(1u8..9, 0..4),
+        installed_strategy(),
+    );
+    let (ins, outs) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
+    proptest::test_runner::TestRunner::new(config())
+        .run(&strategy, |(ranges, list, installed)| {
+            let parts: Vec<_> = ranges.iter().map(valid_parts).collect();
+            let json_ranges: Vec<Value> = parts.iter().map(|p| p.3.clone()).collect();
+            let versions: Vec<String> = list.iter().map(|n| n.to_string()).collect();
+            let entry = entry_from(Value::Array(json_ranges), json!(versions));
+            let expected = parts
+                .iter()
+                .any(|(steps, limits, star, _)| oracle_range(steps, limits, *star, &installed))
+                || versions.iter().any(|v| *v == installed);
+            let got = evaluate_entry(&scheme(), &entry, 0, Some(&installed));
+            let want = if expected { "in" } else { "out" };
+            prop_assert_eq!(kind(&got), want, "{:?} installed {}", ranges, installed);
+            if expected {
+                ins.set(ins.get() + 1);
+            } else {
+                outs.set(outs.get() + 1);
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        ins.get() >= 100 && outs.get() >= 100,
+        "{} {}",
+        ins.get(),
+        outs.get()
+    );
 }
 
 // ------------------------------------------------------------------ corpus
@@ -996,37 +1628,51 @@ fn neighbours(s: &str) -> Vec<String> {
     out
 }
 
+/// Every event of a raw range as (kind, text), read without the parser.
+fn raw_events(range: &Value) -> Vec<(String, String)> {
+    range["events"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.as_object())
+        .flat_map(|o| {
+            o.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
+        })
+        .collect()
+}
+
 #[test]
-fn every_corpus_boundary_and_neighbour_gives_a_deterministic_answer() {
+fn every_corpus_boundary_gives_the_stated_answer() {
     let files = corpus_files();
     assert_eq!(files.len(), 23);
     let s = scheme();
     let (mut ins, mut outs, mut unknowns) = (0, 0, 0);
+    let (mut introduced_checked, mut fixed_checked) = (0, 0);
     for (name, bytes) in &files {
         let adv = parse_advisory_from(bytes, Source::GuardDogCorpus).unwrap();
+        let raw: Value = serde_json::from_slice(bytes).unwrap();
         for (idx, entry) in adv.affected.iter().enumerate() {
+            // Determinism and no panic at every boundary and its neighbours.
             let mut boundaries: Vec<String> = Vec::new();
-            // Collect boundary strings from the raw record, independently of the parser.
-            let raw: Value = serde_json::from_slice(bytes).unwrap();
-            if let Some(ranges) = raw["affected"][idx]["ranges"].as_array() {
-                for r in ranges {
-                    for e in r["events"].as_array().into_iter().flatten() {
-                        if let Some(o) = e.as_object() {
-                            for v in o.values() {
-                                if let Some(t) = v.as_str() {
-                                    boundaries.extend(neighbours(t.trim_start_matches('v')));
-                                }
-                            }
-                        }
-                    }
+            let raw_ranges = raw["affected"][idx]["ranges"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            for r in &raw_ranges {
+                for (_, t) in raw_events(r) {
+                    boundaries.extend(neighbours(t.trim().trim_start_matches('v')));
                 }
             }
             boundaries.sort();
             boundaries.dedup();
             for b in &boundaries {
-                let first = evaluate_entry(&s, idx, entry, Some(b));
-                let second = evaluate_entry(&s, idx, entry, Some(b));
-                assert_eq!(first, second, "{name} entry {idx} {b}");
+                let first = evaluate_entry(&s, &adv, idx, Some(b));
+                assert_eq!(
+                    first,
+                    evaluate_entry(&s, &adv, idx, Some(b)),
+                    "{name} {idx} {b}"
+                );
                 assert!(first != VersionEvidence::NotApplicable, "{name}");
                 match first {
                     VersionEvidence::InRange(_) => ins += 1,
@@ -1034,11 +1680,64 @@ fn every_corpus_boundary_and_neighbour_gives_a_deterministic_answer() {
                     _ => unknowns += 1,
                 }
             }
+
+            // Per-range facts, on each ordered range alone and fully readable.
+            for (ri, r) in raw_ranges.iter().enumerate() {
+                let ty = r["type"].as_str().unwrap();
+                if ty != "ECOSYSTEM" && ty != "SEMVER" {
+                    continue;
+                }
+                let events = raw_events(r);
+                let readable = events
+                    .iter()
+                    .all(|(_, t)| matches!(t.trim(), "0" | "*") || s.parse(t.trim()).is_ok());
+                if !readable {
+                    continue;
+                }
+                let alone = entry_from(json!([r.clone()]), json!([]));
+                let _ = entry;
+                for (ei, (k, t)) in events.iter().enumerate() {
+                    let t = t.trim();
+                    if t == "0" || t == "*" {
+                        continue;
+                    }
+                    let got = evaluate_entry(&s, &alone, 0, Some(t));
+                    match k.as_str() {
+                        "introduced" => {
+                            assert_eq!(
+                                got,
+                                VersionEvidence::InRange(Location {
+                                    entry: 0,
+                                    place: Place::Range {
+                                        range: 0,
+                                        event: Some(ei)
+                                    }
+                                }),
+                                "{name} entry {idx} range {ri} introduced {t}"
+                            );
+                            introduced_checked += 1;
+                        }
+                        "fixed" => {
+                            assert_eq!(
+                                got,
+                                VersionEvidence::OutOfRange,
+                                "{name} entry {idx} range {ri} fixed {t}"
+                            );
+                            fixed_checked += 1;
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
     }
-    // The run is not vacuous: every kind of answer occurs on real records.
+    // The run is not vacuous.
     assert!(
         ins > 0 && outs > 0 && unknowns > 0,
         "{ins} {outs} {unknowns}"
+    );
+    assert!(
+        introduced_checked > 0 && fixed_checked > 0,
+        "{introduced_checked} {fixed_checked}"
     );
 }
