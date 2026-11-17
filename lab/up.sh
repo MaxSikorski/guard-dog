@@ -192,17 +192,10 @@ re_hex='^[0-9a-f]{20,}$'
 [[ $MAC_HEX =~ $re_hex ]] || fail "the saved macaroon is not hex"
 printf '%s' "$MAC_HEX" > "$DATA/creds/lnd-info-read.macaroon.hex"
 RUNE="$(clncli createrune restrictions='[["method=getinfo"],["pnum=0"]]' | jq -er .rune)" || fail "could not make the getinfo rune"
-# The rune goes into Core Lightning's own tmpfs on stdin, and the container's shell
-# reads it from there; it is never on a command line of this script.
-printf '%s' "$RUNE" | dc exec -T cln sh -c 'umask 077; cat > /tmp/gd-rune' || fail "could not hand the rune to the cln container"
-# shellcheck disable=SC2016
-clnrune() { dc exec -T cln sh -c 'exec lightning-cli --lightning-dir=/data --network=regtest checkrune rune="$(cat /tmp/gd-rune)" method="$1"' sh "$1"; }
-valid="$(clnrune getinfo | jq -r .valid)" || fail "the getinfo rune could not be checked"
-[ "$valid" = true ] || fail "the getinfo rune was not valid for getinfo"
-if clnrune listfunds >/dev/null 2>&1; then fail "the getinfo rune was allowed listfunds"; fi
-dc exec -T cln rm -f /tmp/gd-rune || fail "could not remove the rune file from the cln container"
+# The rune is proved over clnrest in step 8b (getinfo works, listfunds is refused), with
+# the rune on curl's stdin: lightning-cli would need it on a command line.
 printf '%s' "$RUNE" > "$DATA/creds/cln-getinfo.rune"
-step "least-privileged logins: bitcoind gdwatch, LND info:read, CLN getinfo rune (each refused a wider call)"
+step "least-privileged logins: bitcoind gdwatch, LND info:read, CLN getinfo rune (each refused a wider call; the rune is proved over clnrest below)"
 
 # 8b. Identification over the lab network, with the probe tool (curl in the pinned
 # probe container). No credential appears on a command line anywhere in this

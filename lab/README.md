@@ -18,7 +18,7 @@ You need Docker with Compose v2, `jq` and `openssl`. Run one lab at a time; `up.
 5. Proves the least-privileged logins Guard Dog will use, and saves them (the LND macaroon and the Core Lightning rune go in `lab/.data/creds/`; the bitcoind `gdwatch` login stays in `lab/.data/lab.env`). Each must read the version, and each must be refused a wider call:
    - bitcoind: user `gdwatch`, limited to `getnetworkinfo` and `getblockchaininfo`
    - LND: a macaroon baked with only `info:read`
-   - Core Lightning: a rune limited to `getinfo`. The rune is handed to the cln container on stdin and read there from its tmpfs, never put on a command line.
+   - Core Lightning: a rune limited to `getinfo`. Its refusals are proved over `clnrest` in the next step, with the rune on curl's stdin.
 6. Proves each service can be told apart over the lab network, and records what it says (the REST ports and the probe are explained below). Each of these is a hard failure with a plain message if it goes wrong:
    - bitcoind, with no login: an unauthenticated JSON-RPC call must get `401` with `WWW-Authenticate: Basic realm="jsonrpc"`. Then `gdwatch` makes the same calls through the probe (its `Authorization` header is built in the script and goes to curl on stdin), and the whole HTTP reply is recorded.
    - LND and Core Lightning's `clnrest` certificates are copied (certificates only, never keys; mode 0600) into `lab/.data/creds/`. The probe pins each server by the public key of its certificate. Each server is also called with the other's pin, and curl must refuse it with exactly exit code 90 (pin mismatch); any other code fails the run, because then the pin was not tested.
@@ -49,7 +49,7 @@ Two more services are tools, not part of the lab. `up.sh` never starts them on i
 | `probe` | curl, for talking to the services over the lab network. Image: `curlimages/curl` 8.23.0, released 2026-10-28 (curl project, official; curl licence, MIT-like) | `probe` | `curlimages/curl@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93` |
 | `scanner` | Guard Dog itself, built from `lab/scanner/Dockerfile`, with an in-memory 1 MiB `/state` and 1 MiB `/tmp` | `scan` | built locally, tagged `gd-lab-scanner:local` (`pull_policy: build`: never pulled) |
 
-No script in the lab puts a credential on a command line, and `lab_compose.rs` checks the text of `up.sh` for it. The probe never gets one on its command line: `up.sh` pipes headers to curl on stdin (`curl -H @-`), so nothing shows in `ps` or `docker logs`.
+No script in the lab puts a credential on a command line (compose.yml still passes Core Lightning and LND their bitcoind password as an argument; that is on the backlog), and `lab_compose.rs` checks the text of `up.sh` for it. The probe never gets one on its command line: `up.sh` pipes headers to curl on stdin (`curl -H @-`), so nothing shows in `ps` or `docker logs`.
 
 LND's REST port (8080) and Core Lightning's `clnrest` (3010) are open on the lab network only. Both use their own self-signed certificates. No port is published.
 
@@ -65,7 +65,7 @@ The mint uses Nutshell's `FakeWallet` backend: it has no real Lightning connecti
 - **Every container:** a read-only root filesystem, all Linux capabilities dropped, `no-new-privileges`, a non-root user, and limits on memory, swap, CPU and processes.
 - **Memory:** limits add up to 1,920 MiB for the five services and 192 MiB more for the two tools (2,112 MiB in all), under the 4 GiB budget for running the lab next to a Rust build. In practice the lab peaks at about 450 MiB.
 
-`crates/gd-core/tests/lab_compose.rs` checks all of this in every `cargo test`, and proves its checks catch 68 kinds of unsafe change in the compose file, and a further 8 in `up.sh`.
+`crates/gd-core/tests/lab_compose.rs` checks all of this in every `cargo test`, and proves its checks catch 68 kinds of unsafe change in the compose file, and a further 9 in `up.sh`.
 
 ## The scanner image
 

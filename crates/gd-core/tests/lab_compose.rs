@@ -1939,16 +1939,16 @@ fn up_sh_problems(up: &str) -> Vec<String> {
             problems.push(format!("up.sh lacks {needle:?}"));
         }
     }
-    // No credential on a command line. A line that pipes it in with `printf`
-    // (or a here-document) is the stdin form and is fine; so are shell-only
-    // lines (`[[ ]]`, `for`, plain assignments). The one other form is the
-    // rune read inside the cln container from its tmpfs.
-    let is_assignment = |t: &str| {
-        t.split_once('=').is_some_and(|(k, _)| {
-            !k.is_empty()
-                && k.bytes()
-                    .all(|b| b.is_ascii_uppercase() || b == b'_' || b.is_ascii_digit())
-        })
+    // No credential on a command line. The only way a credential variable may
+    // appear is as an argument of `printf` (`printf '..%s..' "$VAR" |` or
+    // `< <(printf ..)`), with no pipe or redirect between the `printf` and the
+    // variable. The exceptions are the loops and tests that only list the
+    // variables, the secret list, and the two calls of the shell function
+    // `rpcauth`, which feeds the password to openssl through printf.
+    let in_printf_args = |prefix: &str| {
+        prefix
+            .rfind("printf ")
+            .is_some_and(|i| !prefix[i..].contains(['|', '>', '<', ';', '&']))
     };
     for (n, line) in up.lines().enumerate() {
         let t = line.trim_start();
@@ -1956,12 +1956,19 @@ fn up_sh_problems(up: &str) -> Vec<String> {
             continue;
         }
         let n = n + 1;
-        let stdin_form = t.contains("printf ") || t.contains("<<");
-        let shell_only = t.starts_with("[[") || t.starts_with("for ") || is_assignment(t);
-        for tok in ["rune=", "-u ", "--user", "Authorization:"] {
-            let in_container = tok == "rune=" && line.contains("rune=\"$(cat /tmp/gd-rune)\"");
-            if line.contains(tok) && !stdin_form && !in_container {
-                problems.push(format!("line {n}: {tok:?} outside a printf to stdin"));
+        let shell_only = t.starts_with("[[")
+            || t.starts_with("for ")
+            || t.starts_with("REPLY_SECRETS=(")
+            || line.contains("rpcauth gdlab \"$RPC_PASSWORD\"")
+            || line.contains("rpcauth gdwatch \"$WATCH_PASSWORD\"");
+        for tok in ["rune=", "-u ", "--user"] {
+            if line.contains(tok) {
+                problems.push(format!("line {n}: {tok:?} on a command line"));
+            }
+        }
+        for (i, _) in line.match_indices("Authorization:") {
+            if !in_printf_args(&line[..i]) {
+                problems.push(format!("line {n}: \"Authorization:\" outside a printf"));
             }
         }
         for var in [
@@ -1973,8 +1980,10 @@ fn up_sh_problems(up: &str) -> Vec<String> {
             "$WATCH_PASSWORD",
             "$MINT_KEY",
         ] {
-            if line.contains(var) && !stdin_form && !shell_only {
-                problems.push(format!("line {n}: {var} on a command line"));
+            for (i, _) in line.match_indices(var) {
+                if !shell_only && !in_printf_args(&line[..i]) {
+                    problems.push(format!("line {n}: {var} on a command line"));
+                }
             }
         }
         // Every https call is pinned, and a pin comes with --insecure (the pin
@@ -2013,7 +2022,7 @@ fn up_sh_proves_rest_identification_and_keeps_credentials_off_the_command_line()
 #[test]
 fn every_unsafe_edit_to_up_sh_is_caught() {
     let up = read("lab/up.sh");
-    let cases: [(&str, &str, &str); 8] = [
+    let cases: [(&str, &str, &str); 9] = [
         // An https call with no pin, or a pin without --insecure.
         (
             "--insecure --pinnedpubkey \"$LND_PIN\" https://lnd:8080/v1/state",
@@ -2025,27 +2034,33 @@ fn every_unsafe_edit_to_up_sh_is_caught() {
             "--pinnedpubkey \"$LND_PIN\" https://lnd:8080/v1/state",
             "without --insecure",
         ),
-        // The rune on a command line, in the two ways it could get there.
+        // The rune on a command line, in the ways it could get there.
         (
-            "rune=\"$(cat /tmp/gd-rune)\"",
-            "rune=\"$RUNE\"",
-            "\"rune=\" outside",
+            "printf '%s' \"$RUNE\" > \"$DATA/creds/cln-getinfo.rune\"",
+            "clncli checkrune rune=abc method=getinfo",
+            "\"rune=\" on a command line",
         ),
         (
-            "clnrune getinfo | jq",
-            "clncli checkrune rune=abc method=getinfo | jq",
-            "\"rune=\" outside",
+            "printf '%s' \"$RUNE\" > \"$DATA/creds/cln-getinfo.rune\"",
+            "X=\"$(docker exec cln echo \"$RUNE\")\"",
+            "$RUNE on a command line",
+        ),
+        // A printf that only looks like the stdin form: the password still reaches a command line.
+        (
+            "printf '%s' \"$RUNE\" > \"$DATA/creds/cln-getinfo.rune\"",
+            "printf x | curl -u \"gdwatch:$WATCH_PASSWORD\" http://x",
+            "\"-u \" on a command line",
         ),
         // A basic-auth header or user on a command line.
         (
             "http://strfry:7777/ </dev/null",
             "-H \"Authorization: Basic x\" http://strfry:7777/ </dev/null",
-            "\"Authorization:\" outside",
+            "\"Authorization:\" outside a printf",
         ),
         (
             "http://nutshell:3338/v1/info </dev/null",
             "-u gdwatch:$WATCH_PASSWORD http://nutshell:3338/v1/info </dev/null",
-            "\"-u \" outside",
+            "\"-u \" on a command line",
         ),
         // A macaroon on a command line.
         (
@@ -2070,21 +2085,23 @@ fn every_unsafe_edit_to_up_sh_is_caught() {
     assert!(misses.is_empty(), "missed:\n{}", misses.join("\n"));
 }
 
-/// Keys whose long hex or base64-looking values are public identifiers in a
-/// recorded reply: node ids and public keys, block hashes, total work, the
-/// commit.
-const REPLY_ID_KEYS: [&str; 6] = [
-    "id",
-    "pubkey",
-    "bestblockhash",
-    "chainwork",
-    "target",
-    "commit_hash",
-];
+/// Whether a value under a key has the exact shape of a public identifier: a
+/// compressed public key or node id (66 hex digits starting 02 or 03), a block
+/// hash, total work or difficulty target (64 hex digits), a commit (40 hex
+/// digits). Any other value under these keys gets the normal checks.
+fn is_public_id(key: &str, s: &str) -> bool {
+    let hex = |n: usize| s.len() == n && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    match key {
+        "id" | "pubkey" => hex(66) && (s.starts_with("02") || s.starts_with("03")),
+        "bestblockhash" | "chainwork" | "target" => hex(64),
+        "commit_hash" => hex(40),
+        _ => false,
+    }
+}
 
 /// Everything in a recorded reply (JSON text) that must never be committed:
 /// a canary, a macaroon-shaped hex run (64 or more digits), a rune-shaped word
-/// (40 or more of A-Z a-z 0-9 _ -) outside the public-identifier keys, and any
+/// (40 or more of A-Z a-z 0-9 _ - + / =) unless it has the exact shape of a public identifier under its key, and any
 /// public IPv4 or IPv6 address.
 fn reply_problems(text: &str) -> Vec<String> {
     fn walk(v: &serde_json::Value, key: &str, out: &mut Vec<String>) {
@@ -2104,7 +2121,7 @@ fn reply_problems(text: &str) -> Vec<String> {
         if s.contains(CANARY) {
             out.push(format!("{key}: a {CANARY} value"));
         }
-        let known = REPLY_ID_KEYS.contains(&key);
+        let known = is_public_id(key, s);
         let hexrun = s
             .split(|c: char| !c.is_ascii_hexdigit())
             .map(str::len)
@@ -2114,7 +2131,7 @@ fn reply_problems(text: &str) -> Vec<String> {
             out.push(format!("{key}: a hex run of {hexrun}, macaroon-shaped"));
         }
         let wordrun = s
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+            .split(|c: char| !(c.is_ascii_alphanumeric() || "_-+/=".contains(c)))
             .map(str::len)
             .max()
             .unwrap_or(0);
@@ -2188,12 +2205,21 @@ fn the_reply_checker_catches_planted_leaks() {
             "{\"a\":\"seen at 8.8.8.8:9735\"}".to_owned(),
         ),
         ("public ipv6", "{\"a\":\"2606:4700::1111\"}".to_owned()),
+        ("macaroon hex under id", format!("{{\"id\":\"{hex64}\"}}")),
+        (
+            "base64 macaroon under pubkey",
+            format!("{{\"pubkey\":\"{}\"}}", "QUJD+/ef".repeat(8)),
+        ),
+        (
+            "base64 macaroon with plus and slash",
+            format!("{{\"x\":\"{}\"}}", "QUJD+/ef".repeat(8)),
+        ),
         ("not json", "nope".to_owned()),
     ] {
         assert!(!reply_problems(&doc).is_empty(), "{what} was not caught");
     }
     for doc in [
-        format!("{{\"id\":\"{hex64}\",\"bestblockhash\":\"{hex64}\"}}"),
+        format!("{{\"id\":\"02{hex64}\",\"bestblockhash\":\"{hex64}\"}}"),
         "{\"binding\":[{\"address\":\"0.0.0.0\"},{\"a\":\"172.29.208.4\"},{\"a\":\"::1\"}]}"
             .to_owned(),
         "{\"version\":\"v26.06.9\",\"software\":\"git+https://github.com/hoytech/strfry.git\"}"
