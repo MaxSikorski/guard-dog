@@ -141,9 +141,14 @@ impl VersionScheme for BitcoinCore {
     /// every other form this scheme does not read.
     fn candidate(&self, raw: &str) -> Result<Candidate<CoreVersion>, VersionError> {
         let v = read(raw)?;
-        if self.installed_rc == RcEvidence::Unknown && v.rc.is_none() {
+        // A source that drops `rcN` cannot also show one: a contradiction.
+        if self.installed_rc == RcEvidence::Unknown && v.rc.is_some() {
+            return Err(VersionError::Malformed);
+        }
+        if self.installed_rc == RcEvidence::Unknown {
+            // The lowest real release candidate is rc1.
             let low = CoreVersion {
-                rc: Some(Num::zero()),
+                rc: Some(Num::one()),
                 ..v.clone()
             };
             // Just below the first release candidate of the next patch: a value

@@ -403,6 +403,9 @@ fn eval_range<S: VersionScheme + ?Sized>(
         RangeKind::Semver if !scheme.reads_semver_ranges() => {
             return Outcome::Unknown(UnknownReason::SchemeMismatch, shape);
         }
+        RangeKind::Ecosystem if !scheme.reads_ecosystem_ranges() => {
+            return Outcome::Unknown(UnknownReason::SchemeMismatch, shape);
+        }
         RangeKind::Semver | RangeKind::Ecosystem => {}
         _ => return Outcome::Unknown(UnknownReason::UnsupportedRangeType, shape),
     }

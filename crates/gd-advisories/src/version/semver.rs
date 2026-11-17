@@ -11,7 +11,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use super::{VersionError, VersionScheme};
+use super::{Candidate, VersionError, VersionScheme};
 use crate::MAX_VERSION_BYTES;
 
 /// Most dot-separated identifiers accepted in a prerelease or in metadata.
@@ -25,6 +25,10 @@ pub(crate) struct Num(String);
 impl Num {
     pub(crate) fn zero() -> Self {
         Self("0".to_string())
+    }
+
+    pub(crate) fn one() -> Self {
+        Self("1".to_string())
     }
 
     /// This number plus one.
@@ -269,6 +273,18 @@ impl VersionScheme for GoTag {
 
     fn parse(&self, raw: &str) -> Result<SemVerVersion, VersionError> {
         read(raw.strip_prefix('v').unwrap_or(raw), raw)
+    }
+
+    /// An installed Go version whose build metadata says `dirty` was built from
+    /// uncommitted changes, so the tag it carries says nothing about its code:
+    /// it is refused, never ordered as the clean tag. (Advisory boundaries go
+    /// through `parse` and keep ordinary metadata rules.)
+    fn candidate(&self, raw: &str) -> Result<Candidate<SemVerVersion>, VersionError> {
+        let v = self.parse(raw)?;
+        if v.build.iter().any(|id| id.eq_ignore_ascii_case("dirty")) {
+            return Err(VersionError::Malformed);
+        }
+        Ok(Candidate::Exact(v))
     }
 
     fn same_identity(&self, a: &str, b: &str) -> Option<bool> {

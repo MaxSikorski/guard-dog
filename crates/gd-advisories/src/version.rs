@@ -12,7 +12,7 @@ mod channel;
 mod semver;
 
 pub use bitcoin::{BitcoinCore, CoreVersion, RcEvidence};
-pub use channel::{Channel, ChannelScheme, ChannelVersion, dual_check};
+pub use channel::{Channel, ChannelScheme, ChannelVersion, evaluate_channel_entry};
 pub use semver::{GoTag, SemVer, SemVerVersion};
 
 /// Why a scheme could not read a version string.
@@ -72,7 +72,7 @@ pub enum Candidate<V> {
 ///   versions are checked, by identity.
 /// - Channel schemes with two orders (such as lnd's SemVer-and-beta check) are
 ///   evaluated by the caller running the evaluator once per scheme; one scheme
-///   object never mixes two orders. The combination rule ([`dual_check`]): in
+///   object never mixes two orders. The combination rule ([`evaluate_channel_entry`]): in
 ///   range only if both say in range, out of range only if both say out of
 ///   range, `Unknown(SchemeConflict)` when one says in and the other out, and
 ///   an unknown side keeps its own reason.
@@ -111,6 +111,13 @@ pub trait VersionScheme {
     /// A scheme that has not declared it makes a `SEMVER` range `Unknown`,
     /// never a SemVer fallback.
     fn reads_semver_ranges(&self) -> bool;
+
+    /// Whether this scheme has declared that it can evaluate `ECOSYSTEM`
+    /// ranges. Most schemes read them; a channel scheme does not, because its
+    /// Go ranges are only answered by the dual check.
+    fn reads_ecosystem_ranges(&self) -> bool {
+        true
+    }
 
     /// Whether versions of this scheme have an order at all.
     fn orders(&self) -> bool;
