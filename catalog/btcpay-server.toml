@@ -1,0 +1,68 @@
+# BTCPay Server. Format: catalog/README.md. Checked by crates/gd-core/tests/catalog.rs.
+format = 1
+id = "btcpay-server"
+name = "BTCPay Server"
+kind = "service"
+aliases = []
+summary = "A self-hosted Bitcoin payment processor for merchants."
+money = true
+licence = "unknown"
+
+[upstream]
+repo = "https://github.com/btcpayserver/btcpayserver"
+
+[recognize]
+images = []
+binaries = []
+units = []
+
+[version]
+source = "image-label"
+credential = "none"
+regex = '^(?P<version>2\.\d+\.\d+)$'
+scheme = "semver"
+
+[version.call]
+field = "org.opencontainers.image.version"
+
+[[version.examples]]
+raw = "2.4.2"
+version = "2.4.2"
+source = "advisories/corpus/CVE-2026-119757.json"
+source_kind = "advisory"
+
+[[version.examples]]
+raw = "2.4.7"
+version = "2.4.7"
+source = "advisories/corpus/x_btcpay-2026-v2.4.7-85-security-findings.json"
+source_kind = "advisory"
+
+[advisories]
+osv_packages = ["GIT https://github.com/btcpayserver/btcpayserver"]
+ghsa = false
+feeds = []
+blind_spot = "The repo corpus holds two advisories for it (a CVE and release notes with no CVE). Whether the project has GitHub advisories or a feed a machine can read has not been checked."
+
+[signing]
+level = "unknown"
+
+[review]
+last_reviewed = 2026-11-17
+sources = [
+  "https://blog.btcpayserver.org/security-advisory-btcpay-server-2-4-2/",
+  "https://github.com/btcpayserver/btcpayserver/releases/tag/v2.4.7",
+]
+todo = [
+  "licence: read the upstream LICENSE file",
+  "summary: confirm the project's own one-liner",
+  "upstream.website, upstream.release_feed, upstream.security_policy: none recorded in the repo",
+  "images: no image name is recorded; add it with a recorded reply (the version source assumes a container image)",
+  "binaries: no executable name is recorded",
+  "units: no systemd unit name is recorded",
+  "ports: no port is named in the repo",
+  "recorded-reply: 2.4.2 and 2.4.7 are the advisories' fixed versions, not recorded replies; record a real label value",
+  "version.regex: pinned to the 2.x series the advisories show (a bare x.y.z pattern is refused); older releases are not read; widen it when a real label is recorded",
+  "advisories.ghsa: unverified; check the project's Security tab",
+  "signing: level, method and keys are not recorded",
+  "platform_map: app ids on UmbrelOS, StartOS, RaspiBlitz and myNode",
+]
