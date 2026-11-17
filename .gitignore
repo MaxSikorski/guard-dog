@@ -8,6 +8,7 @@ target/
 
 # The regtest lab's data
 lab/.data/
+lab/.lock/
 
 # Secrets and local config (never commit)
 .env

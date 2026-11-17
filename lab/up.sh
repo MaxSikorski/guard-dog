@@ -4,22 +4,55 @@
 # work (and are refused for anything else), and write lab/.data/manifest.toml
 # with each service's version as the service itself reports it.
 #
-# Regtest only. One lab at a time. Remove everything with lab/down.sh.
+# Regtest only. One lab at a time (lab/.lock, shared with lab/down.sh).
+# Remove everything with lab/down.sh. If anything goes wrong before all three
+# chain checks pass, or you press Ctrl-C then, the lab removes itself.
 # Works with macOS's bash 3.2: no associative arrays, no mapfile.
 set -euo pipefail
+# A GD_LAB_* value already in your shell would override lab/.data/lab.env.
+unset GD_LAB_RPC_PASSWORD GD_LAB_RPCAUTH GD_LAB_WATCH_PASSWORD GD_LAB_WATCH_RPCAUTH GD_LAB_MINT_KEY
+export LC_ALL=C
 
 LAB_DIR="$(cd "$(dirname "$0")" && pwd)"
 DATA="$LAB_DIR/.data"
+LOCK="$LAB_DIR/.lock"
 PROJECT=gd-lab
 MAX_SECONDS="${GD_LAB_MAX_SECONDS:-300}"
 CHANNEL_SATS=1000000
 
 dc() { docker compose -p "$PROJECT" -f "$LAB_DIR/compose.yml" --env-file "$DATA/lab.env" "$@"; }
 bcli() { dc exec -T bitcoind bitcoin-cli -chain=regtest -datadir=/data "$@"; }
+# gdwatch's password goes in on stdin, never on a command line.
+bwatch() { printf '%s\n' "$WATCH_PASSWORD" | bcli -rpcuser=gdwatch -stdinrpcpass "$@"; }
 lncli() { dc exec -T lnd lncli --lnddir=/data --network=regtest "$@"; }
 clncli() { dc exec -T cln lightning-cli --lightning-dir=/data --network=regtest "$@"; }
 
-fail() { echo "lab/up.sh: FAILED: $*" >&2; echo "The lab is left running so you can look; lab/down.sh removes it." >&2; exit 1; }
+# State for the exit trap: was the lock taken, were credentials made, were
+# containers started, and have all three chain checks passed.
+LOCK_OWNED=0 DATA_MADE=0 STARTED=0 CHAINS_OK=0
+cleanup() {
+  local rc=$?
+  trap - EXIT
+  if [ "$STARTED" = 1 ] && [ "$CHAINS_OK" = 0 ]; then
+    echo "lab/up.sh: removing the lab: no node may stay up before all three chain checks pass" >&2
+    GD_LAB_LOCK_HELD=1 "$LAB_DIR/down.sh" >/dev/null 2>&1 || echo "lab/up.sh: lab/down.sh failed; run it by hand" >&2
+  elif [ "$DATA_MADE" = 1 ] && [ "$STARTED" = 0 ]; then
+    rm -rf "$DATA"
+  fi
+  if [ "$LOCK_OWNED" = 1 ]; then rmdir "$LOCK" 2>/dev/null || true; fi
+  exit "$rc"
+}
+trap cleanup EXIT
+# An interrupt becomes a normal exit, so the EXIT trap above runs.
+trap 'exit 130' INT TERM HUP
+
+fail() {
+  echo "lab/up.sh: FAILED: $*" >&2
+  if [ "$STARTED" = 1 ] && [ "$CHAINS_OK" = 1 ]; then
+    echo "The lab is left running so you can look; lab/down.sh removes it." >&2
+  fi
+  exit 1
+}
 step() { echo "[$(( $(date +%s) - T0 ))s] $*"; }
 # waitfor <seconds> <description> <command...>: retry once a second.
 waitfor() {
@@ -32,20 +65,40 @@ waitfor() {
   done
   fail "timed out after ${n}s waiting for: $what"
 }
-# Text read from a service goes into the manifest only if it is short and plain.
-plain() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9 ._:/+()-]{1,80}$' || fail "unexpected text from a service: refusing to write it"; printf '%s' "$1"; }
+# Text read back from a service is checked as a whole string (C locale, so no
+# multi-line or control characters) before it is printed or written anywhere.
+plain() {
+  local v=$1 re='^[0-9A-Za-z.+_:/-]{1,64}$'
+  [[ $v =~ $re ]] || fail "unexpected text from a service: refusing to use it"
+  printf '%s' "$v"
+}
+# n random bytes as hex, checked: exactly 2n lowercase hex digits or the run fails.
+hexrand() {
+  local n=$1 out re='^[0-9a-f]+$'
+  out="$(openssl rand -hex "$n")" || fail "openssl could not make random bytes"
+  [ "${#out}" -eq $((n * 2)) ] && [[ $out =~ $re ]] || fail "openssl gave unexpected random output"
+  printf '%s' "$out"
+}
 # A credential made here: a canary prefix (so any leak is easy to grep for) plus 32 random bytes.
-secret() { printf 'gdlabcanary-%s' "$(openssl rand -hex 32)"; }
+secret() {
+  local h
+  h="$(hexrand 32)"
+  printf 'gdlabcanary-%s' "$h"
+}
 # Bitcoin Core's rpcauth line, the same HMAC-SHA256 as share/rpcauth/rpcauth.py.
 rpcauth() {
-  local user=$1 pw=$2 salt
-  salt="$(openssl rand -hex 16)"
-  printf '%s:%s$%s' "$user" "$salt" "$(printf '%s' "$pw" | openssl dgst -sha256 -hmac "$salt" | awk '{print $NF}')"
+  local user=$1 pw=$2 salt digest re='^[0-9a-f]{64}$'
+  salt="$(hexrand 16)"
+  digest="$(printf '%s' "$pw" | openssl dgst -sha256 -hmac "$salt" | awk '{print $NF}')" || fail "openssl could not hash a password"
+  [[ $digest =~ $re ]] || fail "openssl gave an unexpected password hash"
+  printf '%s:%s$%s' "$user" "$salt" "$digest"
 }
 
 T0=$(date +%s)
 
-# 1. Preconditions: tools present, and no lab already running (one at a time).
+# 1. One lab at a time: an atomic lock (shared with down.sh), then the preconditions.
+mkdir "$LOCK" 2>/dev/null || fail "another lab/up.sh or lab/down.sh is running (or died; if none is, remove lab/.lock)"
+LOCK_OWNED=1
 for tool in docker jq openssl; do command -v "$tool" >/dev/null || fail "$tool is not installed"; done
 docker compose version >/dev/null 2>&1 || fail "docker compose (v2) is not available"
 [ -z "$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT")" ] || fail "a gd-lab is already running; run lab/down.sh first"
@@ -53,30 +106,37 @@ docker compose version >/dev/null 2>&1 || fail "docker compose (v2) is not avail
 
 # 2. Fresh throwaway regtest credentials, never committed (lab/.data is in .gitignore).
 rm -rf "$DATA"
-mkdir -p "$DATA/creds"
-chmod 700 "$DATA" "$DATA/creds"
 umask 077
+mkdir -p "$DATA/creds"
+DATA_MADE=1
+chmod 700 "$DATA" "$DATA/creds"
 RPC_PASSWORD="$(secret)"
 WATCH_PASSWORD="$(secret)"
+MINT_KEY="$(secret)"
+RPCAUTH_LINE="$(rpcauth gdlab "$RPC_PASSWORD")"
+WATCH_RPCAUTH_LINE="$(rpcauth gdwatch "$WATCH_PASSWORD")"
 # Single quotes: compose reads unquoted and double-quoted values as templates, and the '$' in rpcauth would vanish.
 {
   printf "GD_LAB_RPC_PASSWORD='%s'\n" "$RPC_PASSWORD"
-  printf "GD_LAB_RPCAUTH='%s'\n" "$(rpcauth gdlab "$RPC_PASSWORD")"
+  printf "GD_LAB_RPCAUTH='%s'\n" "$RPCAUTH_LINE"
   printf "GD_LAB_WATCH_PASSWORD='%s'\n" "$WATCH_PASSWORD"
-  printf "GD_LAB_WATCH_RPCAUTH='%s'\n" "$(rpcauth gdwatch "$WATCH_PASSWORD")"
-  printf "GD_LAB_MINT_KEY='%s'\n" "$(secret)"
+  printf "GD_LAB_WATCH_RPCAUTH='%s'\n" "$WATCH_RPCAUTH_LINE"
+  printf "GD_LAB_MINT_KEY='%s'\n" "$MINT_KEY"
 } > "$DATA/lab.env"
 
 # 3. Start everything and wait until every health check passes.
 step "starting the five services (pulls the pinned images the first time)"
 dc config -q
+STARTED=1
 dc up -d --wait --wait-timeout 240 >/dev/null || fail "a service did not become healthy (docker compose -p gd-lab ps)"
 
 # 4. Chain guard: every node must say regtest, or the lab removes itself and refuses.
-refuse() { echo "lab/up.sh: REFUSED: $* is not on regtest. Removing the lab." >&2; "$LAB_DIR/down.sh" >/dev/null 2>&1 || true; exit 3; }
+# refuse exits 3, and the exit trap removes the lab.
+refuse() { echo "lab/up.sh: REFUSED: $* is not on regtest. Removing the lab." >&2; exit 3; }
 [ "$(bcli getblockchaininfo | jq -r .chain)" = regtest ] || refuse bitcoind
 [ "$(lncli getinfo | jq -r '.chains[0].network')" = regtest ] || refuse lnd
 [ "$(clncli getinfo | jq -r .network)" = regtest ] || refuse cln
+CHAINS_OK=1
 step "chain check: bitcoind, lnd and cln all on regtest"
 
 # 5. Mine 101 blocks to a throwaway regtest wallet, so the first coinbase can be spent.
@@ -110,11 +170,8 @@ waitfor 180 "the channel to be active on both sides" channel_active
 step "channel open: LND -> Core Lightning, $CHANNEL_SATS sats"
 
 # 8. Least-privileged logins (spike b): each reads the version and is refused anything else.
-WATCH="-rpcuser=gdwatch -rpcpassword=$WATCH_PASSWORD"
-# shellcheck disable=SC2086
-bcli $WATCH getnetworkinfo >/dev/null || fail "gdwatch could not read getnetworkinfo"
-# shellcheck disable=SC2086
-if bcli $WATCH getblockcount >/dev/null 2>&1; then fail "gdwatch was allowed getblockcount; the whitelist is not working"; fi
+bwatch getnetworkinfo >/dev/null || fail "gdwatch could not read getnetworkinfo"
+if bwatch getblockcount >/dev/null 2>&1; then fail "gdwatch was allowed getblockcount; the whitelist is not working"; fi
 lncli bakemacaroon --save_to=/data/gd-info.macaroon info:read >/dev/null
 lncli --macaroonpath=/data/gd-info.macaroon getinfo >/dev/null || fail "the info:read macaroon could not read getinfo"
 if lncli --macaroonpath=/data/gd-info.macaroon walletbalance >/dev/null 2>&1; then fail "the info:read macaroon was allowed walletbalance"; fi
@@ -148,16 +205,19 @@ done
 step "versions match the pinned images"
 
 # 10. The manifest, in Judge A's format (design 0.4, section 2.2): the live lab's truth.
-# Sorted by id, no timestamps, no node ids, no secrets. Judge A's recording step
-# adds recorded, reviewed_by and evidence when it copies this into fixtures/.
+# Sorted by id, no timestamps, no node ids, no secrets. Step 3 of design 0.4 copies
+# this into fixtures/setups/ and fills in recorded, reviewed_by and evidence there.
 entry() { # compose-service reported-text how-it-was-read version
+  local img lid
+  img="$(image_of "$1")"
+  lid="$(label "$1" id)"
   printf '\n# %s reported "%s" (%s)\n# image %s\n[[service]]\nid = "%s"\nversion = "%s"\n' \
-    "$1" "$2" "$3" "$(image_of "$1")" "$(label "$1" id)" "$4"
+    "$1" "$2" "$3" "$img" "$lid" "$4"
 }
 {
   printf '# Written by lab/up.sh. Every version was read from the running service itself,\n'
   printf '# never from an image tag.\n'
-  printf 'format = 1\nplatform = "docker"\nsource = "lab"\n'
+  printf 'format = 1\nplatform = "docker"\nsource = "lab"\nrecorder = "lab/up.sh format 1"\n'
   printf 'description = "Guard Dog regtest lab (lab/compose.yml): bitcoind, LND, Core Lightning, strfry and a Nutshell mint."\n'
   entry bitcoind "$BTC_RAW" "bitcoin-cli getnetworkinfo .subversion" "$BTC_VER"
   entry cln "$CLN_RAW" "lightning-cli getinfo .version" "$CLN_VER"

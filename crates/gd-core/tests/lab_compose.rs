@@ -4,7 +4,7 @@
 //! Deterministic by design: no Docker, no network, no clock, nothing random.
 //! `check()` reads `lab/compose.yml` the way Docker does (the file uses no YAML
 //! anchors) and returns every problem it finds, in a stable order. The checker
-//! is itself tested: `every_unsafe_change_is_caught` makes 21 named unsafe
+//! is itself tested: `every_unsafe_change_is_caught` makes 37 named unsafe
 //! edits and requires each one to be refused with its own problem code.
 
 // Test-only crate: its helper functions (not just `#[test]` ones) read files and
@@ -118,6 +118,65 @@ const SECRET_WORDS: [&str; 7] = [
 ];
 /// What a generated credential starts with (see `lab/up.sh`).
 const CANARY: &str = "gdlabcanary-";
+
+/// The reviewed `entrypoint` per service; `None` means it must be absent.
+const ENTRYPOINTS: [(&str, Option<&str>); 5] = [
+    ("bitcoind", Some("bitcoind")),
+    ("cln", None),
+    ("lnd", None),
+    ("nutshell", None),
+    ("strfry", None),
+];
+/// Every tmpfs mount each service must have, and no others.
+const TMPFS_TARGETS: [(&str, &[&str]); 5] = [
+    ("bitcoind", &["/data", "/home/bitcoin/.bitcoin"]),
+    ("cln", &["/data", "/tmp", "/root/.lightning"]),
+    ("lnd", &["/data", "/root/.lnd"]),
+    ("nutshell", &["/data", "/tmp"]),
+    ("strfry", &["/data"]),
+];
+/// The smallest memory limit that can run anything at all, in MiB.
+const MIN_MEM_MIB: u64 = 6;
+
+/// A command line as named options: leading dashes removed, with the value
+/// either after `=` or in the next item (unless that item is another option).
+/// So `-x=v`, `--x=v` and `--x v` all read as ("x", Some("v")).
+fn options(items: &[String]) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < items.len() {
+        let item = &items[i];
+        i += 1;
+        if !item.starts_with('-') {
+            continue;
+        }
+        let body = item.trim_start_matches('-');
+        if let Some((name, value)) = body.split_once('=') {
+            out.push((name.to_owned(), Some(value.to_owned())));
+        } else if i < items.len() && !items[i].starts_with('-') {
+            out.push((body.to_owned(), Some(items[i].clone())));
+            i += 1;
+        } else {
+            out.push((body.to_owned(), None));
+        }
+    }
+    out
+}
+
+/// Chain selectors in a command line: every option whose name is in `names`.
+/// Returns true if there is exactly one and it names regtest (`ok_value`
+/// matches its value; a bare option counts as the value `""`).
+fn single_regtest_selector(
+    items: &[String],
+    names: &[&str],
+    ok: impl Fn(&str, &str) -> bool,
+) -> bool {
+    let found: Vec<_> = options(items)
+        .into_iter()
+        .filter(|(n, _)| names.contains(&n.as_str()))
+        .collect();
+    found.len() == 1 && ok(&found[0].0, found[0].1.as_deref().unwrap_or(""))
+}
 
 /// One thing wrong with the compose file.
 struct Problem {
@@ -295,15 +354,40 @@ fn check(text: &str) -> Vec<Problem> {
     // The network.
     let nets = &doc["networks"];
     let lab = &nets["lab"];
-    if keys(nets) != ["lab"] || lab["internal"].as_bool() != Some(true) {
+    if lab["internal"].as_bool() != Some(true) {
         out.push(problem(
             "network-not-internal",
-            "networks must be exactly `lab` with internal: true".into(),
+            "networks.lab must have internal: true".into(),
         ));
     }
-    let subnets = lab["ipam"]["config"].as_vec();
+    let mut lab_keys = keys(lab);
+    lab_keys.sort();
+    let ipam_keys = keys(&lab["ipam"]);
+    let entries = lab["ipam"]["config"].as_vec();
+    let entry_keys_ok = entries.is_some_and(|c| c.iter().all(|e| keys(e) == ["subnet"]));
+    if keys(nets) != ["lab"]
+        || lab_keys != ["driver", "driver_opts", "internal", "ipam"]
+        || ipam_keys != ["config"]
+        || !entry_keys_ok
+    {
+        out.push(problem(
+            "network-keys",
+            "networks must be exactly lab: {internal, driver, driver_opts, ipam: {config: [{subnet}]}}"
+                .into(),
+        ));
+    }
+    let opts = &lab["driver_opts"];
+    if lab["driver"].as_str() != Some("bridge")
+        || keys(opts) != ["com.docker.network.bridge.gateway_mode_ipv4"]
+        || opts["com.docker.network.bridge.gateway_mode_ipv4"].as_str() != Some("isolated")
+    {
+        out.push(problem(
+            "network-not-isolated",
+            "networks.lab needs driver: bridge and gateway_mode_ipv4: isolated".into(),
+        ));
+    }
     let one_subnet =
-        subnets.is_some_and(|c| c.len() == 1 && c[0]["subnet"].as_str() == Some(SUBNET));
+        entries.is_some_and(|c| c.len() == 1 && c[0]["subnet"].as_str() == Some(SUBNET));
     if !one_subnet {
         out.push(problem(
             "wrong-subnet",
@@ -406,12 +490,10 @@ fn check_service(
     if strings(&svc["cap_drop"]).as_deref() != Some(&["ALL".to_owned()]) {
         add("capabilities-not-dropped", "cap_drop is not [ALL]".into());
     }
-    let locked = strings(&svc["security_opt"])
-        .is_some_and(|v| v.iter().any(|s| s == "no-new-privileges:true"));
-    if !locked {
+    if strings(&svc["security_opt"]).as_deref() != Some(&["no-new-privileges:true".to_owned()]) {
         add(
             "privileges-not-locked",
-            "security_opt lacks no-new-privileges:true".into(),
+            "security_opt must be exactly [no-new-privileges:true]".into(),
         );
     }
     if svc["restart"].as_str() != Some("no") || svc["init"].as_bool() != Some(true) {
@@ -454,10 +536,10 @@ fn check_service(
         add("wrong-network", "networks is not [lab]".into());
     }
     let mem = svc["mem_limit"].as_str();
-    if mem.and_then(mem_mib).is_none() {
+    if !mem.and_then(mem_mib).is_some_and(|m| m >= MIN_MEM_MIB) {
         add(
             "no-memory-limit",
-            "mem_limit is missing or not like 512m".into(),
+            "mem_limit is missing, not like 512m, or under 6 MiB".into(),
         );
     }
     if mem.is_none() || svc["memswap_limit"].as_str() != mem {
@@ -491,8 +573,54 @@ fn check_service(
             "tmpfs must be a list of /path:...size=... entries".into(),
         );
     }
+    let targets: Vec<String> = strings(&svc["tmpfs"])
+        .unwrap_or_default()
+        .iter()
+        .map(|t| t.split(':').next().unwrap_or("").to_owned())
+        .collect();
+    let want_targets: Vec<String> = TMPFS_TARGETS
+        .iter()
+        .find(|t| t.0 == name)
+        .map(|t| t.1.iter().map(|s| (*s).to_owned()).collect())
+        .unwrap_or_default();
+    if targets != want_targets {
+        add(
+            "tmpfs-missing",
+            format!("tmpfs targets are {targets:?}, expected {want_targets:?}"),
+        );
+    }
+
+    // `command` and `entrypoint` are lists of strings, and `entrypoint` is the reviewed one.
+    let mut list_ok = true;
+    for key in ["command", "entrypoint"] {
+        if !svc[key].is_badvalue() && strings(&svc[key]).is_none() {
+            list_ok = false;
+            add(
+                "command-not-list",
+                format!("{key} must be a list of strings"),
+            );
+        }
+    }
+    let entry = strings(&svc["entrypoint"]);
+    let want_entry = ENTRYPOINTS
+        .iter()
+        .find(|e| e.0 == name)
+        .and_then(|e| e.1)
+        .map(|e| vec![e.to_owned()]);
+    if list_ok && entry != want_entry {
+        add(
+            "wrong-entrypoint",
+            format!("entrypoint is {entry:?}, expected {want_entry:?}"),
+        );
+    }
 
     // Secrets are references, never values.
+    if !svc["environment"].is_badvalue() && svc["environment"].as_hash().is_none() {
+        add(
+            "environment-not-mapping",
+            "environment must be a mapping".into(),
+        );
+    }
     if let Some(env) = svc["environment"].as_hash() {
         for (k, v) in env {
             let (Some(k), v) = (k.as_str(), yaml_text(v)) else {
@@ -507,40 +635,33 @@ fn check_service(
         }
     }
     let command = strings(&svc["command"]).unwrap_or_default();
-    for item in &command {
-        if let Some(rest) = item.strip_prefix('-')
-            && let Some((flag, value)) = rest.trim_start_matches('-').split_once('=')
-            && has_secret_word(flag)
-            && !is_lab_reference(value)
-        {
-            add(
-                "literal-secret",
-                format!("command flag {flag} is not a ${{GD_LAB_...:?...}} reference"),
-            );
+    let health = strings(&svc["healthcheck"]["test"]).unwrap_or_default();
+    for (where_, items) in [("command", &command), ("healthcheck", &health)] {
+        for (flag, value) in options(items) {
+            if has_secret_word(&flag) && !value.as_deref().is_some_and(is_lab_reference) {
+                add(
+                    "literal-secret",
+                    format!("{where_} option {flag} is not a ${{GD_LAB_...:?...}} reference"),
+                );
+            }
         }
     }
 
-    // Regtest, per node.
-    let health = strings(&svc["healthcheck"]["test"]).unwrap_or_default();
-    let starts = |prefixes: &[&str]| {
-        command
-            .iter()
-            .any(|c| prefixes.iter().any(|p| c.starts_with(p)))
-    };
+    // Regtest, per node. Option spellings are normalised, and any other chain
+    // selector, or a second one, is refused.
     match name {
         "bitcoind" => {
-            let chains: Vec<&String> = command
-                .iter()
-                .filter(|c| c.starts_with("-chain="))
-                .collect();
-            let ok = chains.len() == 1
-                && chains[0] == "-chain=regtest"
-                && !starts(&["-regtest", "-testnet", "-signet", "-main"])
-                && health.iter().any(|h| h == "-chain=regtest");
+            let ok = single_regtest_selector(
+                &command,
+                &[
+                    "chain", "regtest", "testnet", "testnet4", "signet", "main", "mainnet",
+                ],
+                |n, v| n == "chain" && v == "regtest",
+            ) && health.iter().any(|h| h == "-chain=regtest");
             if !ok {
                 add(
                     "not-regtest",
-                    "bitcoind must run exactly -chain=regtest".into(),
+                    "bitcoind must run exactly one chain selector, -chain=regtest".into(),
                 );
             }
             let allow: Vec<&String> = command
@@ -556,31 +677,41 @@ fn check_service(
             }
         }
         "lnd" => {
-            let ok = command.iter().any(|c| c == "--bitcoin.regtest")
-                && !starts(&[
-                    "--bitcoin.mainnet",
-                    "--bitcoin.testnet",
-                    "--bitcoin.signet",
-                    "--bitcoin.simnet",
-                ])
-                && health.iter().any(|h| h == "--network=regtest");
+            let ok = single_regtest_selector(
+                &command,
+                &[
+                    "bitcoin.regtest",
+                    "bitcoin.mainnet",
+                    "bitcoin.testnet",
+                    "bitcoin.testnet4",
+                    "bitcoin.signet",
+                    "bitcoin.simnet",
+                ],
+                |n, v| n == "bitcoin.regtest" && (v.is_empty() || v == "true"),
+            ) && health.iter().any(|h| h == "--network=regtest");
             if !ok {
-                add("not-regtest", "lnd must run --bitcoin.regtest".into());
+                add(
+                    "not-regtest",
+                    "lnd must run exactly one chain selector, --bitcoin.regtest".into(),
+                );
             }
         }
         "cln" => {
-            let net_ok = command
-                .iter()
-                .filter(|c| c.starts_with("--network="))
-                .all(|c| c == "--network=regtest");
+            let selectors: Vec<_> = options(&command)
+                .into_iter()
+                .filter(|(n, _)| {
+                    ["network", "mainnet", "testnet", "signet", "regtest"].contains(&n.as_str())
+                })
+                .collect();
+            let selectors_ok = selectors.len() <= 1
+                && selectors.iter().all(|(n, v)| {
+                    (n == "network" && v.as_deref() == Some("regtest")) || n == "regtest"
+                });
             let ok = svc["environment"]["LIGHTNINGD_NETWORK"].as_str() == Some("regtest")
-                && net_ok
-                && !command
-                    .iter()
-                    .any(|c| ["--mainnet", "--testnet", "--signet"].contains(&c.as_str()))
+                && selectors_ok
                 && health.iter().any(|h| h == "--network=regtest");
             if !ok {
-                add("not-regtest", "cln must run on regtest".into());
+                add("not-regtest", "cln must run on regtest, once".into());
             }
         }
         "nutshell" => {
@@ -619,7 +750,7 @@ fn describe(problems: &[Problem]) -> String {
 
 /// Unsafe edits to the real file: (text to find, text to put there, the
 /// problem code that must catch it). An empty `from` appends `to` to the end.
-const MUTATIONS: [(&str, &str, &str); 21] = [
+const MUTATIONS: [(&str, &str, &str); 37] = [
     (
         "bitcoin/bitcoin@sha256:d2454aaf2ff4ce1ebbc49f4aa05ed044c907b849a80a3f4c0ad23e488e50bbe0",
         "bitcoin/bitcoin:32.1",
@@ -705,6 +836,82 @@ const MUTATIONS: [(&str, &str, &str); 21] = [
         "rpc-open-beyond-lab",
     ),
     ("", "volumes:\n  chain: {}\n", "named-volume"),
+    (
+        "    command: [\"python3\", \"-m\", \"cashu.mint\"]",
+        "    command: python3 -m cashu.mint",
+        "command-not-list",
+    ),
+    (
+        "      - -fallbackfee=0.0002\n",
+        "      - -fallbackfee=0.0002\n      - --chain=main\n",
+        "not-regtest",
+    ),
+    (
+        "      - -chain=regtest\n",
+        "      - -regtest\n",
+        "not-regtest",
+    ),
+    (
+        "      - --alias=gd-lab-cln\n",
+        "      - --alias=gd-lab-cln\n      - --network\n      - bitcoin\n",
+        "not-regtest",
+    ),
+    (
+        "      - --bitcoin.regtest\n",
+        "      - --bitcoin.regtest\n      - --bitcoin.mainnet\n",
+        "not-regtest",
+    ),
+    (
+        "    entrypoint: [\"bitcoind\"]",
+        "    entrypoint: [\"sh\", \"-c\", \"exec bitcoind -chain=main\"]",
+        "wrong-entrypoint",
+    ),
+    (
+        "    user: \"1000:1000\"\n",
+        "    user: \"1000:1000\"\n    entrypoint: [\"sh\"]\n",
+        "wrong-entrypoint",
+    ),
+    (
+        "    mem_limit: 512m\n    memswap_limit: 512m\n",
+        "    mem_limit: 0m\n    memswap_limit: 0m\n",
+        "no-memory-limit",
+    ),
+    ("      - /root/.lnd:size=1m\n", "", "tmpfs-missing"),
+    (
+        "    security_opt: [\"no-new-privileges:true\"]\n",
+        "    security_opt: [\"no-new-privileges:true\", \"seccomp=unconfined\"]\n",
+        "privileges-not-locked",
+    ),
+    (
+        "    internal: true",
+        "    internal: true\n    attachable: true",
+        "network-keys",
+    ),
+    (
+        "gateway_mode_ipv4: isolated",
+        "gateway_mode_ipv4: nat",
+        "network-not-isolated",
+    ),
+    (
+        "        - subnet: 172.29.208.0/24",
+        "        - subnet: 172.29.208.0/24\n          gateway: 172.29.208.1",
+        "network-keys",
+    ),
+    (
+        "    environment:\n      HOME: /data\n    depends_on:",
+        "    environment: [\"HOME=/data\"]\n    depends_on:",
+        "environment-not-mapping",
+    ),
+    (
+        "      - --bitcoind.rpcpass=${GD_LAB_RPC_PASSWORD:?run lab/up.sh, not docker compose}\n",
+        "      - --bitcoind.rpcpass\n      - hunter2\n",
+        "literal-secret",
+    ),
+    (
+        "\"--network=regtest\", \"getinfo\"]",
+        "\"--network=regtest\", \"--rpcpassword=hunter2\", \"getinfo\"]",
+        "literal-secret",
+    ),
 ];
 
 /// The real compose file passes every check.
@@ -813,6 +1020,10 @@ fn lab_scripts_stay_on_the_lab_project_and_regtest() {
         "jq -r '.chains[0].network')\" = regtest",
         "jq -r .network)\" = regtest",
         "exit 3",
+        "unset GD_LAB_RPC_PASSWORD",
+        "-stdinrpcpass",
+        "trap cleanup EXIT",
+        "mkdir \"$LOCK\"",
     ] {
         if !up.contains(needle) {
             problems.push(format!("up.sh lacks {needle:?}"));
@@ -857,16 +1068,51 @@ fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
-/// No generated credential is in any file under `lab/`, and `lab/.data/`
-/// (where `up.sh` writes them) is gitignored.
+/// The sorted list of tracked regular files under `lab/`, from `git ls-files`
+/// (the working-tree walk is only a fallback outside a git checkout).
+fn tracked_lab_files() -> Vec<PathBuf> {
+    let out = std::process::Command::new("git")
+        .args(["ls-files", "-z", "--", "lab"])
+        .current_dir(root())
+        .output();
+    let mut files: Vec<PathBuf> = match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(|p| root().join(p))
+            .collect(),
+        _ => {
+            assert!(
+                !root().join(".git").exists(),
+                "git ls-files failed inside a git checkout"
+            );
+            let mut found = Vec::new();
+            walk(&root().join("lab"), &mut found);
+            found
+        }
+    };
+    files.sort();
+    files.retain(|p| p.symlink_metadata().is_ok_and(|m| m.file_type().is_file()));
+    files
+}
+
+/// No tracked file under `lab/` holds a generated credential, nothing under
+/// `lab/.data/` is tracked, and `lab/.data/` is gitignored.
 #[test]
 fn no_generated_secret_is_committed() {
-    let mut files = Vec::new();
-    walk(&root().join("lab"), &mut files);
+    let files = tracked_lab_files();
     assert!(!files.is_empty(), "found no files under lab/");
     for path in files {
-        let text =
-            fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        let rel = path.strip_prefix(root()).unwrap_or(&path);
+        assert!(
+            !rel.starts_with("lab/.data"),
+            "{} is tracked, but lab/.data must never be committed",
+            rel.display()
+        );
+        let text = String::from_utf8_lossy(
+            &fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display())),
+        )
+        .into_owned();
         assert!(
             !has_canary(&text),
             "{} contains a {CANARY}... credential",

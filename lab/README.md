@@ -21,7 +21,7 @@ You need Docker with Compose v2, `jq` and `openssl`. Run one lab at a time; `up.
    - Core Lightning: a rune limited to `getinfo`
 6. Reads each service's version from the service itself and checks it against the version its pinned image is labelled with.
 7. Writes `lab/.data/manifest.toml` in Judge A's format: the services and versions that are really there.
-8. Prints a summary. If the whole start takes over 5 minutes, that counts as a failure (exit 4). If any other step fails, the lab is left running so you can look; `lab/down.sh` cleans up.
+8. Prints a summary. If the whole start takes over 5 minutes, that counts as a failure (exit 4). If a step fails before all three chain checks pass, or you press Ctrl-C, the lab removes itself. A later failure leaves the lab running so you can look; `lab/down.sh` cleans up. `lab/up.sh` and `lab/down.sh` share a lock (`lab/.lock`), so two can never run at once.
 
 ## The services
 
@@ -41,12 +41,12 @@ The mint uses Nutshell's `FakeWallet` backend: it has no real Lightning connecti
 
 ## How it's locked down
 
-- **Isolated:** one internal Docker network (`172.29.208.0/24`) with no route out, not even to the internet. No port is published on your machine; `up.sh` works through `docker compose exec`.
+- **Isolated:** one internal Docker network (`172.29.208.0/24`) with no route out, not even to the internet, and in `isolated` bridge mode so the lab has no address on your machine to reach. No port is published on your machine; `up.sh` works through `docker compose exec`.
 - **Nothing on disk:** no host folders, no Docker socket, no volumes. All data lives in memory (tmpfs) and is gone when a container stops.
 - **Every container:** a read-only root filesystem, all Linux capabilities dropped, `no-new-privileges`, a non-root user, and limits on memory, swap, CPU and processes.
 - **Memory:** limits add up to 1,920 MiB, under the 4 GiB budget for running the lab next to a Rust build. In practice the lab peaks at about 450 MiB.
 
-`crates/gd-core/tests/lab_compose.rs` checks all of this in every `cargo test`, and proves its checks catch 21 kinds of unsafe change.
+`crates/gd-core/tests/lab_compose.rs` checks all of this in every `cargo test`, and proves its checks catch 37 kinds of unsafe change.
 
 ## Changing an image
 

@@ -255,6 +255,11 @@ networks:
   lab:
     # internal: no route out of the lab, not even to the internet.
     internal: true
+    # isolated: Docker also gives the host no address on this bridge, so a lab
+    # container cannot reach services listening on the host (Docker 28 and later).
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
     ipam:
       config:
         - subnet: 172.29.208.0/24
