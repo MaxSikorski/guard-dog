@@ -91,6 +91,8 @@ pub enum MacaroonRefusal {
     WrongVersion,
     /// It holds no permissions at all.
     EmptyOps,
+    /// It holds a `uri` permission (or another set Guard Dog can't check).
+    UncheckablePermissions,
     /// It can change things (any `write` permission).
     Admin,
     /// Read-only, but more than `info:read`.
@@ -122,6 +124,10 @@ impl fmt::Display for MacaroonRefusal {
                     "This macaroon is in a format Guard Dog doesn't read (it expects an LND macaroon, format 2). {FIX}."
                 )
             }
+            MacaroonRefusal::UncheckablePermissions => write!(
+                f,
+                "This macaroon has a permission set Guard Dog can't check (a `uri` permission), so it won't use it. {FIX}."
+            ),
             MacaroonRefusal::EmptyOps => write!(
                 f,
                 "This macaroon allows nothing, so it can't read your node's version. {FIX}."
@@ -168,7 +174,7 @@ pub fn check(input: &[u8]) -> Result<NarrowMacaroon, MacaroonRefusal> {
 }
 
 fn from_hex(text: &[u8]) -> Option<Vec<u8>> {
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return None;
     }
     let digit = |b: u8| match b {
@@ -177,11 +183,10 @@ fn from_hex(text: &[u8]) -> Option<Vec<u8>> {
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     };
-    text.chunks_exact(2)
-        .map(|pair| match pair {
-            [hi, lo] => Some(digit(*hi)? << 4 | digit(*lo)?),
-            _ => None,
-        })
+    text.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[hi, lo]| Some(digit(*hi)? << 4 | digit(*lo)?))
         .collect()
 }
 
@@ -276,6 +281,7 @@ struct Permissions {
     write: bool,
     known: [bool; KNOWN.len()],
     unknown: bool,
+    uri: bool,
 }
 
 fn name(r: &mut Reader<'_>) -> Result<String, MacaroonRefusal> {
@@ -334,6 +340,9 @@ fn op(data: &[u8], perms: &mut Permissions) -> Result<(), MacaroonRefusal> {
             Err(bad("a permission has no entity"))
         };
     };
+    if entity == "uri" {
+        perms.uri = true;
+    }
     for action in actions {
         perms.any = true;
         if action == "write" {
@@ -381,6 +390,9 @@ fn classify(identifier: &[u8]) -> Result<(), MacaroonRefusal> {
         }
     }
 
+    if perms.uri {
+        return Err(MacaroonRefusal::UncheckablePermissions);
+    }
     if !perms.any {
         return Err(MacaroonRefusal::EmptyOps);
     }

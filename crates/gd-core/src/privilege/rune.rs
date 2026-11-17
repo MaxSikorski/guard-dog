@@ -106,7 +106,7 @@ fn base64url(text: &[u8]) -> Option<Vec<u8>> {
         data = rest;
         pad += 1;
     }
-    if pad > 2 || (pad > 0 && text.len() % 4 != 0) || data.len() % 4 == 1 {
+    if pad > 2 || (pad > 0 && !text.len().is_multiple_of(4)) || data.len() % 4 == 1 {
         return None;
     }
     let mut out = Vec::with_capacity(data.len() * 3 / 4);

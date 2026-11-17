@@ -4,6 +4,14 @@
 //! Macaroons and runes are built here by small test-only encoders, so the
 //! decoders under test are checked against a second, independent writer.
 
+// Test helpers may index and unwrap: a test that panics is a test that fails.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic
+)]
+
 use gd_core::privilege::bitcoind::{self, BitcoindRefusal, CanaryReply, CanaryRpc};
 use gd_core::privilege::macaroon::{self, MacaroonRefusal};
 use gd_core::privilege::rune::{self, RuneRefusal};
@@ -595,7 +603,10 @@ fn the_first_answer_that_is_not_403_stops_the_calls() {
 fn only_harmless_read_only_methods_are_ever_called() {
     let (_, calls) = run_bitcoind("guarddog", CanaryReply::Status(403));
     for call in calls {
-        assert!(["getblockcount", "getbestblockhash", "uptime"].contains(&call.as_str()), "{call}");
+        assert!(
+            ["getblockcount", "getbestblockhash", "uptime"].contains(&call.as_str()),
+            "{call}"
+        );
     }
 }
 
@@ -845,7 +856,10 @@ proptest! {
 fn a_uri_permission_is_never_accepted() {
     for ops in [
         vec![("uri", &["/lnrpc.Lightning/GetInfo"][..])],
-        vec![("info", &["read"][..]), ("uri", &["/lnrpc.Lightning/GetInfo"][..])],
+        vec![
+            ("info", &["read"][..]),
+            ("uri", &["/lnrpc.Lightning/GetInfo"][..]),
+        ],
         vec![("info", &["read"][..]), ("uri", &["write"][..])],
     ] {
         let err = macaroon::check(&mac(&ops)).expect_err("uri");

@@ -1,7 +1,9 @@
 //! Bitcoin Core: a login is narrow only if `rpcwhitelist` stops it.
 //!
-//! The proof is a canary call, `getblockcount`, which is harmless if it were
-//! allowed. A properly whitelisted login gets HTTP 403 for it. The user name is
+//! The proof is three canary calls (`getblockcount`, `getbestblockhash`, `uptime`),
+//! each harmless if allowed. A whitelisted login gets HTTP 403 for every one;
+//! the first other answer stops the check. This proves the login is not
+//! unrestricted, not that its whitelist is exactly the two methods asked for. The user name is
 //! the user's own config value, so it is never printed: messages say "this
 //! login".
 
@@ -27,6 +29,13 @@ pub trait CanaryRpc {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct NarrowLogin {}
+
+impl NarrowLogin {
+    /// What this proof does and does not show, in plain English.
+    pub fn note(&self) -> &'static str {
+        "Guard Dog can't read your rpcwhitelist line; it should list only getnetworkinfo,getblockchaininfo."
+    }
+}
 
 /// Why a Bitcoin Core login was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,16 +75,23 @@ impl fmt::Display for BitcoindRefusal {
 
 impl std::error::Error for BitcoindRefusal {}
 
+/// Harmless, read-only methods that are not on the whitelist Guard Dog asks for.
+/// Each must get HTTP 403. Never a wallet or spending method.
+const CANARY_METHODS: [&str; 3] = ["getblockcount", "getbestblockhash", "uptime"];
+
 /// Proves a login narrow, or says why not. `user` is the RPC user name; it is
 /// only compared, never shown. The cookie login is refused before any call.
 pub fn check(user: &str, rpc: &mut dyn CanaryRpc) -> Result<NarrowLogin, BitcoindRefusal> {
     if user == "__cookie__" {
         return Err(BitcoindRefusal::CookieLogin);
     }
-    match rpc.call("getblockcount") {
-        CanaryReply::Status(403) => Ok(NarrowLogin {}),
-        CanaryReply::Status(200) => Err(BitcoindRefusal::TooWide),
-        CanaryReply::Status(401) => Err(BitcoindRefusal::WrongPassword),
-        _ => Err(BitcoindRefusal::CouldNotProve),
+    for method in CANARY_METHODS {
+        match rpc.call(method) {
+            CanaryReply::Status(403) => {}
+            CanaryReply::Status(200) => return Err(BitcoindRefusal::TooWide),
+            CanaryReply::Status(401) => return Err(BitcoindRefusal::WrongPassword),
+            _ => return Err(BitcoindRefusal::CouldNotProve),
+        }
     }
+    Ok(NarrowLogin {})
 }
