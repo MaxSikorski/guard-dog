@@ -12,7 +12,8 @@
 
 // Test-only crate: its helper functions (not just `#[test]` ones) read files and
 // check data, and a panic there is a failed check. The workspace panic lints
-// protect shipped code; clippy.toml only exempts `#[test]` functions themselves.
+// protect shipped code; clippy.toml exempts `#[test]` functions and code under `#[cfg(test)]`,
+// but not these unannotated helpers.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
