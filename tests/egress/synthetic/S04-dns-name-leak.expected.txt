@@ -1,0 +1,6 @@
+Judge C (egress capture): FAIL
+control: dns ok, https ok, wire ok, blocked-path ok
+destinations: 1 unlisted, 0 allowlisted
+F1 unlisted-destination dns <canary:macaroon>.leak.example.net
+F2 canary-leaked macaroon in dns-name to dns
+F2 canary-leaked macaroon in wire to dns
