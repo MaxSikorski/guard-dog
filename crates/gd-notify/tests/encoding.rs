@@ -84,7 +84,7 @@ fn bip173_checksum_vectors() {
         "a12uel5l",
         "an83characterlonghumanreadablepartthatcontainsthenumber1andtheexcludedcharactersbio1tt5tgs",
         "abcdef1qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxw",
-        "11qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqc8247j",
+        "11qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqc8247j",
         "split1checkupstagehandshakeupstreamerranterredcaperred2y9e3w",
     ] {
         assert!(gd_notify::encoding::bech32_checksum_ok(valid), "{valid}");
@@ -100,7 +100,10 @@ fn bip173_checksum_vectors() {
         "1qzzfhee",
         "A12uEL5L",
     ] {
-        assert!(!gd_notify::encoding::bech32_checksum_ok(invalid), "{invalid}");
+        assert!(
+            !gd_notify::encoding::bech32_checksum_ok(invalid),
+            "{invalid}"
+        );
     }
 }
 
@@ -123,7 +126,9 @@ fn base64_is_strict_and_round_trips() {
     assert_eq!(base64_encode(b"Man"), "TWFu");
     assert_eq!(base64_encode(b"Ma"), "TWE=");
     assert_eq!(base64_encode(b"M"), "TQ==");
-    for bad in ["TWE", "TWE=\n", "TW=u", "TQ=A", "T===", "====", "TWF-", "TWF u", "TWE=TWFu", "TR=="] {
+    for bad in [
+        "TWE", "TWE=\n", "TW=u", "TQ=A", "T===", "====", "TWF-", "TWF u", "TWE=TWFu", "TR==",
+    ] {
         assert!(base64_decode(bad).is_err(), "accepted {bad:?}");
     }
 }

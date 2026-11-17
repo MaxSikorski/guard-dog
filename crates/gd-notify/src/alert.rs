@@ -1,0 +1,311 @@
+//! The alert message, the sending policy and the chain guard.
+//!
+//! An [`Alert`] holds only values that were validated or escaped when it was
+//! built, so rendering it cannot let outside text add a headline, a "Fix:"
+//! line or a second message. One alert is one direct message.
+
+use crate::NotifyError;
+use gd_core::Untrusted;
+use std::fmt;
+
+/// Most direct messages one run may send; the rest become one summary.
+pub const MAX_DMS_PER_RUN: usize = 20;
+const SUMMARY_CAP: usize = 500;
+const PLAYBOOK_CAP: usize = 1_000;
+const QUESTION_CAP: usize = 500;
+const FOOTER: &str = "No known issues is not the same as secure.";
+
+/// Which Bitcoin network a node reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chain {
+    /// The real network.
+    Mainnet,
+    /// A public test network.
+    Testnet,
+    /// Signet.
+    Signet,
+    /// A private test chain.
+    Regtest,
+    /// The node did not say, or said something else.
+    Unknown,
+}
+
+impl Chain {
+    fn name(self) -> &'static str {
+        match self {
+            Chain::Mainnet => "mainnet",
+            Chain::Testnet => "testnet",
+            Chain::Signet => "signet",
+            Chain::Regtest => "regtest",
+            Chain::Unknown => "an unknown chain",
+        }
+    }
+}
+
+/// How sure the match is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchResult {
+    /// The installed version is in the affected range.
+    Affected,
+    /// It could be; something needed to be sure was not visible.
+    PossiblyAffected,
+}
+
+/// How serious the advisory says it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    /// Critical.
+    Critical,
+    /// High.
+    High,
+    /// Medium.
+    Medium,
+    /// Low.
+    Low,
+    /// The advisory did not say. Treated as worth sending.
+    Unknown,
+}
+
+impl Severity {
+    fn name(self) -> &'static str {
+        match self {
+            Severity::Critical => "critical",
+            Severity::High => "high",
+            Severity::Medium => "medium",
+            Severity::Low => "low",
+            Severity::Unknown => "not stated",
+        }
+    }
+
+    /// Lower sorts first (worst first).
+    fn rank(self) -> u8 {
+        match self {
+            Severity::Critical => 0,
+            Severity::High => 1,
+            Severity::Unknown => 2,
+            Severity::Medium => 3,
+            Severity::Low => 4,
+        }
+    }
+}
+
+/// Everything an alert is made of, before validation.
+pub struct AlertParts {
+    /// Display name from the catalog.
+    pub product: &'static str,
+    /// Installed version, `[0-9A-Za-z.+~-]{1,64}`.
+    pub version: String,
+    /// The chain the node reports.
+    pub chain: Chain,
+    /// Advisory id, `[A-Za-z0-9._-]{1,100}`.
+    pub advisory_id: String,
+    /// Affected or possibly affected.
+    pub result: MatchResult,
+    /// Severity.
+    pub severity: Severity,
+    /// The advisory's fixed version, same form as `version`.
+    pub fixed_in: Option<String>,
+    /// The advisory's summary (outside text).
+    pub summary: Untrusted<String>,
+    /// The advisory's playbook (outside text).
+    pub playbook: Untrusted<String>,
+    /// A question for the user (outside text).
+    pub question: Option<Untrusted<String>>,
+    /// When the check ran, Unix seconds (injected).
+    pub checked_at: u64,
+    /// Fixed sentences saying what could not be seen.
+    pub blind_spots: Vec<&'static str>,
+}
+
+/// A validated alert. `Debug` shows nothing.
+#[derive(Clone)]
+pub struct Alert {
+    product: &'static str,
+    version: String,
+    chain: Chain,
+    advisory_id: String,
+    result: MatchResult,
+    severity: Severity,
+    fixed_in: Option<String>,
+    // Already escaped and capped.
+    summary: String,
+    playbook: String,
+    question: Option<String>,
+    checked_at: u64,
+    blind_spots: Vec<&'static str>,
+}
+
+impl fmt::Debug for Alert {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Alert(<redacted>)")
+    }
+}
+
+fn token_ok(text: &str, max: usize, extra: &[char]) -> bool {
+    !text.is_empty()
+        && text.len() <= max
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || extra.contains(&c))
+}
+
+/// Escapes for a terminal, then cuts to `cap` characters on a character
+/// boundary, ending in "..." when it was cut.
+fn quote_text(text: &Untrusted<String>, cap: usize) -> String {
+    let escaped = text.escape_for_terminal();
+    if escaped.chars().count() <= cap {
+        return escaped;
+    }
+    let mut cut: String = escaped.chars().take(cap.saturating_sub(3)).collect();
+    cut.push_str("...");
+    cut
+}
+
+impl Alert {
+    /// Validates the parts. Version, fixed version and advisory id must match
+    /// their patterns; outside text is escaped and capped here.
+    pub fn new(parts: AlertParts) -> Result<Alert, NotifyError> {
+        let version_chars = ['.', '+', '~', '-'];
+        if !token_ok(&parts.version, 64, &version_chars) {
+            return Err(NotifyError::Invalid("version is not a plain version token"));
+        }
+        if let Some(fixed) = &parts.fixed_in
+            && !token_ok(fixed, 64, &version_chars)
+        {
+            return Err(NotifyError::Invalid(
+                "fixed version is not a plain version token",
+            ));
+        }
+        if !token_ok(&parts.advisory_id, 100, &['.', '_', '-']) {
+            return Err(NotifyError::Invalid("advisory id is not a plain id"));
+        }
+        if parts
+            .blind_spots
+            .iter()
+            .any(|s| s.chars().any(char::is_control))
+        {
+            return Err(NotifyError::Invalid(
+                "blind spot sentence has a control character",
+            ));
+        }
+        Ok(Alert {
+            product: parts.product,
+            version: parts.version,
+            chain: parts.chain,
+            advisory_id: parts.advisory_id,
+            result: parts.result,
+            severity: parts.severity,
+            fixed_in: parts.fixed_in,
+            summary: quote_text(&parts.summary, SUMMARY_CAP),
+            playbook: quote_text(&parts.playbook, PLAYBOOK_CAP),
+            question: parts.question.as_ref().map(|q| quote_text(q, QUESTION_CAP)),
+            checked_at: parts.checked_at,
+            blind_spots: parts.blind_spots,
+        })
+    }
+
+    /// The plain-text message: the headline sentence first, then what is
+    /// affected, why, what to do, the question if any, when it was checked,
+    /// the blind spots and the footer. Every line of outside text starts with
+    /// `  > `, so it is visibly quoted and can never pass as one of ours.
+    pub fn render(&self) -> String {
+        let verb = match self.result {
+            MatchResult::Affected => "is affected by",
+            MatchResult::PossiblyAffected => "may be affected by",
+        };
+        let mut out = String::new();
+        out.push_str(&format!(
+            "{} {} on this node {verb} {}.\n\n",
+            self.product, self.version, self.advisory_id
+        ));
+        out.push_str(&format!(
+            "What is affected: {} {} on {}.\nSeverity: {}.\n\n",
+            self.product,
+            self.version,
+            self.chain.name(),
+            self.severity.name()
+        ));
+        out.push_str(&format!("Why:\n  > {}\n\nWhat to do:\n", self.summary));
+        if let Some(fixed) = &self.fixed_in {
+            out.push_str(&format!("Update to {fixed} or later.\n"));
+        }
+        out.push_str(&format!("  > {}\n", self.playbook));
+        if let Some(q) = &self.question {
+            out.push_str(&format!("\nQuestion:\n  > {q}\n"));
+        }
+        out.push_str(&format!("\nChecked: {}.\n", format_utc(self.checked_at)));
+        if self.blind_spots.is_empty() {
+            out.push_str("Blind spots: none reported.\n");
+        } else {
+            out.push_str("Blind spots:\n");
+            for spot in &self.blind_spots {
+                out.push_str(&format!("- {spot}\n"));
+            }
+        }
+        out.push('\n');
+        out.push_str(FOOTER);
+        out
+    }
+}
+
+/// "2026-11-17 12:00 UTC".
+fn format_utc(unix: u64) -> String {
+    let days = i64::try_from(unix / 86_400).unwrap_or(0);
+    let secs = unix % 86_400;
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02} UTC",
+        secs / 3_600,
+        secs % 3_600 / 60
+    )
+}
+
+/// Critical, high or unknown severity, affected or possibly affected: send
+/// now. Medium and low wait for a later digest.
+pub fn should_send_now(alert: &Alert) -> bool {
+    matches!(
+        alert.severity,
+        Severity::Critical | Severity::High | Severity::Unknown
+    )
+}
+
+/// The messages for one run: the alerts that should be sent now, worst first
+/// (input order within a severity), at most [`MAX_DMS_PER_RUN`] of them, then
+/// one summary message if more were held back by the cap.
+pub fn plan_dms(alerts: &[Alert]) -> Vec<String> {
+    let mut due: Vec<&Alert> = alerts.iter().filter(|a| should_send_now(a)).collect();
+    due.sort_by_key(|a| a.severity.rank());
+    let mut out: Vec<String> = due
+        .iter()
+        .take(MAX_DMS_PER_RUN)
+        .map(|a| a.render())
+        .collect();
+    let more = due.len().saturating_sub(MAX_DMS_PER_RUN);
+    if more > 0 {
+        let noun = if more == 1 { "finding" } else { "findings" };
+        out.push(format!(
+            "{more} more {noun}; run guard-dog scan to see them.\n\n{FOOTER}"
+        ));
+    }
+    out
+}
+
+/// True only when at least one chain is regtest or signet and none is
+/// anything else. An unknown chain, or none at all, is false.
+pub fn notify_allowed(chains: &[Chain]) -> bool {
+    chains
+        .iter()
+        .any(|c| matches!(c, Chain::Regtest | Chain::Signet))
+        && chains
+            .iter()
+            .all(|c| matches!(c, Chain::Regtest | Chain::Signet))
+}

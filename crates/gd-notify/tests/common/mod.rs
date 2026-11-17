@@ -36,5 +36,5 @@ impl Clock for FixedClock {
     }
 }
 
-/// 2026-11-17 12:00:00 UTC.
+/// A fixed moment in November 2026.
 pub const NOW: u64 = 1_795_000_000;

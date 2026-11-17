@@ -60,5 +60,8 @@ fn the_refusal_names_what_is_allowed() {
     let err = RelayUrl::parse("ws://relay.example:7777").unwrap_err();
     let text = err.to_string();
     assert!(text.contains("strfry"), "{text}");
-    assert!(!text.contains("relay.example"), "must not echo input: {text}");
+    assert!(
+        !text.contains("relay.example"),
+        "must not echo input: {text}"
+    );
 }

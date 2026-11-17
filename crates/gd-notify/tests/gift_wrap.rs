@@ -36,7 +36,10 @@ fn wrap_unwrap_round_trip() {
     // The outer event: kind 1059, tagged for the recipient, signed by a
     // throwaway key (never Guard Dog's own), id and signature valid.
     assert_eq!(wrap.kind, 1059);
-    assert_eq!(wrap.tags, vec![vec!["p".to_owned(), recipient.public_hex()]]);
+    assert_eq!(
+        wrap.tags,
+        vec![vec!["p".to_owned(), recipient.public_hex()]]
+    );
     assert_ne!(wrap.pubkey, sender.public_hex());
     assert_ne!(wrap.pubkey, recipient.public_hex());
     wrap.verify().unwrap();
@@ -53,7 +56,10 @@ fn wrap_unwrap_round_trip() {
     // The rumor: kind 14, unsigned, one p tag, the message, written by the sender.
     assert_eq!(opened.rumor.kind, 14);
     assert_eq!(opened.rumor.content, "line one\nline two with a dog: 🐕");
-    assert_eq!(opened.rumor.tags, vec![vec!["p".to_owned(), recipient.public_hex()]]);
+    assert_eq!(
+        opened.rumor.tags,
+        vec![vec!["p".to_owned(), recipient.public_hex()]]
+    );
     assert_eq!(opened.rumor.pubkey, sender.public_hex());
     assert_eq!(opened.rumor.id(), opened.rumor_id);
 }
@@ -83,8 +89,14 @@ fn created_at_is_randomised_inside_the_window() {
     let mut entropy = SeqEntropy(7);
     let mut seen = std::collections::BTreeSet::new();
     for _ in 0..40 {
-        let wrap = gift_wrap_dm(&sender, &recipient.public_x(), "x", &FixedClock(NOW), &mut entropy)
-            .unwrap();
+        let wrap = gift_wrap_dm(
+            &sender,
+            &recipient.public_x(),
+            "x",
+            &FixedClock(NOW),
+            &mut entropy,
+        )
+        .unwrap();
         assert!(wrap.created_at <= NOW && wrap.created_at >= NOW - TWO_DAYS);
         let opened = unwrap_dm(&recipient, &wrap).unwrap();
         assert!(opened.seal.created_at <= NOW && opened.seal.created_at >= NOW - TWO_DAYS);
@@ -98,9 +110,15 @@ fn the_same_inputs_give_the_same_wrap() {
     let sender = keys(1);
     let recipient = keys(2);
     let make = || {
-        gift_wrap_dm(&sender, &recipient.public_x(), "x", &FixedClock(NOW), &mut SeqEntropy(9))
-            .unwrap()
-            .to_json()
+        gift_wrap_dm(
+            &sender,
+            &recipient.public_x(),
+            "x",
+            &FixedClock(NOW),
+            &mut SeqEntropy(9),
+        )
+        .unwrap()
+        .to_json()
     };
     assert_eq!(make(), make());
 }
@@ -110,10 +128,21 @@ fn event_id_is_the_sha256_of_the_canonical_array() {
     use sha2::{Digest, Sha256};
     let sender = keys(1);
     let recipient = keys(2);
-    let wrap = gift_wrap_dm(&sender, &recipient.public_x(), "x", &FixedClock(NOW), &mut SeqEntropy(3))
-        .unwrap();
+    let wrap = gift_wrap_dm(
+        &sender,
+        &recipient.public_x(),
+        "x",
+        &FixedClock(NOW),
+        &mut SeqEntropy(3),
+    )
+    .unwrap();
     let array = serde_json::to_string(&serde_json::json!([
-        0, wrap.pubkey, wrap.created_at, wrap.kind, wrap.tags, wrap.content
+        0,
+        wrap.pubkey,
+        wrap.created_at,
+        wrap.kind,
+        wrap.tags,
+        wrap.content
     ]))
     .unwrap();
     let want: String = Sha256::digest(array.as_bytes())
@@ -127,8 +156,14 @@ fn event_id_is_the_sha256_of_the_canonical_array() {
 fn a_tampered_event_fails_verification() {
     let sender = keys(1);
     let recipient = keys(2);
-    let wrap = gift_wrap_dm(&sender, &recipient.public_x(), "x", &FixedClock(NOW), &mut SeqEntropy(3))
-        .unwrap();
+    let wrap = gift_wrap_dm(
+        &sender,
+        &recipient.public_x(),
+        "x",
+        &FixedClock(NOW),
+        &mut SeqEntropy(3),
+    )
+    .unwrap();
     let mut changed = wrap.clone();
     changed.content.push('A');
     assert!(changed.verify().is_err());
@@ -145,12 +180,29 @@ fn a_tampered_event_fails_verification() {
 fn json_form_is_a_plain_nostr_event() {
     let sender = keys(1);
     let recipient = keys(2);
-    let wrap = gift_wrap_dm(&sender, &recipient.public_x(), "x", &FixedClock(NOW), &mut SeqEntropy(3))
-        .unwrap();
+    let wrap = gift_wrap_dm(
+        &sender,
+        &recipient.public_x(),
+        "x",
+        &FixedClock(NOW),
+        &mut SeqEntropy(3),
+    )
+    .unwrap();
     let v: serde_json::Value = serde_json::from_str(&wrap.to_json()).unwrap();
     let mut names: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
     names.sort_unstable();
-    assert_eq!(names, ["content", "created_at", "id", "kind", "pubkey", "sig", "tags"]);
+    assert_eq!(
+        names,
+        [
+            "content",
+            "created_at",
+            "id",
+            "kind",
+            "pubkey",
+            "sig",
+            "tags"
+        ]
+    );
     let parsed = Event::from_json(&wrap.to_json()).unwrap();
     assert_eq!(parsed, wrap);
     // The wrap content is a NIP-44 payload: version byte 2 after base64.
@@ -165,7 +217,13 @@ fn oversized_messages_are_refused() {
     let recipient = keys(2);
     let huge = "a".repeat(70_000);
     assert!(
-        gift_wrap_dm(&sender, &recipient.public_x(), &huge, &FixedClock(NOW), &mut SeqEntropy(3))
-            .is_err()
+        gift_wrap_dm(
+            &sender,
+            &recipient.public_x(),
+            &huge,
+            &FixedClock(NOW),
+            &mut SeqEntropy(3)
+        )
+        .is_err()
     );
 }

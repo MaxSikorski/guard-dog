@@ -73,23 +73,37 @@ fn a_key_file_that_is_not_a_regular_file_is_refused() {
 
 #[test]
 fn a_key_file_with_group_or_other_bits_is_refused() {
-    for bad in [0o640, 0o604, 0o660, 0o606, 0o644, 0o666, 0o601, 0o602, 0o610, 0o620] {
+    for bad in [
+        0o640, 0o604, 0o660, 0o606, 0o644, 0o666, 0o601, 0o602, 0o610, 0o620,
+    ] {
         let dir = Dir::new(&format!("mode{bad:o}"));
         load_or_create(dir.path(), &mut SeqEntropy(1)).unwrap();
         let file = dir.path().join(KEY_FILE_NAME);
         fs::set_permissions(&file, fs::Permissions::from_mode(bad)).unwrap();
-        assert!(load_or_create(dir.path(), &mut SeqEntropy(1)).is_err(), "{bad:o}");
+        assert!(
+            load_or_create(dir.path(), &mut SeqEntropy(1)).is_err(),
+            "{bad:o}"
+        );
     }
 }
 
 #[test]
 fn a_key_file_with_garbage_in_it_is_refused() {
-    for content in ["", "not hex", &"zz".repeat(32), &"11".repeat(31), &"00".repeat(32)] {
+    for content in [
+        "",
+        "not hex",
+        &"zz".repeat(32),
+        &"11".repeat(31),
+        &"00".repeat(32),
+    ] {
         let dir = Dir::new("garbage");
         let file = dir.path().join(KEY_FILE_NAME);
         fs::write(&file, content).unwrap();
         fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(load_or_create(dir.path(), &mut SeqEntropy(1)).is_err(), "{content:?}");
+        assert!(
+            load_or_create(dir.path(), &mut SeqEntropy(1)).is_err(),
+            "{content:?}"
+        );
     }
 }
 

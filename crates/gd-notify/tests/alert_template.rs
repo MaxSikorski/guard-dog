@@ -63,7 +63,8 @@ fn corpus() -> Vec<(String, String)> {
 
 #[test]
 fn the_message_reads_in_the_planned_order() {
-    let text = alert(|p| p.question = Some(Untrusted::new("Is port 9735 open?".to_owned()))).render();
+    let text =
+        alert(|p| p.question = Some(Untrusted::new("Is port 9735 open?".to_owned()))).render();
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(
         lines[0],
@@ -111,7 +112,16 @@ fn empty_blind_spots_are_said_plainly() {
 
 #[test]
 fn bad_tokens_are_refused() {
-    for v in ["", "1.2 3", "1.2\n3", "1.2;rm", &"1".repeat(65), "v1/2", "1.0\u{202e}", "é"] {
+    for v in [
+        "",
+        "1.2 3",
+        "1.2\n3",
+        "1.2;rm",
+        &"1".repeat(65),
+        "v1/2",
+        "1.0\u{202e}",
+        "é",
+    ] {
         let mut p = parts();
         p.version = v.to_owned();
         assert!(Alert::new(p).is_err(), "version {v:?}");
@@ -163,11 +173,21 @@ fn every_injection_payload_stays_quoted_in_one_message() {
                 "{name}/{slot}"
             );
             assert_eq!(
-                count(&|l| l.contains(" on this node is ") || l.contains(" on this node may be ")),
-                1 + 0 * slot,
+                text.lines()
+                    .filter(|l| !l.starts_with("  > "))
+                    .filter(
+                        |l| l.contains(" on this node is ") || l.contains(" on this node may be ")
+                    )
+                    .count(),
+                1,
                 "{name}/{slot}"
             );
-            assert!(text.lines().next().unwrap().starts_with("LND 0.18.4-beta on this node is"));
+            assert!(
+                text.lines()
+                    .next()
+                    .unwrap()
+                    .starts_with("LND 0.18.4-beta on this node is")
+            );
             // Every other line starts with our own words or the quote prefix.
             let mut quoted = 0;
             for l in text.lines() {
@@ -178,7 +198,11 @@ fn every_injection_payload_stays_quoted_in_one_message() {
             }
             assert_eq!(quoted, 3 - usize::from(slot != 2), "{name}/{slot}");
             // One alert is one message: the footer closes it exactly once.
-            assert_eq!(text.matches("No known issues is not the same as secure.").count(), 1);
+            assert_eq!(
+                text.matches("No known issues is not the same as secure.")
+                    .count(),
+                1
+            );
         }
     }
 }
@@ -311,7 +335,13 @@ fn debug_hides_the_message() {
     let a = alert(|_| {});
     let shown = format!("{a:?} {a:#?}");
     assert!(shown.contains("<redacted>"));
-    for needle in ["LND", "0.18.4", "crafted invoice", "Stop LND", "x_lightning"] {
+    for needle in [
+        "LND",
+        "0.18.4",
+        "crafted invoice",
+        "Stop LND",
+        "x_lightning",
+    ] {
         assert!(!shown.contains(needle), "{needle}");
     }
 }
