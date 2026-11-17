@@ -1222,6 +1222,64 @@ fn up_sh_writes_the_container_facts() {
     }
 }
 
+/// Does `text` use the shell variable `name` (`$name` or `${name}`, not
+/// `$name2`)?
+fn uses_var(text: &str, name: &str) -> bool {
+    [format!("${{{name}}}"), format!("${name}")]
+        .iter()
+        .any(|pat| {
+            text.match_indices(pat.as_str()).any(|(i, _)| {
+                !text[i + pat.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+        })
+}
+
+/// `docker inspect` output holds the lab's generated passwords (container
+/// environment), and anything in a command's arguments is readable by every
+/// process on the host. So no lab script passes inspect output, or a variable
+/// holding it, to a command as an argument, and nothing uses `--argjson`.
+#[test]
+fn lab_scripts_never_put_inspect_output_in_arguments() {
+    let mut checked = 0;
+    for name in ["lab/up.sh", "lab/down.sh", "lab/lib.sh"] {
+        for (n, line) in read(name).lines().enumerate() {
+            let at = n + 1;
+            let code = line.split('#').next().unwrap_or("");
+            checked += 1;
+            assert!(
+                !code.contains("--argjson") && !code.contains("--jsonargs"),
+                "{name}:{at}: jq gets JSON through stdin, never as an argument"
+            );
+            // `--arg name "$ci"` (or an inspect command substitution) would put it in argv.
+            for flag in ["--arg", "--rawfile", "--slurpfile"] {
+                for rest in code.split(flag).skip(1) {
+                    let value = rest.split_whitespace().nth(1).unwrap_or("");
+                    assert!(
+                        !uses_var(value, "ci")
+                            && !uses_var(value, "imgj")
+                            && !value.contains("docker inspect")
+                            && !value.contains("docker image inspect"),
+                        "{name}:{at}: jq {flag} is fed from inspect output"
+                    );
+                }
+            }
+            // Any use of the inspect variables must be a printf into a pipe.
+            for var in ["ci", "imgj"] {
+                if uses_var(code, var) {
+                    assert!(
+                        code.contains(&format!("printf '%s' \"${var}\" | jq")),
+                        "{name}:{at}: ${var} used somewhere other than `printf '%s' \"${var}\" | jq`"
+                    );
+                }
+            }
+        }
+    }
+    assert!(checked > 100, "the scripts were read");
+}
+
 #[test]
 fn reported_text_and_version_must_agree() {
     let good = parse_manifest(GOOD_MANIFEST).unwrap();

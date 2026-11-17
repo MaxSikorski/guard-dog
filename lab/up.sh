@@ -232,16 +232,19 @@ STORAGE_JQ='.[0] | if (.HostConfig.ReadonlyRootfs == true)
   and all((.Mounts // [])[]; .Type == "tmpfs") then "tmpfs" else "disk" end'
 # The image's architecture (input: `docker image inspect`) against the
 # architecture of the manifest the container's image was actually pulled as
-# (--argjson c: `docker inspect` of the container, whose ImageManifestDescriptor
-# exists from Docker 28.1 / API 1.48 with the containerd image store). If both
+# (--arg c: that one architecture word, read from the container's `docker
+# inspect` through stdin; the inspect JSON holds the lab's generated passwords
+# in the container environment, so it never goes into a command's arguments;
+# the descriptor exists from Docker 28.1 / API 1.48 with the containerd image
+# store, and c is empty without it). If both
 # are there and differ, the answer is "mixed", never the host's guess; on an
 # older Docker the container has no descriptor and the image value is used.
 # shellcheck disable=SC2016
 ARCH_JQ='.[0].Architecture as $a
-  | ($c[0].ImageManifestDescriptor.platform.architecture // $a) as $b
+  | (if $c == "" then $a else $c end) as $b
   | if $a == $b then $a else "mixed" end'
 inspect_lab() {
-  local cids cid img a kind seen_arch="" storage=tmpfs exposure=none want c ci imgj st n
+  local cids cid img a kind seen_arch="" storage=tmpfs exposure=none want c ci imgj st n carch
   cids="$(dc ps -aq)" || fail "could not list the lab's containers"
   want="$(dc config --services | grep -c .)" || fail "could not list the compose services"
   c="$(printf '%s\n' "$cids" | grep -c .)" || c=0
@@ -253,7 +256,9 @@ inspect_lab() {
     ci="$(docker inspect "$cid")" || fail "docker inspect failed"
     img="$(printf '%s' "$ci" | jq -er '.[0].Image')" || fail "docker inspect gave no image"
     imgj="$(docker image inspect "$img")" || fail "docker image inspect failed"
-    a="$(printf '%s' "$imgj" | jq -er --argjson c "$ci" "$ARCH_JQ")" || fail "docker image inspect gave no architecture"
+    carch="$(printf '%s' "$ci" | jq -r '.[0].ImageManifestDescriptor.platform.architecture // empty')" || fail "docker inspect gave no platform"
+    [ -z "$carch" ] || carch="$(plain "$carch")"
+    a="$(printf '%s' "$imgj" | jq -er --arg c "$carch" "$ARCH_JQ")" || fail "docker image inspect gave no architecture"
     a="$(plain "$a")"
     case $a in
       amd64 | arm64 | ppc64le | s390x | riscv64 | loong64 | mips64 | mips64le) kind=64-bit ;;
@@ -267,6 +272,7 @@ inspect_lab() {
     [ "$st" = tmpfs ] || storage=disk
     n="$(printf '%s' "$ci" | jq -er "$EXPOSED_JQ")" || fail "docker inspect gave no network facts"
     [ "$n" = 0 ] || exposure=published
+    ci="" imgj=""
   done <<< "$cids"
   LAB_ARCH=$seen_arch LAB_STORAGE=$storage LAB_EXPOSURE=$exposure
 }
