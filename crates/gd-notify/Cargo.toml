@@ -1,0 +1,36 @@
+[package]
+name = "gd-notify"
+description = "Guard Dog's alerts as private Nostr direct messages (NIP-17), lab relay only for now."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gd-core = { path = "../gd-core" }
+serde_json.workspace = true
+# Cryptography comes from RustCrypto primitives only; we compose them, never reimplement them.
+# The `nostr` crate is not used: it depends on libsecp256k1 (CC0), which deny.toml refuses.
+k256 = { version = "=0.14.0", default-features = false, features = ["arithmetic", "ecdh", "schnorr", "std"] }
+chacha20 = { version = "=0.10.2", default-features = false, features = ["cipher", "zeroize"] }
+hkdf = "=0.13.0"
+hmac = { version = "=0.13.0", features = ["zeroize"] }
+sha2 = "=0.11.1"
+getrandom = "=0.4.3"
+# Wipes secret keys and key-derived values from memory when dropped. Already in the tree via k256.
+zeroize = "=1.9.1"
+# WebSocket client for ws:// (lab relay). No TLS, no extras.
+tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
+
+[features]
+# Test-only helpers for this crate's own integration tests. Off by default, so
+# no release build ships them; the tests turn it on through the dev-dependency below.
+test-support = []
+
+[dev-dependencies]
+gd-notify = { path = ".", features = ["test-support"] }

@@ -62,7 +62,9 @@ services:
       # The image declares this path a VOLUME; covering it stops Docker making
       # an anonymous volume that would outlive the lab.
       - /home/bitcoin/.bitcoin:size=1m
-    networks: [lab]
+    networks:
+      lab:
+        ipv4_address: 172.29.208.10
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -112,7 +114,9 @@ services:
     tmpfs:
       - /data:uid=1000,gid=1000,mode=0700,size=256m
       - /root/.lnd:size=1m
-    networks: [lab]
+    networks:
+      lab:
+        ipv4_address: 172.29.208.11
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -162,7 +166,9 @@ services:
       - /data:uid=1000,gid=1000,mode=0700,size=256m
       - /tmp:size=16m
       - /root/.lightning:size=1m
-    networks: [lab]
+    networks:
+      lab:
+        ipv4_address: 172.29.208.12
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -203,7 +209,9 @@ services:
       retries: 60
     tmpfs:
       - /data:uid=1000,gid=1000,mode=0700,size=128m
-    networks: [lab]
+    networks:
+      lab:
+        ipv4_address: 172.29.208.13
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -246,7 +254,9 @@ services:
     tmpfs:
       - /data:uid=1000,gid=1000,mode=0700,size=64m
       - /tmp:size=16m
-    networks: [lab]
+    networks:
+      lab:
+        ipv4_address: 172.29.208.14
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
