@@ -72,10 +72,20 @@ pub struct Event {
 
 impl fmt::Debug for Event {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let prefix: String = self.id.chars().take(8).collect();
+        // An id that came from outside is shown only when the whole of it is
+        // 64 lowercase hex characters; otherwise none of it is.
+        let valid = self.id.len() == 64
+            && self
+                .id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        let id = match (valid, self.id.get(..8)) {
+            (true, Some(prefix)) => format!("{prefix}.."),
+            _ => "<unverified>".to_owned(),
+        };
         write!(
             f,
-            "Event(kind {}, id {prefix}.., {} tags)",
+            "Event(kind {}, id {id}, {} tags)",
             self.kind,
             self.tags.len()
         )
@@ -436,6 +446,26 @@ mod tests {
         };
         let (recipient, event) = wrap(&extras);
         assert!(unwrap_dm(&recipient, &event).is_err());
+    }
+
+    #[test]
+    fn debug_never_prints_an_id_that_is_not_64_lowercase_hex() {
+        let (_, event) = wrap(&Extras::default());
+        for bad_id in [
+            "line\nbreak and \u{1b}[31mred".to_owned(),
+            format!("{}\u{1b}", &event.id[..63]),
+            event.id.to_uppercase(),
+            event.id[..8].to_owned(),
+            String::new(),
+        ] {
+            let mut json: Value = serde_json::from_str(&event.to_json()).unwrap();
+            json["id"] = Value::String(bad_id.clone());
+            let from_json = Event::from_json(&json.to_string()).unwrap();
+            let shown = format!("{from_json:?} {from_json:#?}");
+            assert!(shown.contains("<unverified>"), "{shown:?}");
+            assert!(!shown.contains('\u{1b}') && !shown.contains('\n'));
+            assert!(bad_id.is_empty() || !shown.contains(&bad_id[..bad_id.len().min(4)]));
+        }
     }
 
     #[test]

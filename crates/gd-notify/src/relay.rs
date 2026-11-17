@@ -299,17 +299,21 @@ where
     Ok(outcomes.into_iter().flatten().collect())
 }
 
-/// Reads one relay message. Only the exact shape `["OK", <id>, <bool>, <text>]`
-/// for one of our events whose slot is still empty is used; it fills that slot
+/// Reads one relay message. Only the shape `["OK", <id>, <bool>, <text>]`
+/// (or with a fifth field that is text) for one of our events whose slot is still empty is used; it fills that slot
 /// once, so a later conflicting answer never overwrites the first. Returns
 /// whether a slot was filled.
 fn fill_slot(text: &str, events: &[Event], outcomes: &mut [Option<PublishOutcome>]) -> bool {
     let Ok(Value::Array(fields)) = serde_json::from_str::<Value>(text) else {
         return false;
     };
-    let [kind, id, accepted, note] = fields.as_slice() else {
+    let [kind, id, accepted, note, rest @ ..] = fields.as_slice() else {
         return false;
     };
+    // Four fields, or five where the fifth is text (some relays add one).
+    if !matches!(rest, [] | [Value::String(_)]) {
+        return false;
+    }
     let (Some("OK"), Some(id), Some(accepted), Some(note)) = (
         kind.as_str(),
         id.as_str(),
@@ -385,6 +389,10 @@ mod tests {
         Conflicting,
         /// Floods pings before it answers.
         Pings,
+        /// Answers with a valid five-field rejection.
+        FiveFields,
+        /// Floods five-field acks whose fifth field is not text.
+        BadFifth,
     }
 
     /// An in-process relay on 127.0.0.1: records every message it gets.
@@ -413,12 +421,26 @@ mod tests {
                 let v: Value = serde_json::from_str(text.as_str()).unwrap();
                 let id = v[1]["id"].as_str().unwrap().to_owned();
                 ids.push(id.clone());
+                if matches!(mode, Mode::FiveFields) {
+                    let ack = serde_json::json!(["OK", id, false, "blocked: spam", "extra"]);
+                    let _ = ws.send(Message::text(ack.to_string()));
+                    continue;
+                }
+                if matches!(mode, Mode::BadFifth) {
+                    for _ in 0..250 {
+                        let ack = serde_json::json!(["OK", id, true, "", 5]);
+                        let _ = ws.send(Message::text(ack.to_string()));
+                    }
+                    continue;
+                }
                 if matches!(mode, Mode::Conflicting) {
                     if ids.len() == 2 {
                         for ack in [
-                            serde_json::json!(["OK", ids[1], true]),
+                            // Too short, and it says "false" for the event that is accepted.
+                            serde_json::json!(["OK", ids[1], false]),
                             serde_json::json!(["OK", ids[0], true, ""]),
                             serde_json::json!(["OK", ids[0], false, "conflict"]),
+                            serde_json::json!(["OK", "0".repeat(64), false, "x"]),
                             serde_json::json!(["OK", ids[1], true, ""]),
                         ] {
                             let _ = ws.send(Message::text(ack.to_string()));
@@ -436,7 +458,12 @@ mod tests {
                     Mode::Accept | Mode::NoiseThenAccept => serde_json::json!(["OK", id, true, ""]),
                     Mode::Reject => serde_json::json!(["OK", id, false, "blocked: \u{1b}[31mnope"]),
                     Mode::Huge => serde_json::json!(["NOTICE", "x".repeat(100_000)]),
-                    Mode::Silent | Mode::Redirect | Mode::Conflicting | Mode::Pings => continue,
+                    Mode::Silent
+                    | Mode::Redirect
+                    | Mode::Conflicting
+                    | Mode::Pings
+                    | Mode::FiveFields
+                    | Mode::BadFifth => continue,
                 };
                 if matches!(mode, Mode::NoiseThenAccept) {
                     let _ = ws.send(Message::text(r#"["NOTICE","hello"]"#));
@@ -830,6 +857,33 @@ mod tests {
         assert_eq!(out[1].event_id, events[1].id);
         assert!(out[0].message.escape_for_terminal().is_empty());
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn a_valid_five_field_rejection_is_reported_as_that_rejection() {
+        let (_, events) = wraps(1);
+        let (port, _seen, handle) = fake_relay(Mode::FiveFields);
+        let out = publish(&RelayUrl::loopback_for_test(port), &events).unwrap();
+        assert!(!out[0].accepted);
+        assert!(
+            out[0]
+                .message
+                .escape_for_terminal()
+                .starts_with("blocked: spam")
+        );
+        drop(handle);
+    }
+
+    #[test]
+    fn a_five_field_ack_with_a_fifth_field_that_is_not_text_counts_as_ignored() {
+        let (_, events) = wraps(1);
+        let (port, _seen, handle) = fake_relay(Mode::BadFifth);
+        let err = publish(&RelayUrl::loopback_for_test(port), &events).unwrap_err();
+        assert!(
+            matches!(err, NotifyError::Relay(m) if m.contains("too many")),
+            "{err}"
+        );
+        drop(handle);
     }
 
     #[test]

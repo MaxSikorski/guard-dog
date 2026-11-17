@@ -152,13 +152,27 @@ fn load_or_create_as(
         Err(e) if e.kind() == ErrorKind::NotFound => {}
         Err(_) => return Err(refuse("cannot look at the key file")),
     }
+    remove_stale_temporaries(state_dir);
     let keys = Keys::generate(entropy)?;
     let mut line = keys.secret_hex();
     line.push('\n');
-    match write_new(&path, |file| {
+    // The key is written and synced in a private temporary file first, then
+    // installed under its real name with a hard link, which fails if a key is
+    // already there. So `notify.key` is never seen empty or half written, and
+    // two first uses at once end with one key.
+    let temporary = state_dir.join(format!(
+        "{TEMP_PREFIX}{}-{}",
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    write_new(&temporary, |file| {
         file.write_all(line.as_bytes())?;
         file.sync_all()
-    }) {
+    })
+    .map_err(|_| refuse("cannot create the key file"))?;
+    let linked = fs::hard_link(&temporary, &path);
+    let _ = fs::remove_file(&temporary);
+    match linked {
         Ok(()) => {
             // Make the new directory entry durable too.
             fs::File::open(state_dir)
@@ -166,9 +180,38 @@ fn load_or_create_as(
                 .map_err(|_| refuse("cannot save the key file's folder entry"))?;
             Ok(keys)
         }
-        // Someone else created it a moment ago: use theirs, after the same checks.
+        // Someone else installed a key a moment ago: use theirs, after the same checks.
         Err(e) if e.kind() == ErrorKind::AlreadyExists => read_key(&path, euid),
         Err(_) => Err(refuse("cannot create the key file")),
+    }
+}
+
+const TEMP_PREFIX: &str = ".notify-key-tmp-";
+static TEMP_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// A temporary this old is from a run that was killed; a live run needs
+/// milliseconds.
+const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Removes temporaries left by a killed run. They are never read as the key
+/// (only `notify.key` is), this just tidies the folder.
+fn remove_stale_temporaries(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with(TEMP_PREFIX) {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= STALE_AFTER);
+        if old {
+            let _ = fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -277,6 +320,74 @@ mod tests {
         assert_eq!(fs::read_dir(&loose).unwrap().count(), 0);
         fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn two_first_uses_at_once_end_with_the_same_key_and_no_empty_file() {
+        for round in 0..20 {
+            let dir = temp_dir(&format!("race{round}"));
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let dir = dir.clone();
+                    std::thread::spawn(move || {
+                        load_or_create(&dir, &mut crate::OsEntropy)
+                            .unwrap()
+                            .public_hex()
+                            .unwrap()
+                    })
+                })
+                .collect();
+            let seen: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            assert!(seen.iter().all(|k| k == &seen[0]), "different keys");
+            let path = dir.join(KEY_FILE_NAME);
+            assert_eq!(fs::metadata(&path).unwrap().len(), 65, "not a whole key");
+            // The key on disk is the one every caller got, and nothing else is left.
+            assert_eq!(
+                read_key(&path, effective_uid(&dir).unwrap())
+                    .unwrap()
+                    .public_hex()
+                    .unwrap(),
+                seen[0]
+            );
+            let names: Vec<_> = fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            assert_eq!(names.len(), 1, "{names:?}");
+            fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_stale_temporary_from_a_killed_run_is_removed_and_never_read_as_the_key() {
+        let dir = temp_dir("stale");
+        let stale = dir.join(format!("{TEMP_PREFIX}99999-0"));
+        // A complete, valid-looking key in a temporary: it must not become the key.
+        fs::write(&stale, format!("{}\n", "1f".repeat(32))).unwrap();
+        fs::set_permissions(&stale, fs::Permissions::from_mode(0o600)).unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let keys = load_or_create(&dir, &mut crate::OsEntropy).unwrap();
+        assert_ne!(
+            keys.public_hex().unwrap(),
+            Keys::from_secret_hex(&"1f".repeat(32))
+                .unwrap()
+                .public_hex()
+                .unwrap()
+        );
+        assert!(!stale.exists(), "the stale temporary was left");
+        assert!(dir.join(KEY_FILE_NAME).exists());
+        // A fresh temporary (a live run's) is left alone.
+        let fresh = dir.join(format!("{TEMP_PREFIX}99998-0"));
+        fs::write(&fresh, b"x").unwrap();
+        remove_stale_temporaries(&dir);
+        assert!(fresh.exists());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -591,6 +591,7 @@ version = "0.0.1"
 dependencies = [
  "chacha20",
  "gd-core",
+ "gd-notify",
  "getrandom 0.4.3",
  "hkdf",
  "hmac",

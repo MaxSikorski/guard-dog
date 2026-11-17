@@ -26,3 +26,11 @@ getrandom = "=0.4.3"
 zeroize = "=1.9.1"
 # WebSocket client for ws:// (lab relay). No TLS, no extras.
 tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
+
+[features]
+# Test-only helpers for this crate's own integration tests. Off by default, so
+# no release build ships them; the tests turn it on through the dev-dependency below.
+test-support = []
+
+[dev-dependencies]
+gd-notify = { path = ".", features = ["test-support"] }

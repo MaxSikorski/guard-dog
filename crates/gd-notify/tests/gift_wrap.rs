@@ -56,7 +56,10 @@ fn wrap_unwrap_round_trip() {
     assert!(opened.seal.created_at <= NOW && opened.seal.created_at >= NOW - TWO_DAYS);
     // The rumor: kind 14, unsigned, one p tag, the message, written by the sender.
     assert_eq!(opened.rumor.kind, 14);
-    assert_eq!(opened.rumor.content, "line one\nline two with a dog: 🐕");
+    assert!(
+        opened.rumor.content == "line one\nline two with a dog: 🐕",
+        "rumor content differs"
+    );
     assert_eq!(
         opened.rumor.tags,
         vec![vec!["p".to_owned(), recipient.public_hex().unwrap()]]
@@ -171,6 +174,25 @@ fn a_tampered_event_fails_verification() {
     let mut resigned: Event = wrap.clone();
     resigned.sig = "00".repeat(64);
     assert!(resigned.verify().is_err());
+    // A well-formed signature that is valid for a different event: the id and
+    // author are right, only the signature is another event's.
+    let other = gift_wrap_dm(
+        &sender,
+        &recipient.public_x().unwrap(),
+        "another message",
+        &FixedClock(NOW),
+        &mut SeqEntropy(77),
+    )
+    .unwrap();
+    other.verify().unwrap();
+    assert_ne!(other.sig, wrap.sig);
+    let mut borrowed = wrap.clone();
+    borrowed.sig = other.sig.clone();
+    assert!(borrowed.verify().is_err());
+    // Even with the other event's author, which also signed it.
+    let mut both = other.clone();
+    both.id = wrap.id.clone();
+    assert!(both.verify().is_err());
     let mut bad_id = wrap.clone();
     bad_id.id = "00".repeat(32);
     assert!(bad_id.verify().is_err());

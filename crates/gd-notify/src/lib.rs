@@ -19,7 +19,15 @@
 //! # No sender copy
 //!
 //! NIP-17 suggests a sender also wraps a copy of each message to itself.
-//! Guard Dog's alert key is a send-only notifier, so it does not.
+//! Guard Dog's alert key is a send-only notifier, so it does not: this is an
+//! intentional deviation from NIP-17's sender copy, and it means no
+//! sender-side history of what was sent exists anywhere.
+//!
+//! # Sending
+//!
+//! ```
+//! use gd_notify::send_alerts;
+//! ```
 //!
 //! # The raw publisher is private
 //!
@@ -49,6 +57,7 @@ pub use sources::{Clock, Entropy, OsEntropy, SystemClock};
 /// Test-only access to message building, for this crate's integration tests.
 /// It builds events on this machine and never touches the network; the only
 /// way to send is [`send_alerts`].
+#[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod test_support {
     /// Builds the gift wrap for one direct message (no network).
