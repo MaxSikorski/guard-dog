@@ -1,0 +1,77 @@
+# Bitcoin Core. Format: catalog/README.md. Checked by crates/gd-core/tests/catalog.rs.
+format = 1
+id = "bitcoin-core"
+name = "Bitcoin Core"
+kind = "service"
+aliases = []
+summary = "The reference Bitcoin full node and wallet."
+money = true
+licence = "MIT"
+
+[upstream]
+repo = "https://github.com/bitcoin/bitcoin"
+website = "https://bitcoincore.org/"
+security_policy = "https://github.com/bitcoin/bitcoin/blob/master/SECURITY.md"
+release_feed = "https://github.com/bitcoin/bitcoin/releases.atom"
+related_repos = [
+  "https://github.com/bitcoin-core/guix.sigs",
+  "https://github.com/bitcoin-core/bitcoincore.org",
+]
+
+[recognize]
+images = ["docker.io/bitcoin/bitcoin"]
+binaries = ["bitcoind"]
+units = []
+
+[[recognize.ports]]
+port = 18443
+proto = "tcp"
+what = "RPC (regtest, lab only)"
+exposure = "never-public"
+source = "lab/compose.yml"
+
+[version]
+source = "rpc"
+credential = "rpcauth user with rpcwhitelist=<user>:getnetworkinfo"
+regex = '^/Satoshi:(?P<version>0\.\d+\.\d+|[1-9]\d*\.\d+)(?:\.0)?/$'
+scheme = "bitcoin-core"
+
+[version.call]
+method = "getnetworkinfo"
+field = "subversion"
+
+[[version.examples]]
+raw = "/Satoshi:32.1.0/"
+version = "32.1"
+source = "fixtures/lab-recorded/manifest.toml"
+
+[advisories]
+osv_packages = ["GIT https://github.com/bitcoin/bitcoin"]
+ghsa = false
+feeds = [{ kind = "markdown-repo", url = "https://github.com/bitcoin-core/bitcoincore.org" }]
+
+[signing]
+level = "signed-multi"
+method = "SHA256SUMS + SHA256SUMS.asc (PGP), Guix attestations"
+keys_url = "https://github.com/bitcoin-core/guix.sigs/tree/main/builder-keys"
+reproducible = "yes"
+images_signed = false
+
+[review]
+last_reviewed = 2026-11-17
+sources = [
+  "https://bitcoincore.org/en/download/",
+  "https://bitcoincore.org/en/security-advisories/",
+  "https://github.com/bitcoin/bitcoin/blob/master/SECURITY.md",
+]
+todo = [
+  "licence: the lab comment says MIT; confirm against the upstream COPYING file",
+  "images: docker.io/bitcoin/bitcoin is an unofficial build by a third party (willcl-ark/bitcoin-core-docker); Bitcoin Core publishes no image",
+  "release_feed: confirm Core publishes through GitHub releases (the release assets list is empty)",
+  "ports: the real RPC and P2P defaults are not recorded in the repo; 18443 is the lab's regtest RPC port only, so no version.endpoint_port is set",
+  "units: RaspiBlitz and myNode systemd unit names",
+  "regex: the pre-22 (0.x.y) form is matched but has no recorded reply; release candidates do not show in the subversion and are not read",
+  "signing.min_signatures: how many Guix attestations make a release trustworthy",
+  "signing.keys: the two release-contact fingerprints in SECURITY.md",
+  "platform_map: app ids on UmbrelOS, StartOS, RaspiBlitz and myNode",
+]

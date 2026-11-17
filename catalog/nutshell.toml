@@ -1,0 +1,80 @@
+# Cashu Nutshell (the mint). Format: catalog/README.md. Checked by crates/gd-core/tests/catalog.rs.
+format = 1
+id = "nutshell"
+name = "Cashu Nutshell"
+kind = "service"
+aliases = ["cashu-nutshell-mint"]
+summary = "A Cashu ecash mint."
+money = true
+licence = "MIT"
+
+[upstream]
+repo = "https://github.com/cashubtc/nutshell"
+
+[recognize]
+images = ["docker.io/cashubtc/nutshell"]
+binaries = []
+units = []
+
+[[recognize.ports]]
+port = 3338
+proto = "tcp"
+what = "mint HTTP API"
+exposure = "public-ok"
+source = "lab/compose.yml"
+
+[[recognize.probes]]
+kind = "http"
+method = "GET"
+path = "/v1/info"
+port = 3338
+field = "version"
+match = '^Nutshell/\d+\.\d+\.\d+$'
+
+[version]
+source = "http"
+endpoint_port = 3338
+credential = "none"
+regex = '^Nutshell/(?P<version>\d+\.\d+\.\d+)$'
+scheme = "semver"
+
+[version.call]
+method = "GET"
+path = "/v1/info"
+field = "version"
+
+[[version.examples]]
+raw = "Nutshell/0.21.0"
+version = "0.21.0"
+source = "fixtures/lab-recorded/manifest.toml"
+
+[advisories]
+osv_packages = ["PyPI cashu"]
+ghsa = false
+feeds = []
+blind_spot = "Only OSV (PyPI package cashu) carries advisories; GitHub advisories are 0 and there is no feed (spike d, 2026-11-16)."
+
+[signing]
+level = "unsigned"
+method = "lightweight tags; no signature found on the PyPI package or the Docker Hub image"
+reproducible = "unverified"
+images_signed = false
+
+[review]
+last_reviewed = 2026-11-17
+sources = [
+  "https://github.com/cashubtc/nuts/blob/main/06.md",
+  "https://github.com/cashubtc/nutshell/blob/main/cashu/mint/router.py",
+]
+todo = [
+  "licence: the lab comment says MIT; confirm against the upstream LICENSE file",
+  "website: none recorded in the repo",
+  "upstream.repo: assumed from the Docker Hub namespace cashubtc and the spike notes; confirm",
+  "ports: 3338 is as set in lab/compose.yml; confirm it is the upstream default",
+  "binaries: the mint runs as python3 -m cashu.mint; no executable name is catalogued yet",
+  "upstream.security_policy: spike d says SECURITY.md has an email contact; the URL is not recorded",
+  "release_feed: not recorded in the repo",
+  "version: NUT-06 makes the version optional, so a mint can hide it",
+  "units: RaspiBlitz and myNode systemd unit names",
+  "platform_map: app ids on UmbrelOS, StartOS, RaspiBlitz and myNode",
+]

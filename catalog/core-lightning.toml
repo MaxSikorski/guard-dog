@@ -1,0 +1,75 @@
+# Core Lightning. Format: catalog/README.md. Checked by crates/gd-core/tests/catalog.rs.
+format = 1
+id = "core-lightning"
+name = "Core Lightning"
+kind = "service"
+aliases = []
+summary = "Blockstream's Lightning Network node (lightningd)."
+money = true
+licence = "BSD-MIT"
+
+[upstream]
+repo = "https://github.com/ElementsProject/lightning"
+security_policy = "https://github.com/ElementsProject/lightning/blob/master/SECURITY.md"
+release_feed = "https://github.com/ElementsProject/lightning/releases.atom"
+
+[recognize]
+images = ["docker.io/elementsproject/lightningd"]
+binaries = ["lightningd", "lightning-cli"]
+units = []
+
+[[recognize.ports]]
+port = 9735
+proto = "tcp"
+what = "peer connections"
+exposure = "public-ok"
+source = "lab/compose.yml"
+
+[version]
+source = "cli"
+credential = "rune restricted to the getinfo method"
+regex = '^v(?P<version>\d+\.\d+(?:\.\d+)?(?:rc\d+)?(?:-\d+-g[0-9a-f]{7,})?)(?:-modded)?$'
+scheme = "calver"
+
+[version.call]
+argv = ["lightning-cli", "getinfo"]
+run_as = "service-user-in-container"
+field = "version"
+
+[[version.examples]]
+raw = "v26.06.9"
+version = "26.06.9"
+source = "fixtures/lab-recorded/manifest.toml"
+
+[advisories]
+osv_packages = ["GIT https://github.com/ElementsProject/lightning"]
+ghsa = false
+feeds = [{ kind = "release-notes", url = "https://github.com/ElementsProject/lightning/releases" }]
+blind_spot = "Fixes ship in release notes with no CVE, no GHSA and no feed a machine can read (spike d, 2026-11-16); the release-notes feed is for people, not for matching."
+
+[signing]
+level = "signed-multi"
+method = "SHA256SUMS-<tag> + .asc, separate manifests for arm64 and armv7"
+keys_url = "https://github.com/ElementsProject/lightning/blob/master/SECURITY.md"
+reproducible = "yes"
+images_signed = false
+
+[review]
+last_reviewed = 2026-11-17
+sources = [
+  "https://docs.corelightning.org/docs/repro",
+  "https://github.com/ElementsProject/lightning/blob/master/SECURITY.md",
+  "https://github.com/ElementsProject/lightning/releases",
+]
+todo = [
+  "licence: the lab comment says BSD-MIT; give the SPDX form after checking the upstream LICENSE file",
+  "website: no project site is recorded in the repo",
+  "ports: 9735 is as set in lab/compose.yml; confirm it is the upstream default",
+  "units: RaspiBlitz and myNode systemd unit names",
+  "scheme: calver is read from the forms seen (v26.06.9, v24.11); confirm the release naming rule",
+  "regex: the v24.11rc1, git-describe and -modded forms are matched but have no recorded reply; add examples when recorded",
+  "args_from_platform: the data directory and network flags (the lab uses --lightning-dir=/data and --network=regtest) differ per platform; kept out of argv until a platform source is read",
+  "signing.min_signatures: how many signers make a release trustworthy",
+  "signing.keys: the signer fingerprints in SECURITY.md",
+  "platform_map: app ids on UmbrelOS, StartOS, RaspiBlitz and myNode",
+]
