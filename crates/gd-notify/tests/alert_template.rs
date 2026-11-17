@@ -222,14 +222,24 @@ fn template_lines(slot: usize) -> Vec<String> {
 }
 
 /// Every line is either quoted (`  > `) or one of the template's own fixed
-/// lines, so outside text can never produce a line that reads as ours, not
-/// even after a raw newline.
+/// lines, and each of ours appears exactly as often as in the empty render, so
+/// outside text can never produce a line that reads as ours, not even after a
+/// raw newline. Failure messages name only the fixture and the line number.
 fn assert_only_template_or_quoted_lines(text: &str, slot: usize, name: &str) {
     let ours = template_lines(slot);
-    for line in text.lines() {
+    for (number, line) in text.lines().enumerate() {
         assert!(
             line.starts_with("  > ") || ours.iter().any(|o| o == line),
-            "{name}/{slot}: a line that is neither quoted nor ours: {line:?}"
+            "{name}/{slot}: line {} is neither quoted nor ours",
+            number + 1
+        );
+    }
+    for own in ours.iter().filter(|o| !o.starts_with("  > ")) {
+        let want = ours.iter().filter(|o| *o == own).count();
+        let got = text.lines().filter(|l| l == own).count();
+        assert_eq!(
+            got, want,
+            "{name}/{slot}: one of our lines appears {got} times"
         );
     }
 }
@@ -448,4 +458,86 @@ fn the_module_explains_why_there_is_no_evidence_section() {
         source.contains("no \"evidence\" section"),
         "say why in the module doc"
     );
+}
+
+fn leak(text: String) -> &'static str {
+    Box::leak(text.into_boxed_str())
+}
+
+#[test]
+fn product_and_blind_spots_must_be_bounded_single_lines() {
+    let bad = [
+        "a\nb",
+        "a\rb",
+        "a\u{85}b",
+        "a\u{2028}b",
+        "a\u{2029}b",
+        "a\u{1b}[31mb",
+        "a\0b",
+        "",
+    ];
+    for text in bad.iter().copied().chain([leak("x".repeat(121))]) {
+        let mut p = parts();
+        p.product = text;
+        assert!(Alert::new(p).is_err(), "product {text:?}");
+        let mut p = parts();
+        p.blind_spots = vec![text];
+        assert!(Alert::new(p).is_err(), "blind spot {text:?}");
+    }
+    let mut p = parts();
+    p.product = leak("x".repeat(120));
+    p.blind_spots = vec![leak("y".repeat(120)); 16];
+    assert!(Alert::new(p).is_ok());
+    let mut p = parts();
+    p.blind_spots = vec!["one"; 17];
+    assert!(Alert::new(p).is_err());
+}
+
+#[test]
+fn every_injection_payload_in_product_or_blind_spots_is_refused_or_stays_one_line() {
+    let template = alert(|_| {}).render();
+    let template_lines = template.lines().count();
+    for (name, payload) in &corpus() {
+        for slot in 0..2 {
+            let mut p = parts();
+            let text = leak(payload.clone());
+            if slot == 0 {
+                p.product = text;
+            } else {
+                p.blind_spots = vec![text];
+            }
+            let Ok(built) = Alert::new(p) else { continue };
+            // Accepted only as a plain single line: no extra line anywhere.
+            let rendered = built.render();
+            assert_eq!(rendered.lines().count(), template_lines, "{name}/{slot}");
+            assert!(
+                !rendered.chars().any(|c| c != '\n' && c.is_control()),
+                "{name}/{slot}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_huge_outside_field_is_cut_without_escaping_all_of_it() {
+    // Ten million control characters would escape to 60 million; only the
+    // first few are ever looked at, and the result is within the cap.
+    let huge = "\u{1}".repeat(10_000_000);
+    for (cap_name, text) in [
+        (
+            "summary",
+            alert(|p| p.summary = Untrusted::new(huge.clone())).render(),
+        ),
+        (
+            "playbook",
+            alert(|p| p.playbook = Untrusted::new(huge.clone())).render(),
+        ),
+        (
+            "question",
+            alert(|p| p.question = Some(Untrusted::new(huge.clone()))).render(),
+        ),
+    ] {
+        assert!(text.len() < 3_000, "{cap_name}: {}", text.len());
+        assert!(text.contains("..."), "{cap_name}");
+    }
 }

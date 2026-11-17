@@ -29,7 +29,14 @@ impl Keys {
     pub fn from_secret_hex(text: &str) -> Result<Keys, NotifyError> {
         let bad = NotifyError::Invalid("not a valid secret key");
         let bytes = hex32_secret(text).map_err(|_| bad)?;
-        let signing = SigningKey::from_slice(bytes.as_slice()).map_err(|_| bad)?;
+        Keys::from_secret_bytes(&bytes)
+    }
+
+    /// From the 32 secret bytes, already decoded once. Zero and out-of-range
+    /// values are refused.
+    pub(crate) fn from_secret_bytes(bytes: &[u8; 32]) -> Result<Keys, NotifyError> {
+        let signing = SigningKey::from_slice(bytes.as_slice())
+            .map_err(|_| NotifyError::Invalid("not a valid secret key"))?;
         Ok(Keys { signing })
     }
 

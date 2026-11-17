@@ -10,7 +10,8 @@
 mod common;
 
 use common::{FixedClock, NOW, SeqEntropy};
-use gd_notify::event::{Event, gift_wrap_dm, unwrap_dm};
+use gd_notify::event::{Event, unwrap_dm};
+use gd_notify::test_support::gift_wrap_dm;
 use gd_notify::{Keys, nip44};
 
 const TWO_DAYS: u64 = 2 * 24 * 60 * 60;

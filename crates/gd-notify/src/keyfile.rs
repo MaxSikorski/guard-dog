@@ -46,8 +46,9 @@ fn effective_uid(dir: &Path) -> Result<u32, NotifyError> {
     uid.map_err(|_| refuse("cannot tell which user is running Guard Dog"))
 }
 
-/// The folder must be a real 0700 folder owned by `euid`.
-fn check_state_dir(dir: &Path, euid: u32) -> Result<(), NotifyError> {
+/// The folder must be a real folder (not a symlink) with mode 0700. Checked
+/// before anything is written in it.
+fn check_state_dir_shape(dir: &Path) -> Result<fs::Metadata, NotifyError> {
     let meta = fs::symlink_metadata(dir).map_err(|_| refuse("the state folder does not exist"))?;
     if !meta.file_type().is_dir() {
         return Err(refuse("the state folder is not a real folder (a symlink?)"));
@@ -55,6 +56,12 @@ fn check_state_dir(dir: &Path, euid: u32) -> Result<(), NotifyError> {
     if meta.permissions().mode() & 0o7777 != 0o700 {
         return Err(refuse("the state folder must have mode 0700"));
     }
+    Ok(meta)
+}
+
+/// The folder must be a real 0700 folder owned by `euid`.
+fn check_state_dir(dir: &Path, euid: u32) -> Result<(), NotifyError> {
+    let meta = check_state_dir_shape(dir)?;
     if meta.uid() != euid {
         return Err(refuse(
             "the state folder does not belong to the user running Guard Dog",
@@ -99,21 +106,35 @@ fn read_key(path: &Path, euid: u32) -> Result<Keys, NotifyError> {
             "the key file must be readable and writable by its owner only (0600)",
         ));
     }
-    let mut text = Zeroizing::new(String::new());
-    (&mut file)
-        .take(129)
-        .read_to_string(&mut text)
-        .map_err(|_| refuse("the key file is not text"))?;
-    let trimmed = text.strip_suffix('\n').unwrap_or(&text);
-    // Checked as hex (into a wiped buffer) and as a valid key; the text is
-    // never echoed.
-    hex32_secret(trimmed).map_err(|_| refuse("the key file does not hold a key"))?;
-    Keys::from_secret_hex(trimmed).map_err(|_| refuse("the key file does not hold a valid key"))
+    // A fixed wiped buffer, never a growing string: 64 hex characters, an
+    // optional newline, and one byte more to notice a file that is too long.
+    let mut buf = Zeroizing::new([0u8; 66]);
+    let mut len = 0usize;
+    while len < buf.len() {
+        let room = buf
+            .get_mut(len..)
+            .ok_or(refuse("the key file is not text"))?;
+        match file.read(room) {
+            Ok(0) => break,
+            Ok(n) => len += n,
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(_) => return Err(refuse("the key file is not text")),
+        }
+    }
+    let text = buf.get(..len).ok_or(refuse("the key file is not text"))?;
+    let text = text.strip_suffix(b"\n").unwrap_or(text);
+    let text = std::str::from_utf8(text).map_err(|_| refuse("the key file is not text"))?;
+    // Decoded once, into a wiped buffer; the text is never echoed.
+    let bytes = hex32_secret(text).map_err(|_| refuse("the key file does not hold a key"))?;
+    Keys::from_secret_bytes(&bytes).map_err(|_| refuse("the key file does not hold a valid key"))
 }
 
 /// Reads Guard Dog's key, creating it on first use. `state_dir` must already
 /// exist with mode 0700 and belong to the user running Guard Dog.
 pub fn load_or_create(state_dir: &Path, entropy: &mut dyn Entropy) -> Result<Keys, NotifyError> {
+    // Nothing is written until the folder is known to be a real 0700 folder, so
+    // a symlink or a loose folder is refused without touching its target.
+    check_state_dir_shape(state_dir)?;
     let euid = effective_uid(state_dir)?;
     load_or_create_as(state_dir, entropy, euid)
 }
@@ -227,6 +248,58 @@ mod tests {
         assert_eq!(fs::metadata(&mine).unwrap().uid(), euid);
         fs::remove_file(&mine).unwrap();
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "a probe was left");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_symlinked_state_folder_is_refused_before_anything_is_written_in_its_target() {
+        use std::os::unix::fs::symlink;
+        let base = temp_dir("symlink");
+        // A target that cannot be written: if the owner probe ran first, the
+        // refusal would be "cannot write", not the symlink refusal.
+        let target = base.join("target");
+        fs::create_dir(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o500)).unwrap();
+        let link = base.join("link");
+        symlink(&target, &link).unwrap();
+        let err = load_or_create(&link, &mut crate::OsEntropy).unwrap_err();
+        assert!(
+            matches!(err, NotifyError::KeyFile(m) if m.contains("symlink")),
+            "{err}"
+        );
+        assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+        // And a loose folder is refused for its mode, again before any write.
+        let loose = base.join("loose");
+        fs::create_dir(&loose).unwrap();
+        fs::set_permissions(&loose, fs::Permissions::from_mode(0o755)).unwrap();
+        let err = load_or_create(&loose, &mut crate::OsEntropy).unwrap_err();
+        assert!(matches!(err, NotifyError::KeyFile(m) if m.contains("0700")));
+        assert_eq!(fs::read_dir(&loose).unwrap().count(), 0);
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_key_file_that_is_too_long_or_not_hex_is_refused_from_the_fixed_buffer() {
+        let dir = temp_dir("fixed");
+        let euid = effective_uid(&dir).unwrap();
+        let path = dir.join(KEY_FILE_NAME);
+        for body in [
+            "1f".repeat(32) + "\n\n",
+            "1f".repeat(33),
+            "1f".repeat(1000),
+            "zz".repeat(32),
+            String::new(),
+        ] {
+            fs::write(&path, &body).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(read_key(&path, euid).is_err());
+        }
+        // With and without the final newline, a good key is read.
+        for body in ["1f".repeat(32), "1f".repeat(32) + "\n"] {
+            fs::write(&path, &body).unwrap();
+            assert!(read_key(&path, euid).is_ok());
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 

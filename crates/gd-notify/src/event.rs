@@ -50,8 +50,9 @@ impl UnsignedEvent {
     }
 }
 
-/// A signed event.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A signed event. `Debug` shows only the kind, the first characters of the id
+/// and how many tags there are, never content or tag values.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Event {
     /// SHA-256 id, 64 hex characters.
     pub id: String,
@@ -69,9 +70,21 @@ pub struct Event {
     pub sig: String,
 }
 
+impl fmt::Debug for Event {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let prefix: String = self.id.chars().take(8).collect();
+        write!(
+            f,
+            "Event(kind {}, id {prefix}.., {} tags)",
+            self.kind,
+            self.tags.len()
+        )
+    }
+}
+
 impl Event {
     /// Signs `unsigned` with `keys`. The author must be `keys`' own public key.
-    pub fn sign(
+    pub(crate) fn sign(
         unsigned: UnsignedEvent,
         keys: &Keys,
         entropy: &mut dyn Entropy,
@@ -195,12 +208,40 @@ fn randomised_past(clock: &dyn Clock, entropy: &mut dyn Entropy) -> Result<u64, 
 /// Builds the private message for `recipient`: a kind-14 rumor with a `p`
 /// tag, sealed with `sender`'s key (kind 13), wrapped with a fresh throwaway
 /// key (kind 1059). Returns the outer wrap, ready to publish.
-pub fn gift_wrap_dm(
+///
+/// Crate-private on purpose: the only public way to send is
+/// [`crate::send_alerts`], which applies every policy check first.
+pub(crate) fn gift_wrap_dm(
     sender: &Keys,
     recipient: &[u8; 32],
     message: &str,
     clock: &dyn Clock,
     entropy: &mut dyn Entropy,
+) -> Result<Event, NotifyError> {
+    gift_wrap_with(
+        sender,
+        recipient,
+        message,
+        clock,
+        entropy,
+        &Extras::default(),
+    )
+}
+
+/// Things a test adds to a wrap to make it malformed. Empty for real wraps.
+#[derive(Default)]
+pub(crate) struct Extras {
+    pub(crate) seal_tags: Vec<Vec<String>>,
+    pub(crate) rumor_sig: Option<String>,
+}
+
+pub(crate) fn gift_wrap_with(
+    sender: &Keys,
+    recipient: &[u8; 32],
+    message: &str,
+    clock: &dyn Clock,
+    entropy: &mut dyn Entropy,
+    extras: &Extras,
 ) -> Result<Event, NotifyError> {
     let recipient_hex = hex_encode(recipient);
     let p_tag = vec![vec!["p".to_owned(), recipient_hex]];
@@ -212,15 +253,18 @@ pub fn gift_wrap_dm(
         tags: p_tag.clone(),
         content: message.to_owned(),
     };
-    let rumor_json = json!({
+    let mut rumor_value = json!({
         "id": rumor.id(),
         "pubkey": rumor.pubkey,
         "created_at": rumor.created_at,
         "kind": rumor.kind,
         "tags": rumor.tags,
         "content": rumor.content,
-    })
-    .to_string();
+    });
+    if let (Some(sig), Some(map)) = (&extras.rumor_sig, rumor_value.as_object_mut()) {
+        map.insert("sig".to_owned(), Value::String(sig.clone()));
+    }
+    let rumor_json = rumor_value.to_string();
 
     let seal_key = nip44::conversation_key_for(sender.signing_key(), recipient)?;
     let seal = Event::sign(
@@ -228,7 +272,7 @@ pub fn gift_wrap_dm(
             pubkey: sender.public_hex()?,
             created_at: randomised_past(clock, entropy)?,
             kind: 13,
-            tags: Vec::new(),
+            tags: extras.seal_tags.clone(),
             content: nip44::encrypt(&seal_key, &rumor_json, entropy)?,
         },
         sender,
@@ -292,7 +336,8 @@ pub fn unwrap_any(recipient: &Keys, wrap: &Event) -> Result<UnwrappedDm, NotifyE
     let wrap_author = hex32(&wrap.pubkey).map_err(|_| bad)?;
     let wrap_key = nip44::conversation_key_for(recipient.signing_key(), &wrap_author)?;
     let seal = Event::from_json(&nip44::decrypt(&wrap_key, &wrap.content)?).map_err(|_| bad)?;
-    if seal.kind != 13 {
+    // NIP-59: a seal has no tags.
+    if seal.kind != 13 || !seal.tags.is_empty() {
         return Err(bad);
     }
     seal.verify()?;
@@ -300,6 +345,10 @@ pub fn unwrap_any(recipient: &Keys, wrap: &Event) -> Result<UnwrappedDm, NotifyE
     let seal_key = nip44::conversation_key_for(recipient.signing_key(), &seal_author)?;
     let rumor_text = nip44::decrypt(&seal_key, &seal.content)?;
     let value: Value = serde_json::from_str(&rumor_text).map_err(|_| bad)?;
+    // NIP-59: a rumor is never signed, so one that carries a signature is refused.
+    if value.get("sig").is_some() {
+        return Err(bad);
+    }
     let rumor = core_fields(&value).map_err(|_| bad)?;
     let rumor_id = string_field(&value, "id").map_err(|_| bad)?;
     if rumor.pubkey != seal.pubkey || rumor.id() != rumor_id {
@@ -311,4 +360,93 @@ pub fn unwrap_any(recipient: &Keys, wrap: &Event) -> Result<UnwrappedDm, NotifyE
         rumor,
         rumor_id,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic
+    )]
+
+    use super::*;
+
+    struct Seq(u64);
+    impl Entropy for Seq {
+        fn fill(&mut self, buf: &mut [u8]) -> Result<(), NotifyError> {
+            let mut done = 0;
+            while done < buf.len() {
+                self.0 += 1;
+                let block = Sha256::digest(self.0.to_be_bytes());
+                let n = (buf.len() - done).min(32);
+                buf[done..done + n].copy_from_slice(&block[..n]);
+                done += n;
+            }
+            Ok(())
+        }
+    }
+    struct Fixed;
+    impl Clock for Fixed {
+        fn now_unix(&self) -> Result<u64, NotifyError> {
+            Ok(1_795_000_000)
+        }
+    }
+
+    fn wrap(extras: &Extras) -> (Keys, Event) {
+        let sender = Keys::generate(&mut Seq(1)).unwrap();
+        let recipient = Keys::generate(&mut Seq(2)).unwrap();
+        let event = gift_wrap_with(
+            &sender,
+            &recipient.public_x().unwrap(),
+            "hello",
+            &Fixed,
+            &mut Seq(50),
+            extras,
+        )
+        .unwrap();
+        (recipient, event)
+    }
+
+    #[test]
+    fn a_normal_wrap_opens() {
+        let (recipient, event) = wrap(&Extras::default());
+        assert_eq!(
+            unwrap_dm(&recipient, &event).unwrap().rumor.content,
+            "hello"
+        );
+    }
+
+    #[test]
+    fn a_seal_that_carries_tags_is_refused() {
+        let extras = Extras {
+            seal_tags: vec![vec!["p".to_owned(), "ab".repeat(32)]],
+            ..Extras::default()
+        };
+        let (recipient, event) = wrap(&extras);
+        assert!(unwrap_dm(&recipient, &event).is_err());
+    }
+
+    #[test]
+    fn a_rumor_that_carries_a_signature_is_refused() {
+        let extras = Extras {
+            rumor_sig: Some("00".repeat(64)),
+            ..Extras::default()
+        };
+        let (recipient, event) = wrap(&extras);
+        assert!(unwrap_dm(&recipient, &event).is_err());
+    }
+
+    #[test]
+    fn debug_shows_the_kind_the_id_start_and_the_tag_count_only() {
+        let (_, event) = wrap(&Extras::default());
+        let shown = format!("{event:?} {event:#?}");
+        assert!(shown.contains("kind 1059") && shown.contains("1 tags"));
+        assert!(shown.contains(&event.id[..8]));
+        assert!(!shown.contains(&event.id));
+        assert!(!shown.contains(&event.content[..20]));
+        assert!(!shown.contains(&event.pubkey));
+        assert!(!shown.contains(&event.sig));
+    }
 }

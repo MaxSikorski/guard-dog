@@ -10,6 +10,26 @@
 //! are deterministic. Guard Dog's own key pair is never the user's `nsec`; it
 //! lives in `<state_dir>/notify.key`. No key and no message text ever reaches
 //! a log or `Debug` output.
+//!
+//! # Logging
+//!
+//! Nothing here logs. An app that installs a logger must not enable TRACE for
+//! `tungstenite`: at that level it prints frame contents. Keep it at WARN.
+//!
+//! # No sender copy
+//!
+//! NIP-17 suggests a sender also wraps a copy of each message to itself.
+//! Guard Dog's alert key is a send-only notifier, so it does not.
+//!
+//! # The raw publisher is private
+//!
+//! ```compile_fail
+//! use gd_notify::relay::publish;
+//! ```
+//!
+//! ```compile_fail
+//! use gd_notify::event::gift_wrap_dm;
+//! ```
 
 pub mod alert;
 pub mod encoding;
@@ -25,6 +45,23 @@ mod sources;
 pub use error::NotifyError;
 pub use keys::Keys;
 pub use sources::{Clock, Entropy, OsEntropy, SystemClock};
+
+/// Test-only access to message building, for this crate's integration tests.
+/// It builds events on this machine and never touches the network; the only
+/// way to send is [`send_alerts`].
+#[doc(hidden)]
+pub mod test_support {
+    /// Builds the gift wrap for one direct message (no network).
+    pub fn gift_wrap_dm(
+        sender: &crate::Keys,
+        recipient: &[u8; 32],
+        message: &str,
+        clock: &dyn crate::Clock,
+        entropy: &mut dyn crate::Entropy,
+    ) -> Result<crate::event::Event, crate::NotifyError> {
+        crate::event::gift_wrap_dm(sender, recipient, message, clock, entropy)
+    }
+}
 
 use alert::{Alert, Chain, notify_allowed, plan_dms_noting};
 use relay::{PublishOutcome, RelayUrl};
@@ -56,6 +93,10 @@ pub fn send_alerts(
     let (allowed, dropped): (Vec<&Alert>, Vec<&Alert>) = alerts
         .iter()
         .partition(|a| notify_allowed(&[a.chain()]) && chains.contains(&a.chain()));
+    // Nothing eligible: send nothing at all, not even a summary.
+    if allowed.is_empty() {
+        return Ok(Vec::new());
+    }
     let allowed: Vec<Alert> = allowed.into_iter().cloned().collect();
     let mut wraps = Vec::new();
     for message in plan_dms_noting(&allowed, dropped.len()) {

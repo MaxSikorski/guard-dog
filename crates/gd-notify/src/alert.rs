@@ -18,6 +18,10 @@ pub const MAX_DMS_PER_RUN: usize = 20;
 const SUMMARY_CAP: usize = 500;
 const PLAYBOOK_CAP: usize = 1_000;
 const QUESTION_CAP: usize = 500;
+/// Longest display name or blind-spot sentence, in characters.
+const LINE_CAP: usize = 120;
+/// Most blind-spot sentences one alert may carry.
+const MAX_BLIND_SPOTS: usize = 16;
 const FOOTER: &str = "No known issues is not the same as secure.";
 
 /// Which Bitcoin network a node reports.
@@ -155,15 +159,29 @@ fn token_ok(text: &str, max: usize, extra: &[char]) -> bool {
 }
 
 /// Escapes for a terminal, then cuts to `cap` characters on a character
-/// boundary, ending in "..." when it was cut.
+/// boundary, ending in "..." when it was cut. Only the first `cap + 1`
+/// characters are ever looked at, so a huge field cannot use unbounded memory.
+/// (Escaping works one character at a time and never shortens, so escaping
+/// that prefix gives the same first `cap` characters as escaping everything.)
 fn quote_text(text: &Untrusted<String>, cap: usize) -> String {
-    let escaped = text.escape_for_terminal();
+    let prefix: String = text.expose_untrusted().chars().take(cap + 1).collect();
+    let escaped = Untrusted::new(prefix).escape_for_terminal();
     if escaped.chars().count() <= cap {
         return escaped;
     }
     let mut cut: String = escaped.chars().take(cap.saturating_sub(3)).collect();
     cut.push_str("...");
     cut
+}
+
+/// A bounded single-line value of ours: not empty, at most [`LINE_CAP`]
+/// characters, no control character and no line or paragraph separator.
+fn single_line_ok(text: &str) -> bool {
+    !text.is_empty()
+        && text.chars().count() <= LINE_CAP
+        && !text
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
 }
 
 impl Alert {
@@ -184,13 +202,16 @@ impl Alert {
         if !token_ok(&parts.advisory_id, 100, &['.', '_', '-']) {
             return Err(NotifyError::Invalid("advisory id is not a plain id"));
         }
-        if parts
-            .blind_spots
-            .iter()
-            .any(|s| s.chars().any(char::is_control))
+        if !single_line_ok(parts.product) {
+            return Err(NotifyError::Invalid(
+                "product name is not a bounded single line",
+            ));
+        }
+        if parts.blind_spots.len() > MAX_BLIND_SPOTS
+            || !parts.blind_spots.iter().all(|s| single_line_ok(s))
         {
             return Err(NotifyError::Invalid(
-                "blind spot sentence has a control character",
+                "blind spots are not bounded single lines",
             ));
         }
         Ok(Alert {

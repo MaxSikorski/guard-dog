@@ -199,7 +199,10 @@ fn ws_error(e: &WsError) -> NotifyError {
 /// Sends `["EVENT", <event>]` for each event and waits (at most 10 seconds in
 /// all) for the relay's `["OK", id, true|false, message]` for each. Returns
 /// one outcome per event, in order.
-pub fn publish(relay: &RelayUrl, events: &[Event]) -> Result<Vec<PublishOutcome>, NotifyError> {
+pub(crate) fn publish(
+    relay: &RelayUrl,
+    events: &[Event],
+) -> Result<Vec<PublishOutcome>, NotifyError> {
     #[cfg(test)]
     if relay.loopback {
         return publish_with(relay, events, TOTAL_TIMEOUT, &loopback_resolver);
@@ -270,51 +273,65 @@ where
     }
 
     let mut outcomes: Vec<Option<PublishOutcome>> = vec![None; events.len()];
-    let mut skipped = 0usize;
+    let mut ignored = 0usize;
     while outcomes.iter().any(Option::is_none) {
         let message = socket.read().map_err(|e| ws_error(&e))?;
-        let Message::Text(text) = message else {
-            if matches!(message, Message::Close(_)) {
-                return Err(NotifyError::Relay("the relay closed the connection early"));
-            }
-            continue;
+        if matches!(message, Message::Close(_)) {
+            return Err(NotifyError::Relay("the relay closed the connection early"));
+        }
+        let used = match &message {
+            Message::Text(text) => fill_slot(text.as_str(), events, &mut outcomes),
+            _ => false,
         };
-        let parsed = serde_json::from_str::<Value>(text.as_str()).ok();
-        let answer = parsed.as_ref().and_then(Value::as_array).and_then(|a| {
-            if a.first()?.as_str()? != "OK" {
-                return None;
-            }
-            Some((
-                a.get(1)?.as_str()?,
-                a.get(2)?.as_bool()?,
-                a.get(3).and_then(Value::as_str).unwrap_or(""),
-            ))
-        });
-        match answer {
-            Some((id, accepted, note)) => {
-                if let Some(index) = events.iter().position(|e| e.id == id)
-                    && let Some(slot) = outcomes.get_mut(index)
-                {
-                    *slot = Some(PublishOutcome {
-                        event_id: id.to_owned(),
-                        accepted,
-                        message: Untrusted::new(note.chars().take(500).collect()),
-                    });
-                }
-            }
-            None => {
-                skipped += 1;
-                if skipped > MAX_SKIPPED_MESSAGES {
-                    return Err(NotifyError::Relay(
-                        "the relay sent too many unrelated messages",
-                    ));
-                }
+        // Every message that did not fill an empty slot counts toward the
+        // limit: notices, pings, odd shapes, unknown ids and repeated answers.
+        if !used {
+            ignored += 1;
+            if ignored > MAX_SKIPPED_MESSAGES {
+                return Err(NotifyError::Relay(
+                    "the relay sent too many unrelated messages",
+                ));
             }
         }
     }
     // Politeness only: the answers are already in hand.
     let _ = socket.close(None);
     Ok(outcomes.into_iter().flatten().collect())
+}
+
+/// Reads one relay message. Only the exact shape `["OK", <id>, <bool>, <text>]`
+/// for one of our events whose slot is still empty is used; it fills that slot
+/// once, so a later conflicting answer never overwrites the first. Returns
+/// whether a slot was filled.
+fn fill_slot(text: &str, events: &[Event], outcomes: &mut [Option<PublishOutcome>]) -> bool {
+    let Ok(Value::Array(fields)) = serde_json::from_str::<Value>(text) else {
+        return false;
+    };
+    let [kind, id, accepted, note] = fields.as_slice() else {
+        return false;
+    };
+    let (Some("OK"), Some(id), Some(accepted), Some(note)) = (
+        kind.as_str(),
+        id.as_str(),
+        accepted.as_bool(),
+        note.as_str(),
+    ) else {
+        return false;
+    };
+    let Some(index) = events.iter().position(|e| e.id == id) else {
+        return false;
+    };
+    match outcomes.get_mut(index) {
+        Some(slot @ None) => {
+            *slot = Some(PublishOutcome {
+                event_id: id.to_owned(),
+                accepted,
+                message: Untrusted::new(note.chars().take(500).collect()),
+            });
+            true
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -364,6 +381,10 @@ mod tests {
         NoiseThenAccept,
         Redirect,
         Huge,
+        /// Answers a two-event batch with a short, a conflicting and a good ack.
+        Conflicting,
+        /// Floods pings before it answers.
+        Pings,
     }
 
     /// An in-process relay on 127.0.0.1: records every message it gets.
@@ -384,17 +405,38 @@ mod tests {
                 return;
             }
             let mut ws = tungstenite::accept(stream).unwrap();
+            let mut ids: Vec<String> = Vec::new();
             loop {
                 let Ok(msg) = ws.read() else { return };
                 let Message::Text(text) = msg else { continue };
                 log.lock().unwrap().push(text.as_str().to_owned());
                 let v: Value = serde_json::from_str(text.as_str()).unwrap();
                 let id = v[1]["id"].as_str().unwrap().to_owned();
+                ids.push(id.clone());
+                if matches!(mode, Mode::Conflicting) {
+                    if ids.len() == 2 {
+                        for ack in [
+                            serde_json::json!(["OK", ids[1], true]),
+                            serde_json::json!(["OK", ids[0], true, ""]),
+                            serde_json::json!(["OK", ids[0], false, "conflict"]),
+                            serde_json::json!(["OK", ids[1], true, ""]),
+                        ] {
+                            let _ = ws.send(Message::text(ack.to_string()));
+                        }
+                    }
+                    continue;
+                }
+                if matches!(mode, Mode::Pings) {
+                    for _ in 0..250 {
+                        let _ = ws.send(Message::Ping(vec![].into()));
+                    }
+                    continue;
+                }
                 let reply = match mode {
                     Mode::Accept | Mode::NoiseThenAccept => serde_json::json!(["OK", id, true, ""]),
                     Mode::Reject => serde_json::json!(["OK", id, false, "blocked: \u{1b}[31mnope"]),
                     Mode::Huge => serde_json::json!(["NOTICE", "x".repeat(100_000)]),
-                    Mode::Silent | Mode::Redirect => continue,
+                    Mode::Silent | Mode::Redirect | Mode::Conflicting | Mode::Pings => continue,
                 };
                 if matches!(mode, Mode::NoiseThenAccept) {
                     let _ = ws.send(Message::text(r#"["NOTICE","hello"]"#));
@@ -774,6 +816,77 @@ mod tests {
             .unwrap_err();
             assert!(matches!(err, NotifyError::Refused(_)), "{chains:?}");
         }
+    }
+
+    #[test]
+    fn a_short_ack_a_conflicting_repeat_and_an_unknown_id_do_not_change_the_outcome() {
+        let (_, events) = wraps(2);
+        let (port, _seen, handle) = fake_relay(Mode::Conflicting);
+        let out = publish(&RelayUrl::loopback_for_test(port), &events).unwrap();
+        assert_eq!(out.len(), 2);
+        // The first answer for the first event stands; the later "false" is ignored.
+        assert!(out[0].accepted && out[1].accepted);
+        assert_eq!(out[0].event_id, events[0].id);
+        assert_eq!(out[1].event_id, events[1].id);
+        assert!(out[0].message.escape_for_terminal().is_empty());
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn pings_count_toward_the_limit_on_unrelated_messages() {
+        let (_, events) = wraps(1);
+        let (port, _seen, handle) = fake_relay(Mode::Pings);
+        let err = publish(&RelayUrl::loopback_for_test(port), &events).unwrap_err();
+        assert!(
+            matches!(err, NotifyError::Relay(m) if m.contains("too many")),
+            "{err}"
+        );
+        drop(handle);
+    }
+
+    #[test]
+    fn a_send_with_nothing_eligible_sends_nothing_and_never_wraps() {
+        use crate::alert::{Alert, AlertParts, Chain, MatchResult, Severity};
+        struct NeverClock;
+        impl Clock for NeverClock {
+            fn now_unix(&self) -> Result<u64, NotifyError> {
+                Err(NotifyError::Refused("the clock must not be read"))
+            }
+        }
+        struct NeverEntropy;
+        impl Entropy for NeverEntropy {
+            fn fill(&mut self, _: &mut [u8]) -> Result<(), NotifyError> {
+                Err(NotifyError::Entropy)
+            }
+        }
+        let alert = Alert::new(AlertParts {
+            product: "LND",
+            version: "0.18.4-beta".to_owned(),
+            chain: Chain::Unknown,
+            advisory_id: "a-1".to_owned(),
+            result: MatchResult::Affected,
+            severity: Severity::High,
+            fixed_in: None,
+            summary: Untrusted::new("s".to_owned()),
+            playbook: Untrusted::new("p".to_owned()),
+            question: None,
+            checked_at: 1,
+            blind_spots: vec![],
+        })
+        .unwrap();
+        let sender = Keys::generate(&mut Seq(1)).unwrap();
+        // Nothing listens on this port either: a connection would be an error.
+        let out = crate::send_alerts(
+            &RelayUrl::loopback_for_test(1),
+            &sender,
+            &[7u8; 32],
+            &[alert],
+            &[Chain::Regtest],
+            &NeverClock,
+            &mut NeverEntropy,
+        )
+        .unwrap();
+        assert!(out.is_empty());
     }
 
     /// A relay that never finishes a sentence: it sends one byte every 300 ms.
