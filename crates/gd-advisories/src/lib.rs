@@ -8,6 +8,8 @@
 
 mod osv;
 mod package;
+mod range;
+mod version;
 
 pub use osv::{
     Advisory, AdvisoryId, AffectedEntry, Curation, Event, Gap, GapKind, MAX_AFFECTED, MAX_DEPTH,
@@ -16,3 +18,5 @@ pub use osv::{
     Source, Timestamp, parse_advisory, parse_advisory_from,
 };
 pub use package::{Ecosystem, MAX_PACKAGE_NAME, PackageError, PackageKey, canonical_package};
+pub use range::{Location, Place, UnknownReason, VersionEvidence, evaluate_entry};
+pub use version::{Candidate, VersionError, VersionScheme};
