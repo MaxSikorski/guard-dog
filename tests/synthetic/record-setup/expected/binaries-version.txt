@@ -1,0 +1,39 @@
+== /usr/local/bin/tool0
+Bitcoin Core daemon version v29.1.0
+lnd version 0.19.2-beta commit=v0.19.2-beta
+Tor version 0.4.8.16.
+== /usr/local/bin/tool1
+Tor is running on Linux with Libevent 2.1.12-stable.
+manifest umbrel-app.yml
+Backup address REDACTED-ADDRESS-1 and REDACTED-ADDRESS-2
+== /usr/local/bin/tool2
+invoice REDACTED-INVOICE-1
+REDACTED-XPUB-1
+REDACTED-XPRV-1
+== /usr/local/bin/tool3
+REDACTED-NPUB-1
+REDACTED-NSEC-1
+REDACTED-WIF-1
+== /usr/local/bin/tool4
+REDACTED-NENTITY-1
+REDACTED-WORDS-1
+Authorization: Bearer REDACTED-BEARER-1
+== /usr/local/bin/tool5
+Authorization: Basic REDACTED-BEARER-2
+rune REDACTED-TOKEN-1
+--rpcpassword=REDACTED-SECRET-1
+== /usr/local/bin/tool6
+bitcoind --rpcpassword REDACTED-SECRET-2 -printtoconsole
+connect redis://REDACTED-USERINFO-1@10.200.1.150:6379
+node REDACTED-NODEKEY-1 at 203.0.113.1
+== /usr/local/bin/tool7
+key REDACTED-HEX64-1
+mail user-1@example.invalid mac REDACTED-MAC-1
+onion REDACTED-ONION-1.onion REDACTED-ONION-2.onion
+== /usr/local/bin/tool8
+cfg /home/user-1/x host-1.example
+host redacted-host-1 user redacted-host-2
+v6 2001:db8::1 fe80::1 fd00::1
+== /usr/local/bin/tool9
+ip 203.0.113.2 10.200.2.151
+== /usr/local/bin/long

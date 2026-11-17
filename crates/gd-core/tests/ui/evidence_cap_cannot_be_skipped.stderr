@@ -1,0 +1,9 @@
+error[E0451]: fields `call` and `raw` of struct `Evidence` are private
+ --> tests/ui/evidence_cap_cannot_be_skipped.rs:7:9
+  |
+6 |     let _evidence = Evidence {
+  |                     -------- in this type
+7 |         call,
+  |         ^^^^ private field
+8 |         raw: Untrusted::new("x".repeat(100_000)),
+  |         ^^^ private field
