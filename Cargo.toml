@@ -30,9 +30,19 @@ missing_docs = "warn"
 # `dbg!` and `todo!` must never reach `main`.
 dbg_macro = "warn"
 todo = "warn"
+# Panic policy (Max, 2026-11-16): shipped code never panics on bad input.
+# Handle the error, or return it. Tests are exempt (see clippy.toml).
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
 
+# Release builds unwind on panic (the default) so one crashing sensor can be
+# contained and restarted. Abort will apply only to a future separate
+# action-executor process (Max, 2026-11-16). Overflow checks stay on: wrong
+# arithmetic must not silently wrap.
 [profile.release]
 lto = true
 codegen-units = 1
-panic = "abort"
+overflow-checks = true
 strip = true

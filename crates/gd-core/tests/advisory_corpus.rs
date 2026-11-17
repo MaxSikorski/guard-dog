@@ -8,6 +8,16 @@
 //! internal hash maps are randomly seeded, so schema messages are sorted before
 //! they are printed.
 
+// Test-only crate: its helper functions (not just `#[test]` ones) read files and
+// check data, and a panic there is a failed check. The workspace panic lints
+// protect shipped code; clippy.toml only exempts `#[test]` functions themselves.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 

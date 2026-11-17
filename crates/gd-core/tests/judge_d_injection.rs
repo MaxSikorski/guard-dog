@@ -10,6 +10,16 @@
 //! The same checks also run against a naive renderer (the text returned
 //! unchanged) and hand-made broken renderings, to show they have teeth.
 
+// Test-only crate: its helper functions (not just `#[test]` ones) read files and
+// check data, and a panic there is a failed check. The workspace panic lints
+// protect shipped code; clippy.toml only exempts `#[test]` functions themselves.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+
 use gd_core::Untrusted;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
