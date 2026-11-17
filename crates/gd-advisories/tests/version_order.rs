@@ -866,17 +866,19 @@ const LND_PKG: (&str, &str) = ("Go", "github.com/lightningnetwork/lnd");
 const LIT_PKG: (&str, &str) = ("Go", "github.com/lightninglabs/lightning-terminal");
 const TAPD_PKG: (&str, &str) = ("Go", "github.com/lightninglabs/taproot-assets");
 
-/// Every range event value (as written) of every entry for `pkg`, with its kind.
-fn endpoints(raw: &Value, pkg: (&str, &str)) -> Vec<(String, String)> {
+/// Every range event value (as written) of every entry for `pkg`, with its
+/// position: (entry, range, event, kind, value). The positions are numbers
+/// only, so a failure message never repeats advisory text.
+fn endpoints(raw: &Value, pkg: (&str, &str)) -> Vec<(usize, usize, usize, String, String)> {
     let mut out = Vec::new();
-    for e in raw["affected"].as_array().into_iter().flatten() {
+    for (ei, e) in raw["affected"].as_array().into_iter().flatten().enumerate() {
         if e["package"]["ecosystem"] != pkg.0 || e["package"]["name"] != pkg.1 {
             continue;
         }
-        for r in e["ranges"].as_array().into_iter().flatten() {
-            for ev in r["events"].as_array().into_iter().flatten() {
+        for (ri, r) in e["ranges"].as_array().into_iter().flatten().enumerate() {
+            for (vi, ev) in r["events"].as_array().into_iter().flatten().enumerate() {
                 for (k, v) in ev.as_object().unwrap() {
-                    out.push((k.clone(), v.as_str().unwrap().to_string()));
+                    out.push((ei, ri, vi, k.clone(), v.as_str().unwrap().to_string()));
                 }
             }
         }
@@ -887,31 +889,46 @@ fn endpoints(raw: &Value, pkg: (&str, &str)) -> Vec<(String, String)> {
 #[test]
 fn every_corpus_endpoint_of_core_lnd_lit_and_tapd_parses() {
     let (mut core_n, mut lnd_n, mut lit_n, mut tapd_n) = (0, 0, 0, 0);
-    for (name, _, raw) in corpus() {
-        for (kind, v) in endpoints(&raw, CORE_PKG) {
+    for (i, (_, _, raw)) in corpus().into_iter().enumerate() {
+        for (e, r, v, _, text) in endpoints(&raw, CORE_PKG) {
             core_n += 1;
-            assert!(v == "0" || core().parse(&v).is_ok(), "{name} {kind} {v}");
+            assert!(
+                text == "0" || core().parse(&text).is_ok(),
+                "Core advisory #{i} entry {e} range {r} event {v}"
+            );
         }
-        for (kind, v) in endpoints(&raw, LND_PKG) {
+        for (e, r, v, _, text) in endpoints(&raw, LND_PKG) {
             lnd_n += 1;
             assert!(
-                v == "0" || ChannelScheme::beta().parse(&v).is_ok(),
-                "{name} {kind} {v}"
+                text == "0" || ChannelScheme::beta().parse(&text).is_ok(),
+                "LND advisory #{i} entry {e} range {r} event {v} (channel)"
             );
-            assert!(v == "0" || GoTag.parse(&v).is_ok(), "{name} {kind} {v}");
+            assert!(
+                text == "0" || GoTag.parse(&text).is_ok(),
+                "LND advisory #{i} entry {e} range {r} event {v} (Go tag)"
+            );
         }
-        for (kind, v) in endpoints(&raw, LIT_PKG) {
+        for (e, r, v, _, text) in endpoints(&raw, LIT_PKG) {
             lit_n += 1;
             assert!(
-                v == "0" || ChannelScheme::alpha().parse(&v).is_ok(),
-                "{name} {kind} {v}"
+                text == "0" || ChannelScheme::alpha().parse(&text).is_ok(),
+                "LiT advisory #{i} entry {e} range {r} event {v} (channel)"
             );
-            assert!(v == "0" || GoTag.parse(&v).is_ok(), "{name} {kind} {v}");
+            assert!(
+                text == "0" || GoTag.parse(&text).is_ok(),
+                "LiT advisory #{i} entry {e} range {r} event {v} (Go tag)"
+            );
         }
-        for (kind, v) in endpoints(&raw, TAPD_PKG) {
+        for (e, r, v, _, text) in endpoints(&raw, TAPD_PKG) {
             tapd_n += 1;
-            assert!(v == "0" || SemVer.parse(&v).is_ok(), "{name} {kind} {v}");
-            assert!(v == "0" || GoTag.parse(&v).is_ok(), "{name} {kind} {v}");
+            assert!(
+                text == "0" || SemVer.parse(&text).is_ok(),
+                "tapd advisory #{i} entry {e} range {r} event {v} (SemVer)"
+            );
+            assert!(
+                text == "0" || GoTag.parse(&text).is_ok(),
+                "tapd advisory #{i} entry {e} range {r} event {v} (Go tag)"
+            );
         }
     }
     // Counted so a corpus change is noticed here (CVE-2026-117346 has two
@@ -1026,23 +1043,56 @@ fn every_fixture_version_of_core_and_lnd_parses() {
     assert_eq!(seen, 4, "two setups, two products each");
 }
 
+/// The two reviewed platform notes of CVE-2026-117346's Core entries.
+const PLATFORM_64: &str = "64-bit systems, including Windows";
+const PLATFORM_32: &str = "32-bit systems, or blocks stored on a FAT32 file system";
+
 /// The entries of `adv` that belong to the product and apply to the fixture
 /// setups (64-bit, blocks on tmpfs): the 32-bit or FAT32 entry waits for the
-/// later scope step, as the design says (scope before OR, a later PR).
-fn applicable_entries(adv: &Advisory, pkg: (&str, &str)) -> Vec<usize> {
-    adv.affected
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| {
-            e.package.ecosystem.expose_untrusted() == pkg.0
-                && e.package.name.expose_untrusted() == pkg.1
-                && e.scope
-                    .platform
-                    .as_ref()
-                    .is_none_or(|p| !p.expose_untrusted().contains("32-bit"))
-        })
-        .map(|(i, _)| i)
-        .collect()
+/// later scope step, as the design says (scope before OR, a later PR). The
+/// platform note must be absent or exactly one of the two reviewed strings;
+/// anything else is `Err(entry index)`, never the text.
+fn applicable_entries_checked(adv: &Advisory, pkg: (&str, &str)) -> Result<Vec<usize>, usize> {
+    let mut out = Vec::new();
+    for (i, e) in adv.affected.iter().enumerate() {
+        if e.package.ecosystem.expose_untrusted() != pkg.0
+            || e.package.name.expose_untrusted() != pkg.1
+        {
+            continue;
+        }
+        match e
+            .scope
+            .platform
+            .as_ref()
+            .map(|p| p.expose_untrusted().as_str())
+        {
+            None | Some(PLATFORM_64) => out.push(i),
+            Some(PLATFORM_32) => {}
+            Some(_) => return Err(i),
+        }
+    }
+    Ok(out)
+}
+
+fn applicable_entries(adv: &Advisory, adv_index: usize, pkg: (&str, &str)) -> Vec<usize> {
+    match applicable_entries_checked(adv, pkg) {
+        Ok(v) => v,
+        Err(e) => panic!("advisory #{adv_index} entry {e} has an unreviewed platform note"),
+    }
+}
+
+#[test]
+fn an_unreviewed_platform_note_on_a_core_entry_is_rejected() {
+    let (_, adv, raw) = corpus()
+        .into_iter()
+        .find(|(n, _, _)| n == "CVE-2026-117346.json")
+        .unwrap();
+    assert_eq!(applicable_entries_checked(&adv, CORE_PKG), Ok(vec![0]));
+    let mut changed = raw.clone();
+    changed["affected"][1]["database_specific"]["platform"] = json!("32-bit or 64-bit systems");
+    let bytes = serde_json::to_vec(&changed).unwrap();
+    let adv = parse_advisory_from(&bytes, Source::GuardDogCorpus).unwrap();
+    assert_eq!(applicable_entries_checked(&adv, CORE_PKG), Err(1));
 }
 
 fn subresult(e: &VersionEvidence) -> &'static str {
@@ -1084,17 +1134,18 @@ fn fixture_pairs_give_the_expected_version_subresult() {
     let docs = corpus();
     let mut checked: Vec<String> = Vec::new();
     let mut subversion_unknown = 0;
-    for (setup, advisory, expected) in &expects {
-        let Some((_, adv, _)) = docs
+    for (xi, (setup, advisory, expected)) in expects.iter().enumerate() {
+        let Some((ai, (_, adv, _))) = docs
             .iter()
-            .find(|(n, _, _)| n.strip_suffix(".json") == Some(advisory.as_str()))
+            .enumerate()
+            .find(|(_, (n, _, _))| n.strip_suffix(".json") == Some(advisory.as_str()))
         else {
-            panic!("no corpus record for {advisory}");
+            panic!("expectation #{xi} names no corpus record");
         };
         for svc in services.iter().filter(|s| &s.setup == setup) {
             let (pkg, got) = match svc.product.as_str() {
                 "bitcoin-core" => {
-                    let idx = applicable_entries(adv, CORE_PKG);
+                    let idx = applicable_entries(adv, ai, CORE_PKG);
                     // The key's Core versions come from the lab's pinned image
                     // (`versions_from`) or are stated (synthetic): full versions,
                     // so `Reported`. A live scan reads `subversion` instead
@@ -1123,12 +1174,22 @@ fn fixture_pairs_give_the_expected_version_subresult() {
                     if !idx.is_empty() {
                         if listed {
                             subversion_unknown += 1;
-                            assert_eq!(expected, "out-of-range", "the key's value");
-                            assert_eq!(union(&srs), "unknown", "{advisory}");
-                            let u = srs
+                            assert_eq!(
+                                expected, "out-of-range",
+                                "the key's value, expectation #{xi}"
+                            );
+                            assert_eq!(union(&srs), "unknown", "expectation #{xi}");
+                            let unknowns: Vec<_> = srs
                                 .iter()
-                                .find(|r| subresult(r) == "unknown")
-                                .expect("an unknown entry");
+                                .enumerate()
+                                .filter(|(_, r)| subresult(r) == "unknown")
+                                .collect();
+                            assert_eq!(unknowns.len(), 1, "expectation #{xi}");
+                            let (ui, u) = unknowns[0];
+                            assert_eq!(
+                                idx[ui], 0,
+                                "expectation #{xi}: the unknown entry is entry 0"
+                            );
                             assert_eq!(reason(u), UnknownReason::CandidateIsAnInterval);
                             let VersionEvidence::Unknown { question, .. } = u else {
                                 unreachable!()
@@ -1138,18 +1199,13 @@ fn fixture_pairs_give_the_expected_version_subresult() {
                                 "What full version does bitcoind report, including any rcN?"
                             );
                         } else {
-                            assert_eq!(
-                                union(&srs),
-                                expected,
-                                "{setup} {} against {advisory} as subversion",
-                                svc.version
-                            );
+                            assert_eq!(union(&srs), expected, "expectation #{xi} as subversion");
                         }
                     }
                     ("bitcoin-core", (!idx.is_empty()).then(|| union(&rs)))
                 }
                 "lnd" => {
-                    let idx = applicable_entries(adv, LND_PKG);
+                    let idx = applicable_entries(adv, ai, LND_PKG);
                     let rs: Vec<_> = idx
                         .iter()
                         .map(|&i| {
@@ -1166,11 +1222,7 @@ fn fixture_pairs_give_the_expected_version_subresult() {
                 _ => continue,
             };
             let Some(got) = got else { continue };
-            assert_eq!(
-                got, expected,
-                "{setup} {pkg} {} against {advisory}",
-                svc.version
-            );
+            assert_eq!(got, expected, "{pkg} expectation #{xi}");
             checked.push(format!("{setup}/{pkg}/{advisory}"));
         }
     }

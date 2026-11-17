@@ -3,8 +3,9 @@
 //! LND ships `X.Y.Z-beta` and `X.Y.Z-beta.rcN`; Lightning Terminal ships
 //! `X.Y.Z-alpha` and `X.Y.Z-alpha.rcN`. Strict SemVer puts `0.20.0-beta.rc1`
 //! above `0.20.0-beta`; the products order the other way. This scheme keeps the
-//! products' order: `rcN` (numeric) < channel release < bare final. The channel
-//! is never erased: it is part of the identity.
+//! products' order: `rcN` (numeric) < channel release. A bare `X.Y.Z` is
+//! refused by the channel parser. The channel is never erased: it is part of
+//! the identity.
 //!
 //! One scheme object has one order. A channel product's SEMVER and Go ranges are
 //! checked in both orders by [`evaluate_channel_entry`].

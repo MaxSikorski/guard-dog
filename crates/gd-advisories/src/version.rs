@@ -71,11 +71,11 @@ pub enum Candidate<V> {
 ///   from `orders`: every ordered range is then unknown, and only the listed
 ///   versions are checked, by identity.
 /// - Channel schemes with two orders (such as lnd's SemVer-and-beta check) are
-///   evaluated by the caller running the evaluator once per scheme; one scheme
-///   object never mixes two orders. The combination rule ([`evaluate_channel_entry`]): in
-///   range only if both say in range, out of range only if both say out of
-///   range, `Unknown(SchemeConflict)` when one says in and the other out, and
-///   an unknown side keeps its own reason.
+///   evaluated only through [`evaluate_channel_entry`], which runs the
+///   evaluator once per order; one scheme object never mixes two orders. The
+///   combination rule: in range only if both say in range, out of range only
+///   if both say out of range, `Unknown(SchemeConflict)` when one says in and
+///   the other out, and an unknown side keeps its own reason.
 pub trait VersionScheme {
     /// A parsed version, ordered by precedence.
     type Version: Ord + Clone;

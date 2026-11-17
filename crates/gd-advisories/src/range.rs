@@ -163,7 +163,7 @@ fn question(reason: UnknownReason) -> &'static str {
             "This advisory lists no usable range or version for this package. Which versions does the advisory's source say are affected?"
         }
         UnknownReason::SchemeConflict => {
-            "Is this product a release candidate? Updating to the final release settles it."
+            "Which upstream release does the advisory name as fixed, and is it the final release or a release candidate?"
         }
     }
 }
