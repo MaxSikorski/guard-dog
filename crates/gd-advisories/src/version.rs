@@ -1,11 +1,19 @@
 //! The contract a version scheme gives the range evaluator.
 //!
 //! The catalog picks the scheme for a product; an OSV range type never picks a
-//! parser (design 2.1, "scheme authority"). The schemes themselves (SemVer,
-//! Bitcoin Core, PEP 440, ...) arrive in later pull requests and implement
-//! [`VersionScheme`]. The evaluator in [`crate::range`] only needs what is here.
+//! parser (design 2.1, "scheme authority"). SemVer, the Go tag adapter, Bitcoin
+//! Core and the channel scheme are here; PEP 440, CalVer and git-describe arrive
+//! in later pull requests. The evaluator in [`crate::range`] only needs what is here.
 
 use std::fmt;
+
+mod bitcoin;
+mod channel;
+mod semver;
+
+pub use bitcoin::{BitcoinCore, CoreVersion, RcEvidence};
+pub use channel::{Channel, ChannelScheme, ChannelVersion, evaluate_channel_entry};
+pub use semver::{GoTag, SemVer, SemVerVersion};
 
 /// Why a scheme could not read a version string.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,10 +71,11 @@ pub enum Candidate<V> {
 ///   from `orders`: every ordered range is then unknown, and only the listed
 ///   versions are checked, by identity.
 /// - Channel schemes with two orders (such as lnd's SemVer-and-beta check) are
-///   evaluated by the caller running the evaluator once per scheme; one scheme
-///   object never mixes two orders. The combination rule: in range only if both
-///   say in range, out of range only if both say out of range, otherwise
-///   `Unknown(SchemeConflict)` (a reason the channel-scheme PR adds).
+///   evaluated only through [`evaluate_channel_entry`], which runs the
+///   evaluator once per order; one scheme object never mixes two orders. The
+///   combination rule: in range only if both say in range, out of range only
+///   if both say out of range, `Unknown(SchemeConflict)` when one says in and
+///   the other out, and an unknown side keeps its own reason.
 pub trait VersionScheme {
     /// A parsed version, ordered by precedence.
     type Version: Ord + Clone;
@@ -90,11 +99,33 @@ pub trait VersionScheme {
         self.parse(listed).ok().map(|l| l == *installed)
     }
 
+    /// The question to ask when the installed value is only known to lie in an
+    /// interval (`Candidate::Between`) that the ranges do not settle. Plain text,
+    /// never advisory text. A scheme that returns intervals words it for its own
+    /// source.
+    fn interval_question(&self) -> &'static str {
+        "Only a span of possible versions is known for the installed build. Which exact upstream release is it?"
+    }
+
     /// Whether this scheme has declared that it can evaluate `SEMVER` ranges.
     /// A scheme that has not declared it makes a `SEMVER` range `Unknown`,
     /// never a SemVer fallback.
     fn reads_semver_ranges(&self) -> bool;
 
+    /// Whether this scheme has declared that it can evaluate `ECOSYSTEM`
+    /// ranges. Most schemes read them; a channel scheme does not, because its
+    /// Go ranges are only answered by the dual check.
+    fn reads_ecosystem_ranges(&self) -> bool {
+        true
+    }
+
     /// Whether versions of this scheme have an order at all.
     fn orders(&self) -> bool;
+
+    /// Whether this scheme may answer an entry on its own. A channel scheme may
+    /// not: its two orders, and its `-rcN` identity alias, are only answered
+    /// together by [`evaluate_channel_entry`]. Default `true`.
+    fn answers_alone(&self) -> bool {
+        true
+    }
 }

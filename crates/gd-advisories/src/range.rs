@@ -84,6 +84,10 @@ pub enum UnknownReason {
     CandidateIsAnInterval,
     /// The entry has no usable range and no listed version.
     NoUsableRangeOrVersions,
+    /// A channel product's two orders (its own and literal SemVer) disagree.
+    /// Declared last on purpose: order is load-bearing, and this is the least
+    /// fundamental reason.
+    SchemeConflict,
 }
 
 /// What the advisory says about one installed version.
@@ -158,10 +162,13 @@ fn question(reason: UnknownReason) -> &'static str {
         UnknownReason::NoUsableRangeOrVersions => {
             "This advisory lists no usable range or version for this package. Which versions does the advisory's source say are affected?"
         }
+        UnknownReason::SchemeConflict => {
+            "Which upstream release does the advisory name as fixed, and is it the final release or a release candidate?"
+        }
     }
 }
 
-fn unknown(entry: usize, place: Place, reason: UnknownReason) -> VersionEvidence {
+pub(crate) fn unknown(entry: usize, place: Place, reason: UnknownReason) -> VersionEvidence {
     VersionEvidence::Unknown {
         reason,
         question: question(reason).to_string(),
@@ -189,12 +196,39 @@ fn keep_smallest(slot: &mut Option<(UnknownReason, Place)>, reason: UnknownReaso
 /// `OutOfRange`: that answer becomes `Unknown(RecordUncertain)`. Positive
 /// evidence stands. Other gaps are about single fields, ranges or entries, and
 /// the evaluator sees those directly in the entry.
+///
+/// This is a primitive: the caller must pass the scheme the catalog names for
+/// the product. A product whose catalog scheme is `semver-beta` (LND, Lightning
+/// Terminal) is never evaluated here with `SemVer` or `GoTag`; that gives one
+/// order's answer alone. Use [`evaluate_channel_entry`](crate::evaluate_channel_entry)
+/// (the bare `ChannelScheme` answers nothing here). A Bitcoin Core value read
+/// from `getnetworkinfo.subversion` uses `BitcoinCore::new(RcEvidence::Unknown)`.
+/// The product dispatch (2.1 PR 7) will be the one public entry point that
+/// applies these rules.
 pub fn evaluate_entry<S: VersionScheme + ?Sized>(
     scheme: &S,
     advisory: &Advisory,
     entry_index: usize,
     installed: Option<&str>,
 ) -> VersionEvidence {
+    evaluate_entry_with(scheme, &|_| scheme, advisory, entry_index, installed)
+}
+
+/// Crate-private: like [`evaluate_entry`], but each range's events are read by
+/// the scheme `range_scheme` picks for that range's kind. The installed value,
+/// the listed versions and the interval question use `scheme`. Both share one
+/// version type.
+pub(crate) fn evaluate_entry_with<'a, S, R>(
+    scheme: &S,
+    range_scheme: &dyn Fn(&RangeKind) -> &'a R,
+    advisory: &Advisory,
+    entry_index: usize,
+    installed: Option<&str>,
+) -> VersionEvidence
+where
+    S: VersionScheme + ?Sized,
+    R: VersionScheme<Version = S::Version> + ?Sized + 'a,
+{
     let Some(entry) = advisory.affected.get(entry_index) else {
         return unknown(
             entry_index,
@@ -202,7 +236,18 @@ pub fn evaluate_entry<S: VersionScheme + ?Sized>(
             UnknownReason::NoUsableRangeOrVersions,
         );
     };
-    let result = evaluate_inner(scheme, entry_index, entry, installed);
+    if !scheme.answers_alone() {
+        return unknown(entry_index, Place::Entry, UnknownReason::SchemeMismatch);
+    }
+    let mut result = evaluate_inner(scheme, range_scheme, entry_index, entry, installed);
+    if let VersionEvidence::Unknown {
+        reason: UnknownReason::CandidateIsAnInterval,
+        question,
+        ..
+    } = &mut result
+    {
+        *question = scheme.interval_question().to_string();
+    }
     let uncertain = advisory.gaps.iter().any(|g| {
         matches!(
             g.kind,
@@ -215,12 +260,17 @@ pub fn evaluate_entry<S: VersionScheme + ?Sized>(
     result
 }
 
-fn evaluate_inner<S: VersionScheme + ?Sized>(
+fn evaluate_inner<'a, S, R>(
     scheme: &S,
+    range_scheme: &dyn Fn(&RangeKind) -> &'a R,
     entry_index: usize,
     entry: &AffectedEntry,
     installed: Option<&str>,
-) -> VersionEvidence {
+) -> VersionEvidence
+where
+    S: VersionScheme + ?Sized,
+    R: VersionScheme<Version = S::Version> + ?Sized + 'a,
+{
     let whole = Place::Entry;
     let Some(raw) = installed else {
         return unknown(entry_index, whole, UnknownReason::InstalledVersionUnknown);
@@ -237,7 +287,7 @@ fn evaluate_inner<S: VersionScheme + ?Sized>(
 
     let mut positive: Option<Place> = None;
     for (index, range) in entry.ranges.iter().enumerate() {
-        match eval_range(scheme, index, range, candidate.as_ref()) {
+        match eval_range(range_scheme(&range.kind), index, range, candidate.as_ref()) {
             Outcome::In(place) => {
                 positive.get_or_insert(place);
             }
@@ -245,7 +295,14 @@ fn evaluate_inner<S: VersionScheme + ?Sized>(
             Outcome::Unknown(reason, place) => keep_smallest(&mut first_unknown, reason, place),
         }
     }
-    for (index, item) in entry.versions.iter().enumerate() {
+    // A value the scheme refused as installed (for example an rcN from a source
+    // that drops rcN, or a dirty Go build) is never matched against the list.
+    let listed_items = if candidate.is_some() {
+        entry.versions.as_slice()
+    } else {
+        &[]
+    };
+    for (index, item) in listed_items.iter().enumerate() {
         let listed = item.expose_untrusted().trim_ascii();
         let place = Place::Listed { index };
         match &candidate {
@@ -386,6 +443,9 @@ fn eval_range<S: VersionScheme + ?Sized>(
     match range.kind {
         RangeKind::Git => return Outcome::Unknown(UnknownReason::NoCommitGraph, shape),
         RangeKind::Semver if !scheme.reads_semver_ranges() => {
+            return Outcome::Unknown(UnknownReason::SchemeMismatch, shape);
+        }
+        RangeKind::Ecosystem if !scheme.reads_ecosystem_ranges() => {
             return Outcome::Unknown(UnknownReason::SchemeMismatch, shape);
         }
         RangeKind::Semver | RangeKind::Ecosystem => {}
