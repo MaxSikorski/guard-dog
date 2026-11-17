@@ -20,7 +20,7 @@ fn three_frames() -> Vec<Vec<u8>> {
     let a = sll2(
         LO,
         0x0800,
-        4,
+        0,
         &ipv4(
             [127, 0, 0, 1],
             [127, 0, 0, 1],
@@ -42,7 +42,7 @@ fn three_frames() -> Vec<Vec<u8>> {
     let incoming = sll2(
         LO,
         0x0800,
-        0,
+        3,
         &ipv4([127, 0, 0, 1], [127, 0, 0, 1], 17, &udp(1, 2, b"skip me")),
     );
     vec![a, b, incoming]
@@ -56,7 +56,11 @@ fn pcap_reads_sll2_both_byte_orders_and_nanoseconds() {
         for nanos in [false, true] {
             let parsed = pcap::parse(&pcap_file(order, nanos, 276, &frames));
             assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
-            assert_eq!(parsed.packets.len(), 2, "the incoming packet is skipped");
+            assert_eq!(
+                parsed.packets.len(),
+                2,
+                "a record of another packet type is skipped"
+            );
             seen.push(parsed.packets);
         }
     }
@@ -160,8 +164,9 @@ fn dns_log_decodes_escapes_and_rejects_stray_lines() {
 fn mitm_jsonl_rejects_unknown_events_and_keys() {
     let header = "{\"gd_capture\":1,\"tool\":\"mitmproxy\",\"tool_version\":\"12.3.1\"}";
     let connect = "{\"event\":\"connect\",\"conn\":1,\"client_port\":40001,\"dst_ip\":\"198.18.0.1\",\"dst_port\":443}";
+    let end = "{\"conn\":0,\"event\":\"end\"}";
     let parse = |lines: &[&str]| mitm::parse(lines.join("\n").as_bytes());
-    let good = parse(&[header, connect, "{\"event\":\"close\",\"conn\":1}"]);
+    let good = parse(&[header, connect, "{\"event\":\"close\",\"conn\":1}", end]);
     assert!(good.errors.is_empty(), "{:?}", good.errors);
     assert_eq!(good.conns.len(), 1);
     let cases: [(&[&str], &str); 11] = [
@@ -236,9 +241,16 @@ fn mitm_jsonl_rejects_unknown_events_and_keys() {
     );
     // Events may come before their connection line.
     assert!(
-        parse(&[header, "{\"event\":\"close\",\"conn\":1}", connect])
+        parse(&[header, "{\"event\":\"close\",\"conn\":1}", connect, end])
             .errors
             .is_empty()
+    );
+    // The end marker must be the last line, and must be there.
+    assert!(parse(&[header, connect]).errors.contains("no-end"));
+    assert!(
+        parse(&[header, connect, end, "{\"event\":\"close\",\"conn\":1}"])
+            .errors
+            .contains("no-end")
     );
 }
 
@@ -250,4 +262,194 @@ fn rules_normalisation_ignores_comments_and_counters() {
     assert_eq!(rules::normalize("a [1:2]\n  # c\n\nb  \n"), ["a", "b"]);
     assert!(!rules::same(dump, "== iptables-save\n*nat\nCOMMIT\n"));
     assert!(!rules::same("", expected));
+}
+
+#[test]
+fn lo_reads_host_records_and_sink_reads_outgoing() {
+    let links = pcap::parse_links("1: lo: <LOOPBACK>\n2: gdsink0: <NOARP>\n").unwrap();
+    let datagram = |ifindex: u32, ptype: u8, port: u16| {
+        sll2(
+            ifindex,
+            0x0800,
+            ptype,
+            &ipv4([127, 0, 0, 1], [127, 0, 0, 1], 17, &udp(50_000, port, b"x")),
+        )
+    };
+    let frames = vec![
+        datagram(LO, 0, 9),   // host copy on lo: read
+        datagram(LO, 4, 9),   // outgoing copy on lo: ignored
+        datagram(SINK, 4, 9), // outgoing on the sink: read
+        datagram(SINK, 0, 9), // host on the sink: ignored
+        datagram(LO, 3, 9),   // other host: dropped by the parser
+        datagram(7, 0, 9),    // an interface we have no name for
+    ];
+    let parsed = pcap::parse(&pcap_file(Order::Little, false, 276, &frames));
+    assert!(parsed.errors.is_empty());
+    assert_eq!(
+        parsed.packets.len(),
+        5,
+        "types 0 and 4 are parsed, others skipped"
+    );
+    let wire = pcap::analyze(&parsed.packets, &links);
+    assert_eq!(wire.sink.len(), 1);
+    assert_eq!(wire.ignored_types, 2);
+    assert_eq!(
+        wire.ignored_loopback, 1,
+        "the one host datagram on lo is not to or from the sink ports"
+    );
+    assert!(wire.errors.contains("unknown-interface"));
+    // Positive twin: the same host record, sent to the resolver port, is a loopback client packet.
+    let to_resolver = pcap::parse(&pcap_file(
+        Order::Little,
+        false,
+        276,
+        &[datagram(LO, 0, 5353)],
+    ));
+    assert_eq!(
+        pcap::analyze(&to_resolver.packets, &links).lo_client.len(),
+        1
+    );
+}
+
+fn analyze_frames(frames: &[Vec<u8>]) -> pcap::Wire {
+    let links = pcap::parse_links("1: lo: <LOOPBACK>\n2: gdsink0: <NOARP>\n").unwrap();
+    let parsed = pcap::parse(&pcap_file(Order::Little, false, 276, frames));
+    pcap::analyze(&parsed.packets, &links)
+}
+
+fn client_tcp(seq: u32, flags: u8, payload: &[u8]) -> Vec<u8> {
+    sll2(
+        LO,
+        0x0800,
+        0,
+        &ipv4(
+            [127, 0, 0, 1],
+            [127, 0, 0, 1],
+            6,
+            &tcp(40_001, 8080, seq, flags, payload),
+        ),
+    )
+}
+
+#[test]
+fn tcp_gaps_and_conflicts_are_reported() {
+    // Clean, in order and out of order with a harmless retransmission: no problem, bytes joined.
+    let clean = analyze_frames(&[
+        client_tcp(100, SYN, b""),
+        client_tcp(106, PSH_ACK, b"world"),
+        client_tcp(101, PSH_ACK, b"hello"),
+        client_tcp(101, PSH_ACK, b"hello"),
+    ]);
+    assert!(clean.errors.is_empty(), "{:?}", clean.errors);
+    assert_eq!(clean.recorder_streams[0].data, b"helloworld");
+    // A hole: bytes 6..11 never arrive. Nothing is invented for them.
+    let gap = analyze_frames(&[
+        client_tcp(100, SYN, b""),
+        client_tcp(101, PSH_ACK, b"hello"),
+        client_tcp(111, PSH_ACK, b"later"),
+    ]);
+    assert!(gap.errors.contains("tcp-gap"));
+    assert_eq!(gap.recorder_streams[0].data, b"hellolater");
+    // A missing start counts as a gap too.
+    assert!(
+        analyze_frames(&[client_tcp(100, SYN, b""), client_tcp(105, PSH_ACK, b"x")])
+            .errors
+            .contains("tcp-gap")
+    );
+    // A retransmission with different bytes: both versions are kept for scanning.
+    let conflict = analyze_frames(&[
+        client_tcp(100, SYN, b""),
+        client_tcp(101, PSH_ACK, b"AAAAA"),
+        client_tcp(101, PSH_ACK, b"BBBBBCC"),
+    ]);
+    assert!(conflict.errors.contains("tcp-overlap-conflict"));
+    assert_eq!(
+        conflict.recorder_streams[0].conflicts,
+        [b"BBBBBCC".to_vec()]
+    );
+    assert_eq!(conflict.recorder_streams[0].data, b"AAAAACC");
+}
+
+#[test]
+fn dns_queries_with_extra_sections_are_rejected() {
+    let plain = support::Scenario::dns_query_bytes("a.example.org", 7, 1, None);
+    assert!(!pcap::parse_dns(&plain).unwrap().unexpected_section);
+    // One OPT record (type 41, root name) is what a normal resolver sends.
+    let opt = [0u8, 0, 41, 0x10, 0, 0, 0, 0, 0, 0, 0];
+    let with_opt = support::Scenario::dns_query_bytes("a.example.org", 7, 1, Some(&opt));
+    assert!(!pcap::parse_dns(&with_opt).unwrap().unexpected_section);
+    // One TXT record is not.
+    let txt = [0u8, 0, 16, 0, 1, 0, 0, 0, 0, 0, 1, 0];
+    let with_txt = support::Scenario::dns_query_bytes("a.example.org", 7, 1, Some(&txt));
+    let message = pcap::parse_dns(&with_txt).unwrap();
+    assert!(message.unexpected_section);
+    assert_eq!(
+        message.questions,
+        [("a.example.org".to_string(), 1)],
+        "the question is still read"
+    );
+    // Any answer or authority record, or two additional records, in a query.
+    for (an, ns, ar) in [(1u8, 0u8, 0u8), (0, 1, 0), (0, 0, 2)] {
+        let mut q = plain.clone();
+        q[7] = an;
+        q[9] = ns;
+        q[11] = ar;
+        assert!(
+            pcap::parse_dns(&q).unwrap().unexpected_section,
+            "{an} {ns} {ar}"
+        );
+    }
+    // A response may carry answers.
+    let mut response = plain.clone();
+    response[2] = 0x81;
+    response[7] = 1;
+    assert!(!pcap::parse_dns(&response).unwrap().unexpected_section);
+    // Framing: short header, cut question, compression pointer in a question.
+    assert_eq!(pcap::parse_dns(&[0u8; 6]).unwrap_err(), "dns-framing");
+    assert_eq!(
+        pcap::parse_dns(plain.get(..16).unwrap()).unwrap_err(),
+        "dns-framing"
+    );
+    let mut pointer = plain.clone();
+    pointer[12] = 0xC0;
+    assert_eq!(pcap::parse_dns(&pointer).unwrap_err(), "dns-framing");
+}
+
+#[test]
+fn every_dns_question_is_read() {
+    let mut q = Vec::new();
+    q.extend([0, 9, 0x01, 0, 0, 3, 0, 0, 0, 0, 0, 0]);
+    for (name, qtype) in [
+        ("first.example.org", 1u16),
+        ("second.example.org", 28),
+        ("third.example.org", 16),
+    ] {
+        for label in name.split('.') {
+            q.push(label.len() as u8);
+            q.extend(label.as_bytes());
+        }
+        q.push(0);
+        q.extend(qtype.to_be_bytes());
+        q.extend([0, 1]);
+    }
+    let message = pcap::parse_dns(&q).unwrap();
+    let names: Vec<&str> = message.questions.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "first.example.org",
+            "second.example.org",
+            "third.example.org"
+        ]
+    );
+    assert_eq!(pcap::qtype_name(message.questions[1].1), "AAAA");
+    assert_eq!(pcap::qtype_name(message.questions[2].1), "TXT");
+    // The judge sees all three as separate wire questions.
+    let frame = sll2(
+        LO,
+        0x0800,
+        0,
+        &ipv4([127, 0, 0, 1], [127, 0, 0, 1], 17, &udp(50_000, 5353, &q)),
+    );
+    assert_eq!(analyze_frames(&[frame]).dns_questions.len(), 3);
 }

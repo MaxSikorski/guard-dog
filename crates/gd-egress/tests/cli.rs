@@ -166,7 +166,7 @@ fn check_exits_0_on_pass_1_on_fail_2_on_bad_input() {
     assert!(
         fs::read_to_string(work.join("details.txt"))
             .unwrap()
-            .contains("mitm: 1 connections")
+            .contains("mitm: 2 connections")
     );
 
     let mut leaky = Scenario::new("cli-s03", 1);

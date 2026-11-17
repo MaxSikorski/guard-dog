@@ -146,10 +146,11 @@ fn setup_root_holds_exactly_the_placements() {
         .map(|p| fs::read(root.join(p)).unwrap())
         .collect();
     for canary in &set.canaries {
-        let needle = canary
-            .bytes
-            .clone()
-            .unwrap_or_else(|| canary.text.clone().into_bytes());
+        let needle = if canary.class == Class::Macaroon {
+            canary.bytes.clone().unwrap()
+        } else {
+            canary.text.clone().into_bytes()
+        };
         assert!(
             all.iter()
                 .any(|f| f.windows(needle.len()).any(|w| w == needle.as_slice())),

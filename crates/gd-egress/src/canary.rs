@@ -99,7 +99,8 @@ pub struct CanarySet {
     pub control_token: String,
 }
 
-fn xpub_text(rng: &mut SplitMix64) -> String {
+/// The xpub's 78-byte payload (version, depth, fingerprint, child, chain code, key).
+fn xpub_payload(rng: &mut SplitMix64) -> Vec<u8> {
     let fingerprint = rng.fill_bytes(4);
     let child = rng.fill_bytes(4);
     let chain_code = rng.fill_bytes(32);
@@ -115,7 +116,7 @@ fn xpub_text(rng: &mut SplitMix64) -> String {
         2
     });
     payload.extend(x);
-    base58check(&payload)
+    payload
 }
 
 /// Makes every canary from `seed`. The draw order is fixed: a golden file pins it.
@@ -130,13 +131,14 @@ pub fn generate(seed: u64) -> CanarySet {
     push(
         Class::SeedPhrase,
         bip39::mnemonic(&entropy).unwrap_or_default(),
-        None,
+        Some(entropy),
     );
 
     let key = rng.fill_bytes(32);
-    push(Class::Nsec, bech32("nsec", &key), None);
+    push(Class::Nsec, bech32("nsec", &key), Some(key));
 
-    push(Class::Xpub, xpub_text(&mut rng), None);
+    let payload = xpub_payload(&mut rng);
+    push(Class::Xpub, base58check(&payload), Some(payload));
 
     let mut mac = vec![0x02, 0x01, 0x03, 0x6c, 0x6e, 0x64];
     mac.extend(rng.fill_bytes(94));
@@ -146,7 +148,7 @@ pub fn generate(seed: u64) -> CanarySet {
     push(
         Class::Onion,
         format!("{}.onion", onion_label(&onion_key)),
-        None,
+        Some(onion_key),
     );
 
     let last_octet = 1 + rng.next_u64() % 254;
@@ -156,31 +158,27 @@ pub fn generate(seed: u64) -> CanarySet {
     for g in groups.iter_mut().skip(2) {
         *g = u16::try_from(rng.next_u64() & 0xffff).unwrap_or(0);
     }
-    push(Class::Ipv6, ipv6_text(groups), None);
+    let v6_bytes: Vec<u8> = groups.iter().flat_map(|g| g.to_be_bytes()).collect();
+    push(Class::Ipv6, ipv6_text(groups), Some(v6_bytes));
 
+    let rpc = rng.fill_bytes(32);
     push(
         Class::RpcPassword,
-        format!("gdlabcanary-{}", hex(&rng.fill_bytes(32))),
-        None,
+        format!("gdlabcanary-{}", hex(&rpc)),
+        Some(rpc),
     );
 
-    push(
-        Class::ClnRune,
-        base64(&rng.fill_bytes(48), true, false),
-        None,
-    );
+    let rune = rng.fill_bytes(48);
+    push(Class::ClnRune, base64(&rune, true, false), Some(rune));
 
     let selector = rng.fill_bytes(1);
-    let prefix = if selector.first().is_some_and(|b| b & 1 == 1) {
-        "03"
+    let mut pubkey = vec![if selector.first().is_some_and(|b| b & 1 == 1) {
+        3
     } else {
-        "02"
-    };
-    push(
-        Class::NodePubkey,
-        format!("{prefix}{}", hex(&rng.fill_bytes(32))),
-        None,
-    );
+        2
+    }];
+    pubkey.extend(rng.fill_bytes(32));
+    push(Class::NodePubkey, hex(&pubkey), Some(pubkey));
 
     let host: String = base32_lower(&rng.fill_bytes(10), false)
         .chars()
@@ -232,7 +230,7 @@ impl CanarySet {
         let doc = json!({
             "canaries": items,
             "control_token": self.control_token,
-            "format": 1,
+            "format": 2,
             "seed": self.seed.to_string(),
         });
         let mut text = serde_json::to_string_pretty(&doc).unwrap_or_default();
@@ -243,8 +241,8 @@ impl CanarySet {
     /// Reads `canaries.json` back. Fails closed: every class must appear exactly once.
     pub fn from_json(text: &str) -> Result<CanarySet, String> {
         let doc: Value = serde_json::from_str(text).map_err(|e| format!("not JSON: {e}"))?;
-        if doc.get("format") != Some(&json!(1)) {
-            return Err("format must be 1".into());
+        if doc.get("format") != Some(&json!(2)) {
+            return Err("format must be 2".into());
         }
         let seed = doc
             .get("seed")
@@ -291,9 +289,9 @@ impl CanarySet {
         }
         if canaries
             .iter()
-            .any(|c| c.class == Class::Macaroon && c.bytes.is_none())
+            .any(|c| c.bytes.is_none() && !matches!(c.class, Class::Ipv4 | Class::Hostname))
         {
-            return Err("the macaroon needs bytes_hex".into());
+            return Err("every class except ipv4 and hostname needs bytes_hex".into());
         }
         Ok(CanarySet {
             seed,

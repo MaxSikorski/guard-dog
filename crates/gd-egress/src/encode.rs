@@ -271,3 +271,33 @@ pub fn ipv6_canonical(text: &str) -> Option<String> {
     let addr: std::net::Ipv6Addr = text.parse().ok()?;
     Some(ipv6_text(addr.segments()))
 }
+
+/// Decodes base64 characters (either alphabet) without checking length or padding;
+/// characters outside the alphabets are skipped and leftover bits dropped.
+/// For pulling bytes out of text that only looks like base64.
+pub fn base64_decode_loose(chars: &[u8]) -> Vec<u8> {
+    let values: Vec<u32> = chars
+        .iter()
+        .filter_map(|c| {
+            let v = B64_STD
+                .iter()
+                .position(|a| a == c)
+                .or_else(|| B64_URL.iter().position(|a| a == c))?;
+            u32::try_from(v).ok()
+        })
+        .collect();
+    ungroup(&values, 6)
+}
+
+/// Decodes base32 characters (either case) loosely, as [`base64_decode_loose`] does.
+pub fn base32_decode_loose(chars: &[u8]) -> Vec<u8> {
+    let values: Vec<u32> = chars
+        .iter()
+        .filter_map(|c| {
+            let lower = c.to_ascii_lowercase();
+            let v = B32_LOWER.iter().position(|a| *a == lower)?;
+            u32::try_from(v).ok()
+        })
+        .collect();
+    ungroup(&values, 5)
+}

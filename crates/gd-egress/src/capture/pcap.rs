@@ -13,6 +13,7 @@ pub const RESOLVER_PORT: u16 = 5353;
 const LINKTYPE_SLL2: u32 = 276;
 const SLL2_HEADER: usize = 20;
 const OUTGOING: u8 = 4;
+const HOST: u8 = 0;
 
 /// Transport layer of a packet.
 // The field names are the protocol's own (ports, sequence number, flags, payload).
@@ -42,6 +43,10 @@ pub enum L4 {
 /// One captured outgoing packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Packet {
+    /// Position in the capture file (all records counted), for order checks.
+    pub index: usize,
+    /// SLL2 packet type: 0 host (read on `lo`), 4 outgoing (read on the sink).
+    pub pkt_type: u8,
     /// Interface index (names come from `links.txt`).
     pub ifindex: u32,
     /// Source and destination; `None` for a non-IP packet.
@@ -68,11 +73,12 @@ fn be32(b: &[u8], o: usize) -> Option<u32> {
 }
 
 /// Parses one SLL2 frame. `Ok(None)` means "not an outgoing packet, skip it".
-fn parse_frame(frame: &[u8]) -> Result<Option<Packet>, &'static str> {
+fn parse_frame(frame: &[u8], index: usize) -> Result<Option<Packet>, &'static str> {
     let bad = "bad-packet";
     let ethertype = be16(frame, 0).ok_or(bad)?;
     let ifindex = be32(frame, 4).ok_or(bad)?;
-    if frame.get(10) != Some(&OUTGOING) {
+    let pkt_type = *frame.get(10).ok_or(bad)?;
+    if pkt_type != OUTGOING && pkt_type != HOST {
         return Ok(None);
     }
     let rest = frame.get(SLL2_HEADER..).ok_or(bad)?;
@@ -90,6 +96,9 @@ fn parse_frame(frame: &[u8]) -> Result<Option<Packet>, &'static str> {
                 .get(16..20)
                 .and_then(|s| s.try_into().ok())
                 .ok_or(bad)?;
+            if be16(rest, 6).ok_or(bad)? & 0x3fff != 0 {
+                return Err("fragment");
+            }
             let end = total.clamp(ihl, rest.len());
             let proto = *header.get(9).ok_or(bad)?;
             (
@@ -108,6 +117,9 @@ fn parse_frame(frame: &[u8]) -> Result<Option<Packet>, &'static str> {
             let mut next = *rest.get(6).ok_or(bad)?;
             let mut offset = 40usize;
             while matches!(next, 0 | 43 | 44 | 60) {
+                if next == 44 {
+                    return Err("fragment");
+                }
                 let this = rest.get(offset..).ok_or(bad)?;
                 let following = *this.first().ok_or(bad)?;
                 let len = if next == 44 {
@@ -127,6 +139,8 @@ fn parse_frame(frame: &[u8]) -> Result<Option<Packet>, &'static str> {
         }
         other => {
             return Ok(Some(Packet {
+                index,
+                pkt_type,
                 ifindex,
                 ip: None,
                 l4: L4::Other {
@@ -167,6 +181,8 @@ fn parse_frame(frame: &[u8]) -> Result<Option<Packet>, &'static str> {
         },
     };
     Ok(Some(Packet {
+        index,
+        pkt_type,
         ifindex,
         ip: Some((src, dst)),
         l4,
@@ -222,6 +238,7 @@ pub fn parse(bytes: &[u8]) -> PcapParse {
         return out;
     }
     let mut at = 24usize;
+    let mut index = 0usize;
     while at < bytes.len() {
         let record = bytes
             .get(at..at + 16)
@@ -237,7 +254,8 @@ pub fn parse(bytes: &[u8]) -> PcapParse {
             out.errors.insert("truncated");
             break;
         };
-        match parse_frame(data) {
+        index += 1;
+        match parse_frame(data, index - 1) {
             Ok(Some(packet)) => out.packets.push(packet),
             Ok(None) => {}
             Err(code) => {
@@ -264,62 +282,113 @@ pub fn parse_links(text: &str) -> Option<BTreeMap<u32, String>> {
     Some(map)
 }
 
-/// A DNS message's id, direction and question names.
+/// A DNS message's id, direction and questions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsMessage {
     /// The transaction id.
     pub id: u16,
     /// True for a response.
     pub response: bool,
-    /// The question names, dotted and lowercase.
-    pub names: Vec<String>,
+    /// Every question: the dotted lowercase name and the query type number.
+    pub questions: Vec<(String, u16)>,
+    /// A query with an answer, authority or non-OPT additional record (`dns-unexpected-section`).
+    /// The questions are still read, so the names are still judged.
+    pub unexpected_section: bool,
 }
 
-/// Reads a DNS message. Compression pointers (never in a query) are an error.
+/// The CoreDNS spelling of a query type number (`A`, `AAAA`, ..., or `TYPE<n>`).
+pub fn qtype_name(qtype: u16) -> String {
+    match qtype {
+        1 => "A".into(),
+        2 => "NS".into(),
+        5 => "CNAME".into(),
+        6 => "SOA".into(),
+        12 => "PTR".into(),
+        15 => "MX".into(),
+        16 => "TXT".into(),
+        28 => "AAAA".into(),
+        33 => "SRV".into(),
+        255 => "ANY".into(),
+        other => format!("TYPE{other}"),
+    }
+}
+
+/// Reads a DNS message: the 12-byte header and every question. A compression
+/// pointer in a question or a cut-off message is `dns-framing`. A *query* with
+/// any answer or authority record, or with an additional record other than one
+/// OPT, is `dns-unexpected-section`: those are places a secret could hide.
 pub fn parse_dns(payload: &[u8]) -> Result<DnsMessage, &'static str> {
-    let bad = "bad-line";
-    let id = be16(payload, 0).ok_or(bad)?;
-    let flags = be16(payload, 2).ok_or(bad)?;
-    let questions = be16(payload, 4).ok_or(bad)?;
+    let framing = "dns-framing";
+    let id = be16(payload, 0).ok_or(framing)?;
+    let flags = be16(payload, 2).ok_or(framing)?;
+    let counts: Vec<u16> = (4..12)
+        .step_by(2)
+        .map(|o| be16(payload, o).ok_or(framing))
+        .collect::<Result<_, _>>()?;
+    let (qd, an, ns, ar) = match counts.as_slice() {
+        [a, b, c, d] => (*a, *b, *c, *d),
+        _ => return Err(framing),
+    };
     let mut at = 12usize;
-    let mut names = Vec::new();
-    for _ in 0..questions {
+    let mut questions = Vec::new();
+    for _ in 0..qd {
         let mut labels: Vec<String> = Vec::new();
         loop {
-            let len = usize::from(*payload.get(at).ok_or(bad)?);
+            let len = usize::from(*payload.get(at).ok_or(framing)?);
             at += 1;
             if len == 0 {
                 break;
             }
             if len > 63 {
-                return Err(bad);
+                return Err(framing);
             }
-            let label = payload.get(at..at + len).ok_or(bad)?;
+            let label = payload.get(at..at + len).ok_or(framing)?;
             labels.push(String::from_utf8_lossy(label).to_ascii_lowercase());
             at += len;
         }
+        let qtype = be16(payload, at).ok_or(framing)?;
         at += 4;
         if at > payload.len() {
-            return Err(bad);
+            return Err(framing);
         }
-        names.push(labels.join("."));
+        questions.push((labels.join("."), qtype));
+    }
+    let response = flags & 0x8000 != 0;
+    let mut unexpected_section = false;
+    if !response {
+        unexpected_section = an != 0 || ns != 0 || ar > 1;
+        if ar == 1 && !unexpected_section {
+            let first = *payload.get(at).ok_or(framing)?;
+            let type_at = match first {
+                0 => Some(at + 1),
+                b if b & 0xC0 == 0xC0 => Some(at + 2),
+                _ => None,
+            };
+            unexpected_section = match type_at {
+                Some(t) => be16(payload, t).ok_or(framing)? != 41,
+                None => true,
+            };
+        }
     }
     Ok(DnsMessage {
         id,
-        response: flags & 0x8000 != 0,
-        names,
+        response,
+        questions,
+        unexpected_section,
     })
 }
 
 /// A reassembled one-way TCP stream.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Stream {
     /// Source port (the client's, for client-to-recorder streams).
     pub sport: u16,
     /// Destination port.
     pub dport: u16,
-    /// The bytes, in order. A gap in the capture shows as one `0x00` byte.
+    /// The bytes, in order, with nothing invented for a gap.
     pub data: Vec<u8>,
+    /// Retransmissions whose bytes differ from what was first seen. Scanned too.
+    pub conflicts: Vec<Vec<u8>>,
 }
 
 #[derive(Default)]
@@ -331,7 +400,10 @@ struct Building {
 }
 
 impl Building {
-    fn finish(self) -> Stream {
+    /// Puts the segments in order. A hole in the sequence numbers is `tcp-gap`;
+    /// a retransmission that disagrees with earlier bytes is `tcp-overlap-conflict`.
+    fn finish(self) -> (Stream, BTreeSet<&'static str>) {
+        let mut errors = BTreeSet::new();
         let base = self.isn.map_or_else(
             || self.segments.iter().map(|s| s.0).min().unwrap_or(0),
             |isn| isn.wrapping_add(1),
@@ -342,25 +414,67 @@ impl Building {
             .map(|(seq, d)| (u64::from(seq.wrapping_sub(base)), d))
             .collect();
         segments.sort_by_key(|s| s.0);
-        let (mut data, mut end) = (Vec::new(), 0u64);
+        let (mut data, mut end, mut skipped) = (Vec::new(), 0u64, 0u64);
+        let mut conflicts = Vec::new();
         for (rel, chunk) in segments {
             let len = u64::try_from(chunk.len()).unwrap_or(0);
             if rel > end {
-                data.push(0);
+                errors.insert("tcp-gap");
+                skipped += rel - end;
                 data.extend_from_slice(&chunk);
                 end = rel + len;
-            } else if rel + len > end {
-                let skip = usize::try_from(end - rel).unwrap_or(0);
-                data.extend_from_slice(chunk.get(skip..).unwrap_or(&[]));
+                continue;
+            }
+            let overlap = usize::try_from(end - rel).unwrap_or(0).min(chunk.len());
+            let start = usize::try_from(rel - skipped).unwrap_or(0);
+            let have = data.get(start..start + overlap);
+            if have != chunk.get(..overlap) {
+                errors.insert("tcp-overlap-conflict");
+                conflicts.push(chunk.clone());
+            }
+            if rel + len > end {
+                data.extend_from_slice(chunk.get(overlap..).unwrap_or(&[]));
                 end = rel + len;
             }
         }
-        Stream {
-            sport: self.sport,
-            dport: self.dport,
-            data,
-        }
+        (
+            Stream {
+                sport: self.sport,
+                dport: self.dport,
+                data,
+                conflicts,
+            },
+            errors,
+        )
     }
+}
+
+/// One DNS question seen on the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireQuestion {
+    /// The client's port.
+    pub client_port: u16,
+    /// The DNS transaction id.
+    pub id: u16,
+    /// `udp` or `tcp`.
+    pub proto: &'static str,
+    /// The dotted lowercase name.
+    pub name: String,
+    /// The query type number.
+    pub qtype: u16,
+}
+
+/// A client packet sent to the recorder or the resolver on the loopback interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoClient {
+    /// Position in the capture file.
+    pub index: usize,
+    /// The client's source port.
+    pub sport: u16,
+    /// True when sent to the recorder (port 8080); false for the resolver (5353).
+    pub to_recorder: bool,
+    /// For a UDP DNS query: the names it asks about.
+    pub names: Vec<String>,
 }
 
 /// What the packet capture says happened on the loopback and black-hole interfaces.
@@ -368,36 +482,49 @@ impl Building {
 pub struct Wire {
     /// Client-to-recorder TCP streams (destination port 8080).
     pub recorder_streams: Vec<Stream>,
+    /// Recorder-to-client TCP streams (source port 8080); `dport` is the client's port.
+    pub server_streams: Vec<Stream>,
     /// Raw DNS payloads sent to the resolver (UDP datagrams and TCP messages).
     pub dns_payloads: Vec<Vec<u8>>,
-    /// Decoded DNS queries sent to the resolver: (client port, id, names).
-    pub dns_queries: Vec<(u16, u16, Vec<String>)>,
-    /// Queries that also got a response (distinct client port and id).
+    /// Every DNS question sent to the resolver.
+    pub dns_questions: Vec<WireQuestion>,
+    /// Client packets to the recorder or resolver, in capture order.
+    pub lo_client: Vec<LoClient>,
+    /// Queries that also got a response (distinct client port and id). Details only.
     pub answered_dns: usize,
     /// Completed handshakes: distinct SYN-ACKs from the recorder.
     pub handshakes: usize,
     /// Every packet that went out on the black-hole interface.
     pub sink: Vec<Packet>,
-    /// Loopback packets that were neither client-to-sink nor sink replies.
+    /// Loopback packets that were neither to nor from the recorder or resolver.
     pub ignored_loopback: usize,
+    /// Records of another packet type than the one read on their interface.
+    pub ignored_types: usize,
     /// Problem codes.
     pub errors: BTreeSet<&'static str>,
 }
 
-fn tcp_messages(stream: &[u8]) -> Vec<&[u8]> {
+fn tcp_messages(stream: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
     let mut out = Vec::new();
     let mut rest = stream;
-    while let Some(len) = be16(rest, 0) {
-        let Some(body) = rest.get(2..2 + usize::from(len)) else {
-            break;
-        };
+    while !rest.is_empty() {
+        let len = usize::from(be16(rest, 0).ok_or("dns-framing")?);
+        let body = rest.get(2..2 + len).ok_or("dns-framing")?;
         out.push(body);
-        rest = rest.get(2 + usize::from(len)..).unwrap_or(&[]);
+        rest = rest.get(2 + len..).unwrap_or(&[]);
     }
-    out
+    Ok(out)
+}
+
+fn done(building: Building, wire: &mut Wire) -> Stream {
+    let (stream, errors) = building.finish();
+    wire.errors.extend(errors);
+    stream
 }
 
 /// Sorts packets by interface and rebuilds streams and DNS exchanges.
+/// Loopback is read from host-type records (libpcap hides the outgoing copy
+/// there); the black hole from outgoing ones.
 pub fn analyze(packets: &[Packet], links: &BTreeMap<u32, String>) -> Wire {
     let mut wire = Wire::default();
     let mut building: BTreeMap<(IpAddr, u16, IpAddr, u16), Building> = BTreeMap::new();
@@ -411,15 +538,19 @@ pub fn analyze(packets: &[Packet], links: &BTreeMap<u32, String>) -> Wire {
 
     for packet in packets {
         match links.get(&packet.ifindex).map(String::as_str) {
-            Some("gdsink0") => wire.sink.push(packet.clone()),
-            Some("lo") => {}
+            Some("gdsink0") if packet.pkt_type == OUTGOING => {
+                wire.sink.push(packet.clone());
+                continue;
+            }
+            Some("lo") if packet.pkt_type == HOST => {}
+            Some("gdsink0" | "lo") => {
+                wire.ignored_types += 1;
+                continue;
+            }
             _ => {
                 wire.errors.insert("unknown-interface");
                 continue;
             }
-        }
-        if links.get(&packet.ifindex).map(String::as_str) != Some("lo") {
-            continue;
         }
         let (Some((src, dst)), l4) = (packet.ip, &packet.l4) else {
             wire.ignored_loopback += 1;
@@ -433,11 +564,19 @@ pub fn analyze(packets: &[Packet], links: &BTreeMap<u32, String>) -> Wire {
                 flags,
                 payload,
             } if is_sink_port(*sport) || is_sink_port(*dport) => {
+                if is_sink_port(*dport) {
+                    wire.lo_client.push(LoClient {
+                        index: packet.index,
+                        sport: *sport,
+                        to_recorder: *dport == RECORDER_PORT,
+                        names: Vec::new(),
+                    });
+                }
                 let key = (src, *sport, dst, *dport);
                 let syn = flags & 0x02 != 0;
                 if syn {
                     if let Some(old) = building.remove(&key) {
-                        finished.push(old.finish());
+                        finished.push(done(old, &mut wire));
                     }
                     building.insert(
                         key,
@@ -466,6 +605,15 @@ pub fn analyze(packets: &[Packet], links: &BTreeMap<u32, String>) -> Wire {
                 dport,
                 payload,
             } if *dport == RESOLVER_PORT => {
+                let names = parse_dns(payload)
+                    .map(|m| m.questions.into_iter().map(|q| q.0).collect())
+                    .unwrap_or_default();
+                wire.lo_client.push(LoClient {
+                    index: packet.index,
+                    sport: *sport,
+                    to_recorder: false,
+                    names,
+                });
                 udp_dns.push((*sport, payload.clone()));
             }
             L4::Udp {
@@ -483,36 +631,52 @@ pub fn analyze(packets: &[Packet], links: &BTreeMap<u32, String>) -> Wire {
             _ => wire.ignored_loopback += 1,
         }
     }
-    finished.extend(building.into_values().map(Building::finish));
     wire.handshakes = syn_acks.len();
+    for b in building.into_values() {
+        let stream = done(b, &mut wire);
+        finished.push(stream);
+    }
 
     for stream in finished {
         if stream.dport == RECORDER_PORT {
             wire.recorder_streams.push(stream);
+        } else if stream.sport == RECORDER_PORT {
+            wire.server_streams.push(stream);
         } else if stream.dport == RESOLVER_PORT {
             dns_streams.push((true, stream));
         } else if stream.sport == RESOLVER_PORT {
             dns_streams.push((false, stream));
         }
     }
-    let mut note = |wire: &mut Wire, client: u16, payload: &[u8], from_client: bool| match parse_dns(
-        payload,
-    ) {
-        Ok(m) if from_client && !m.response => {
-            queries.insert((client, m.id));
-            wire.dns_queries.push((client, m.id, m.names));
+    let mut note = |wire: &mut Wire, client: u16, payload: &[u8], from_client: bool, proto| {
+        if parse_dns(payload).is_ok_and(|m| m.unexpected_section) {
+            wire.errors.insert("dns-unexpected-section");
         }
-        Ok(m) if !from_client && m.response => {
-            responses.insert((client, m.id));
-        }
-        Ok(_) => {}
-        Err(code) => {
-            wire.errors.insert(code);
+        match parse_dns(payload) {
+            Ok(m) if from_client && !m.response => {
+                queries.insert((client, m.id));
+                for (name, qtype) in m.questions {
+                    wire.dns_questions.push(WireQuestion {
+                        client_port: client,
+                        id: m.id,
+                        proto,
+                        name,
+                        qtype,
+                    });
+                }
+            }
+            Ok(m) if !from_client && m.response => {
+                responses.insert((client, m.id));
+            }
+            Ok(_) => {}
+            Err(code) => {
+                wire.errors.insert(code);
+            }
         }
     };
     for (client, payload) in &udp_dns {
         wire.dns_payloads.push(payload.clone());
-        note(&mut wire, *client, payload, true);
+        note(&mut wire, *client, payload, true, "udp");
     }
     for (from_client, stream) in &dns_streams {
         let client = if *from_client {
@@ -520,15 +684,28 @@ pub fn analyze(packets: &[Packet], links: &BTreeMap<u32, String>) -> Wire {
         } else {
             stream.dport
         };
-        for message in tcp_messages(&stream.data) {
-            if *from_client {
-                wire.dns_payloads.push(message.to_vec());
+        match tcp_messages(&stream.data) {
+            Ok(messages) => {
+                for message in messages {
+                    if *from_client {
+                        wire.dns_payloads.push(message.to_vec());
+                    }
+                    note(&mut wire, client, message, *from_client, "tcp");
+                }
             }
-            note(&mut wire, client, message, *from_client);
+            Err(code) => {
+                wire.errors.insert(code);
+            }
+        }
+        if *from_client {
+            wire.dns_payloads.push(stream.data.clone());
+            wire.dns_payloads.extend(stream.conflicts.iter().cloned());
         }
     }
     wire.answered_dns = queries.intersection(&responses).count();
     wire.recorder_streams
         .sort_by(|a, b| (a.sport, &a.data).cmp(&(b.sport, &b.data)));
+    wire.server_streams
+        .sort_by(|a, b| (a.dport, &a.data).cmp(&(b.dport, &b.data)));
     wire
 }

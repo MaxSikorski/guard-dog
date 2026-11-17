@@ -8,8 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
 /// One HTTP request the recorder answered with a 503.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpEvent {
+    /// The request method, raw bytes.
+    pub method: Vec<u8>,
     /// `http` or `https`.
     pub scheme: String,
     /// Lowercased host.
@@ -37,7 +39,7 @@ pub struct Conn {
     pub dst_port: u16,
     /// The TLS handshake, if one was seen: (server name, completed).
     pub tls: Option<(Option<Vec<u8>>, bool)>,
-    /// HTTP requests, sorted.
+    /// HTTP requests, in the order they were logged.
     pub http: Vec<HttpEvent>,
     /// Raw client-to-server data.
     pub tcp: Vec<Vec<u8>>,
@@ -101,6 +103,7 @@ enum Event {
     },
     Tcp(Vec<u8>),
     Marker,
+    End,
 }
 
 fn parse_event(obj: &Map<String, Value>, name: &str) -> Result<Event, Fail> {
@@ -148,7 +151,6 @@ fn parse_event(obj: &Map<String, Value>, name: &str) -> Result<Event, Fail> {
                 .and_then(Value::as_str)
                 .filter(|s| matches!(*s, "http" | "https"))
                 .ok_or("bad-line")?;
-            b64(obj, "method_b64")?;
             let mut headers = Vec::new();
             for pair in obj
                 .get("headers")
@@ -164,6 +166,7 @@ fn parse_event(obj: &Map<String, Value>, name: &str) -> Result<Event, Fail> {
                 headers.push((decode(pair.first())?, decode(pair.get(1))?));
             }
             let event = HttpEvent {
+                method: b64(obj, "method_b64")?,
                 scheme: scheme.to_string(),
                 host: String::from_utf8_lossy(&b64(obj, "host_b64")?).to_ascii_lowercase(),
                 port: port(obj, "port")?,
@@ -180,12 +183,30 @@ fn parse_event(obj: &Map<String, Value>, name: &str) -> Result<Event, Fail> {
             exact_keys(obj, &["data_b64"])?;
             Ok(Event::Tcp(b64(obj, "data_b64")?))
         }
+        "end" => {
+            exact_keys(obj, &[])?;
+            Ok(Event::End)
+        }
         "upstream_blocked" | "close" => {
             exact_keys(obj, &[])?;
             Ok(Event::Marker)
         }
         _ => Err("unknown-event"),
     }
+}
+
+/// Whether a request says its body is compressed or otherwise encoded.
+fn encoded(event: &HttpEvent) -> bool {
+    event.headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case(b"content-encoding")
+            && !matches!(
+                String::from_utf8_lossy(value)
+                    .trim()
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "" | "identity"
+            )
+    })
 }
 
 fn header_ok(line: &str) -> bool {
@@ -207,7 +228,11 @@ pub fn parse(bytes: &[u8]) -> MitmLog {
         log.errors.insert("bad-header");
     }
     let mut events: Vec<(u64, Event)> = Vec::new();
+    let mut end_seen = false;
     for line in lines {
+        if end_seen {
+            log.errors.insert("no-end");
+        }
         let result = serde_json::from_str::<Value>(line)
             .ok()
             .and_then(|v| match v {
@@ -216,20 +241,24 @@ pub fn parse(bytes: &[u8]) -> MitmLog {
             })
             .ok_or("bad-line")
             .and_then(|obj| {
+                let name = obj.get("event").and_then(Value::as_str).ok_or("bad-line")?;
                 let conn = obj
                     .get("conn")
                     .and_then(Value::as_u64)
-                    .filter(|c| *c >= 1)
+                    .filter(|c| (*c >= 1) != (name == "end"))
                     .ok_or("bad-line")?;
-                let name = obj.get("event").and_then(Value::as_str).ok_or("bad-line")?;
                 Ok((conn, parse_event(&obj, name)?))
             });
         match result {
+            Ok((_, Event::End)) => end_seen = true,
             Ok(pair) => events.push(pair),
             Err(code) => {
                 log.errors.insert(code);
             }
         }
+    }
+    if !end_seen {
+        log.errors.insert("no-end");
     }
     for (id, event) in &events {
         if let Event::Connect {
@@ -256,7 +285,7 @@ pub fn parse(bytes: &[u8]) -> MitmLog {
             continue;
         };
         match event {
-            Event::Connect { .. } | Event::Marker => {}
+            Event::Connect { .. } | Event::Marker | Event::End => {}
             Event::Tls { sni, ok } => {
                 if conn.tls.replace((sni, ok)).is_some() {
                     log.errors.insert("bad-line");
@@ -266,14 +295,13 @@ pub fn parse(bytes: &[u8]) -> MitmLog {
                 if truncated {
                     log.errors.insert("body-truncated");
                 }
+                if encoded(&event) {
+                    log.errors.insert("undecoded-content-encoding");
+                }
                 conn.http.push(event);
             }
             Event::Tcp(data) => conn.tcp.push(data),
         }
-    }
-    for conn in log.conns.values_mut() {
-        conn.http.sort();
-        conn.tcp.sort();
     }
     log
 }

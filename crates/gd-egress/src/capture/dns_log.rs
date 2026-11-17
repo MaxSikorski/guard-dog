@@ -10,6 +10,8 @@ pub struct DnsRecord {
     pub qtype: String,
     /// The name, decoded, lowercase, without the trailing dot.
     pub name: String,
+    /// `udp` or `tcp`.
+    pub proto: String,
 }
 
 /// The parsed log.
@@ -66,9 +68,10 @@ pub fn parse(bytes: &[u8]) -> DnsLog {
         } else if let Some(rest) = line.strip_prefix("[INFO] GDQ ") {
             let fields: Vec<&str> = rest.split(' ').collect();
             match fields.as_slice() {
-                [qtype, _class, name, _proto, _rcode] => log.records.push(DnsRecord {
+                [qtype, _class, name, proto, _rcode] => log.records.push(DnsRecord {
                     qtype: (*qtype).to_string(),
                     name: decode_name(name),
+                    proto: (*proto).to_ascii_lowercase(),
                 }),
                 _ => {
                     log.errors.insert("bad-line");
