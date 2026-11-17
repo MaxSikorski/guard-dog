@@ -180,7 +180,7 @@ fn semver_orders_the_published_precedence_chain() {
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .collect();
-    assert_eq!(chain.len(), 8, "the spec's example chain has eight entries");
+    assert!(chain.len() == 8, "the reference chain has eight entries");
     for i in 0..chain.len() {
         for j in (i + 1)..chain.len() {
             for (name, ord) in [
@@ -972,10 +972,10 @@ fn every_corpus_endpoint_of_core_lnd_lit_and_tapd_parses() {
     }
     // Counted so a corpus change is noticed here (CVE-2026-117346 has two
     // Core entries).
-    assert_eq!(core_n, 31, "Core events");
-    assert_eq!(lnd_n, 12, "LND events");
-    assert_eq!(lit_n, 2, "LiT events");
-    assert_eq!(tapd_n, 2, "tapd events");
+    assert!(core_n == 31, "Core event count changed");
+    assert!(lnd_n == 12, "LND event count changed");
+    assert!(lit_n == 2, "LiT event count changed");
+    assert!(tapd_n == 2, "tapd event count changed");
 }
 
 /// What a catalog file's `[version]` table says, read with a real TOML parser:
@@ -1050,8 +1050,14 @@ fn lnd_catalog_check(text: &str) -> Result<usize, String> {
 fn catalog_names_and_examples_parse_in_their_schemes() {
     let core_toml = fs::read_to_string(root().join("catalog/bitcoin-core.toml")).unwrap();
     let core_cat = catalog_version(&core_toml, "bitcoin-core").unwrap();
-    assert_eq!(core_cat.scheme, "bitcoin-core", "Core catalog scheme");
-    assert_eq!(core_cat.examples.len(), 1, "Core catalog example count");
+    assert!(
+        core_cat.scheme == "bitcoin-core",
+        "Core catalog scheme is not bitcoin-core"
+    );
+    assert!(
+        core_cat.examples.len() == 1,
+        "Core catalog example count changed"
+    );
     assert!(
         core_cat.examples.iter().any(|(v, _)| v == "32.1"),
         "Core catalog lists the 32.1 example"
@@ -1061,13 +1067,18 @@ fn catalog_names_and_examples_parse_in_their_schemes() {
     }
     let lnd_toml = fs::read_to_string(root().join("catalog/lnd.toml")).unwrap();
     let lnd_cat = catalog_version(&lnd_toml, "lnd").unwrap();
-    assert_eq!(lnd_cat.scheme, "semver-beta", "LND catalog scheme");
-    assert_eq!(
-        lnd_cat.examples.len(),
-        LND_EXAMPLES,
-        "LND catalog example count"
+    assert!(
+        lnd_cat.scheme == "semver-beta",
+        "LND catalog scheme is not semver-beta"
     );
-    assert_eq!(lnd_catalog_check(&lnd_toml), Ok(LND_EXAMPLES));
+    assert!(
+        lnd_cat.examples.len() == LND_EXAMPLES,
+        "LND catalog example count changed"
+    );
+    assert!(
+        lnd_catalog_check(&lnd_toml).is_ok_and(|n| n == LND_EXAMPLES),
+        "LND catalog check failed"
+    );
 }
 
 #[test]
@@ -1083,8 +1094,8 @@ fn real_toml_parsing_catches_a_quoted_key_multiline_raw_and_a_commented_decoy() 
     // raw is not a version.
     let text = "[version]\nscheme = \"semver-beta\"\n\n[[version.examples]]\nversion = \"0.21.6-beta\"\nraw = \"0.21.6-beta\"\n# note \"\"\"\n[[version.examples]]\nversion = \"0.21.6-beta\"\nraw = \"invalid\"\n";
     let cat = catalog_version(text, "lnd").unwrap();
-    assert_eq!(cat.examples.len(), 2, "the second example is seen");
-    assert_eq!(cat.examples[1].1, "invalid");
+    assert!(cat.examples.len() == 2, "the second example is seen");
+    assert!(cat.examples[1].1 == "invalid", "the second raw is read");
     assert!(lnd_catalog_check(text).is_err(), "invalid raw refused");
 }
 
@@ -1095,7 +1106,9 @@ struct Pair {
 }
 
 fn fixture_table(text: &str) -> toml::Table {
-    text.parse::<toml::Table>().unwrap()
+    text.parse::<toml::Table>()
+        .map_err(|_| ())
+        .unwrap_or_else(|()| panic!("expected-matches.toml is not valid TOML"))
 }
 
 fn str_of(t: &toml::Table, key: &str, what: &str) -> String {
@@ -1179,7 +1192,7 @@ fn every_fixture_version_of_core_and_lnd_parses() {
             _ => {}
         }
     }
-    assert_eq!(seen, 4, "two setups, two products each");
+    assert!(seen == 4, "fixture service count changed");
 }
 
 /// The two reviewed platform notes of CVE-2026-117346's Core entries.
@@ -1253,25 +1266,37 @@ fn an_unreviewed_platform_note_on_a_core_entry_is_rejected() {
         .into_iter()
         .find(|(n, _, _)| n == "CVE-2026-117346.json")
         .unwrap();
-    assert_eq!(applicable_entries_checked(&adv, CORE_PKG), Ok(vec![0]));
+    assert!(
+        applicable_entries_checked(&adv, CORE_PKG) == Ok(vec![0]),
+        "the corpus record keeps only entry 0"
+    );
     let mut changed = raw.clone();
     changed["affected"][1]["database_specific"]["platform"] = json!("32-bit or 64-bit systems");
     let bytes = serde_json::to_vec(&changed).unwrap();
     let adv = parse_advisory_from(&bytes, Source::GuardDogCorpus).unwrap();
-    assert_eq!(applicable_entries_checked(&adv, CORE_PKG), Err(1));
+    assert!(
+        applicable_entries_checked(&adv, CORE_PKG) == Err(1),
+        "unreviewed note on entry 1 is rejected"
+    );
     // A platform note of 4,097 bytes is unreadable (over the note size), not
     // "no note": entry 0 is rejected.
     let mut long = raw.clone();
     long["affected"][0]["database_specific"]["platform"] = json!("x".repeat(4097));
     let bytes = serde_json::to_vec(&long).unwrap();
     let adv = parse_advisory_from(&bytes, Source::GuardDogCorpus).unwrap();
-    assert_eq!(applicable_entries_checked(&adv, CORE_PKG), Err(0));
+    assert!(
+        applicable_entries_checked(&adv, CORE_PKG) == Err(0),
+        "unreadable or unreviewed note on entry 0 is rejected"
+    );
     // A `database_specific` that is not an object is unreadable, not "no note".
     let mut text = raw.clone();
     text["affected"][0]["database_specific"] = json!("64-bit systems only");
     let bytes = serde_json::to_vec(&text).unwrap();
     let adv = parse_advisory_from(&bytes, Source::GuardDogCorpus).unwrap();
-    assert_eq!(applicable_entries_checked(&adv, CORE_PKG), Err(0));
+    assert!(
+        applicable_entries_checked(&adv, CORE_PKG) == Err(0),
+        "unreadable or unreviewed note on entry 0 is rejected"
+    );
     // 256 unknown top-level keys use up the gap list, so the unreadable
     // platform on entry 1 is not recorded; the truncation mark rejects it all.
     let mut many = raw.clone();
@@ -1291,7 +1316,10 @@ fn an_unreviewed_platform_note_on_a_core_entry_is_rejected() {
     model["affected"][0]["database_specific"]["model"] = json!("a hardware model");
     let bytes = serde_json::to_vec(&model).unwrap();
     let adv = parse_advisory_from(&bytes, Source::GuardDogCorpus).unwrap();
-    assert_eq!(applicable_entries_checked(&adv, CORE_PKG), Err(0));
+    assert!(
+        applicable_entries_checked(&adv, CORE_PKG) == Err(0),
+        "unreadable or unreviewed note on entry 0 is rejected"
+    );
 }
 
 #[test]
@@ -1325,7 +1353,7 @@ fn the_same_package_spelled_two_ways_is_one_package_for_both_helpers() {
         .iter()
         .map(|&i| evaluate_entry(&c, &adv, i, Some("32.1")))
         .collect();
-    assert_eq!(union(&rs), "in-range");
+    assert!(union(&rs) == "in-range", "Core 32.1 is in range");
 }
 
 fn subresult(e: &VersionEvidence) -> &'static str {
@@ -1411,25 +1439,29 @@ fn fixture_pairs_give_the_expected_version_subresult() {
                                 expected == "out-of-range",
                                 "the key's value, expectation #{xi}"
                             );
-                            assert_eq!(union(&srs), "unknown", "expectation #{xi}");
+                            assert!(union(&srs) == "unknown", "expectation #{xi}");
                             let unknowns: Vec<_> = srs
                                 .iter()
                                 .enumerate()
                                 .filter(|(_, r)| subresult(r) == "unknown")
                                 .collect();
-                            assert_eq!(unknowns.len(), 1, "expectation #{xi}");
+                            assert!(unknowns.len() == 1, "expectation #{xi}");
                             let (ui, u) = unknowns[0];
-                            assert_eq!(
-                                idx[ui], 0,
+                            assert!(
+                                idx[ui] == 0,
                                 "expectation #{xi}: the unknown entry is entry 0"
                             );
-                            assert_eq!(reason(u), UnknownReason::CandidateIsAnInterval);
+                            assert!(
+                                reason(u) == UnknownReason::CandidateIsAnInterval,
+                                "expectation #{xi}: reason"
+                            );
                             let VersionEvidence::Unknown { question, .. } = u else {
                                 unreachable!()
                             };
-                            assert_eq!(
-                                question,
-                                "What full version does bitcoind report, including any rcN?"
+                            assert!(
+                                question
+                                    == "What full version does bitcoind report, including any rcN?",
+                                "expectation #{xi}: question"
                             );
                         } else {
                             assert!(union(&srs) == expected, "expectation #{xi} as subversion");
@@ -1462,16 +1494,23 @@ fn fixture_pairs_give_the_expected_version_subresult() {
             );
         }
     }
-    assert_eq!(subversion_unknown, SUBVERSION_UNKNOWN.len());
+    assert!(
+        subversion_unknown == SUBVERSION_UNKNOWN.len(),
+        "subversion-unknown pair count"
+    );
     // Core: 8 advisories x 2 setups; LND: 5 advisories x 2 setups.
-    assert_eq!(
+    assert!(
         checked
             .iter()
             .filter(|c| c.contains("/bitcoin-core/"))
-            .count(),
-        16
+            .count()
+            == 16,
+        "Core checked pair count"
     );
-    assert_eq!(checked.iter().filter(|c| c.contains("/lnd/")).count(), 10);
+    assert!(
+        checked.iter().filter(|c| c.contains("/lnd/")).count() == 10,
+        "LND checked pair count"
+    );
 }
 
 // ------------------------------------------------------------- properties
