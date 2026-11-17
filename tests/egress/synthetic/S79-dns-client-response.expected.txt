@@ -1,0 +1,5 @@
+Judge C (egress capture): FAIL
+control: dns ok, https ok, wire ok, blocked-path ok
+destinations: 1 unlisted, 0 allowlisted
+F1 unlisted-destination dns qr.example.net
+F5 capture-unreadable pcap: dns-client-response

@@ -7,6 +7,7 @@
 //! Where things live:
 //! - [`prng`], [`encode`], [`bip39`]: the seeded generator and the encoders the canaries need.
 //! - [`canary`] and [`setup`]: the eleven canary classes, and the file tree that plants them.
+//! - [`decode`]: unpacking gzip, deflate and brotli request bodies before they are scanned.
 //! - [`needle`]: finding a canary in any encoding, and redacting it for printing.
 //! - [`allowlist`]: the `allowlist.toml` reader.
 //! - [`capture`] and [`rules`]: readers for the three capture sources and the live firewall rules.
@@ -16,6 +17,7 @@ pub mod allowlist;
 pub mod bip39;
 pub mod canary;
 pub mod capture;
+pub mod decode;
 pub mod encode;
 pub mod needle;
 pub mod prng;
