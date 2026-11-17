@@ -38,6 +38,8 @@ const RESULTS: [&str; 3] = ["affected", "not-affected", "possibly-affected"];
 const VERSION_STATES: [&str; 4] = ["in-range", "out-of-range", "unknown", "not-applicable"];
 const CONDITION_STATES: [&str; 3] = ["met", "not-met", "unknown"];
 const ARCHES: [&str; 2] = ["32-bit", "64-bit"];
+/// The closed chain names: the same five as the fact model's `Chain` enum.
+const CHAINS: [&str; 5] = ["main", "testnet3", "testnet4", "signet", "regtest"];
 const TOP_KEYS: [&str; 4] = ["expect", "format", "product", "setup"];
 const PRODUCT_KEYS: [&str; 3] = ["aliases", "id", "packages"];
 const SETUP_KEYS: [&str; 13] = [
@@ -496,6 +498,18 @@ fn check(
             errors.push(format!("{what}: listed twice"));
         }
     }
+    for cond in corpus.conditions.iter().filter(|c| c.name == "chain") {
+        match &cond.any_of {
+            Some(any) if !any.is_empty() => {
+                for v in any.iter().filter(|v| !CHAINS.contains(&v.as_str())) {
+                    errors.push(format!(
+                        "a chain condition in the corpus has `{v}`, not one of {CHAINS:?}"
+                    ));
+                }
+            }
+            _ => errors.push("a chain condition in the corpus needs a non-empty any_of".to_owned()),
+        }
+    }
     for service in &corpus.condition_services {
         if !names.contains(service) {
             errors.push(format!(
@@ -521,6 +535,9 @@ fn check(
             text(s, key, &what, &mut errors);
         }
         let chain = text(s, "chain", &what, &mut errors).to_owned();
+        if !CHAINS.contains(&chain.as_str()) {
+            errors.push(format!("{what}: chain `{chain}` is not one of {CHAINS:?}"));
+        }
         let storage = text(s, "block_storage", &what, &mut errors).to_owned();
         let arch = text(s, "arch", &what, &mut errors).to_owned();
         if !ARCHES.contains(&arch.as_str()) {
@@ -1112,6 +1129,23 @@ fn anchor_setup(file: &str, at: usize) -> String {
 }
 
 #[test]
+fn an_unknown_chain_name_in_the_corpus_is_refused() {
+    let mut c = corpus();
+    let cond = c
+        .conditions
+        .iter_mut()
+        .find(|c| c.name == "chain")
+        .expect("the corpus has a chain condition");
+    cond.any_of.as_mut().unwrap().push("testnet".to_owned());
+    let errs = check(&read(FILE), &c, &lab_versions()).expect_err("a typo'd chain was accepted");
+    assert!(
+        errs.iter().any(|e| e.contains("`testnet`, not one of")),
+        "got:\n  {}",
+        errs.join("\n  ")
+    );
+}
+
+#[test]
 fn every_broken_file_is_refused() {
     let good = read(FILE);
     let c = corpus();
@@ -1334,6 +1368,13 @@ fn every_broken_file_is_refused() {
             "name = \"option_disabled\"\nservice = \"lnd\"\nsubject = \"nobootstrap\"\nvalue = \"true\"\nevidence = \"lab/compose.yml",
             "name = \"option_disabled\"\nservice = \"lnd\"\nsubject = \"other\"\nvalue = \"true\"\nevidence = \"lab/compose.yml",
             "required condition option_disabled",
+        ),
+        (
+            "a setup on a chain with an unknown name",
+            "lab-old-synthetic",
+            "chain = \"regtest\"",
+            "chain = \"mainnet\"",
+            "chain `mainnet` is not one of",
         ),
         (
             "a condition label that contradicts the chain (not-met chain, met label)",
