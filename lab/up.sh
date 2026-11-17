@@ -15,8 +15,9 @@ export LC_ALL=C
 
 LAB_DIR="$(cd "$(dirname "$0")" && pwd)"
 DATA="$LAB_DIR/.data"
-LOCK="$LAB_DIR/.lock"
 PROJECT=gd-lab
+# shellcheck source=lab/lib.sh
+. "$LAB_DIR/lib.sh"
 MAX_SECONDS="${GD_LAB_MAX_SECONDS:-300}"
 CHANNEL_SATS=1000000
 
@@ -35,11 +36,11 @@ cleanup() {
   trap - EXIT
   if [ "$STARTED" = 1 ] && [ "$CHAINS_OK" = 0 ]; then
     echo "lab/up.sh: removing the lab: no node may stay up before all three chain checks pass" >&2
-    GD_LAB_LOCK_HELD=1 "$LAB_DIR/down.sh" >/dev/null 2>&1 || echo "lab/up.sh: lab/down.sh failed; run it by hand" >&2
+    lab_teardown >/dev/null 2>&1 || echo "lab/up.sh: the lab was not fully removed; run lab/down.sh" >&2
   elif [ "$DATA_MADE" = 1 ] && [ "$STARTED" = 0 ]; then
     rm -rf "$DATA"
   fi
-  if [ "$LOCK_OWNED" = 1 ]; then rmdir "$LOCK" 2>/dev/null || true; fi
+  if [ "$LOCK_OWNED" = 1 ]; then lab_unlock; fi
   exit "$rc"
 }
 trap cleanup EXIT
@@ -82,13 +83,13 @@ hexrand() {
 # A credential made here: a canary prefix (so any leak is easy to grep for) plus 32 random bytes.
 secret() {
   local h
-  h="$(hexrand 32)"
+  h="$(hexrand 32)" || return $?
   printf 'gdlabcanary-%s' "$h"
 }
 # Bitcoin Core's rpcauth line, the same HMAC-SHA256 as share/rpcauth/rpcauth.py.
 rpcauth() {
   local user=$1 pw=$2 salt digest re='^[0-9a-f]{64}$'
-  salt="$(hexrand 16)"
+  salt="$(hexrand 16)" || return $?
   digest="$(printf '%s' "$pw" | openssl dgst -sha256 -hmac "$salt" | awk '{print $NF}')" || fail "openssl could not hash a password"
   [[ $digest =~ $re ]] || fail "openssl gave an unexpected password hash"
   printf '%s:%s$%s' "$user" "$salt" "$digest"
@@ -97,7 +98,7 @@ rpcauth() {
 T0=$(date +%s)
 
 # 1. One lab at a time: an atomic lock (shared with down.sh), then the preconditions.
-mkdir "$LOCK" 2>/dev/null || fail "another lab/up.sh or lab/down.sh is running (or died; if none is, remove lab/.lock)"
+lab_lock || fail "another lab/up.sh or lab/down.sh is running"
 LOCK_OWNED=1
 for tool in docker jq openssl; do command -v "$tool" >/dev/null || fail "$tool is not installed"; done
 docker compose version >/dev/null 2>&1 || fail "docker compose (v2) is not available"
@@ -110,11 +111,16 @@ umask 077
 mkdir -p "$DATA/creds"
 DATA_MADE=1
 chmod 700 "$DATA" "$DATA/creds"
-RPC_PASSWORD="$(secret)"
-WATCH_PASSWORD="$(secret)"
-MINT_KEY="$(secret)"
-RPCAUTH_LINE="$(rpcauth gdlab "$RPC_PASSWORD")"
-WATCH_RPCAUTH_LINE="$(rpcauth gdwatch "$WATCH_PASSWORD")"
+RPC_PASSWORD="$(secret)" || fail "could not make a password"
+WATCH_PASSWORD="$(secret)" || fail "could not make a password"
+MINT_KEY="$(secret)" || fail "could not make a mint key"
+RPCAUTH_LINE="$(rpcauth gdlab "$RPC_PASSWORD")" || fail "could not make an rpcauth line"
+WATCH_RPCAUTH_LINE="$(rpcauth gdwatch "$WATCH_PASSWORD")" || fail "could not make an rpcauth line"
+# Belt and braces: every credential has exactly the expected shape.
+re_secret='^gdlabcanary-[0-9a-f]{64}$'
+re_auth='^gd(lab|watch):[0-9a-f]{32}[$][0-9a-f]{64}$'
+for v in "$RPC_PASSWORD" "$WATCH_PASSWORD" "$MINT_KEY"; do [[ $v =~ $re_secret ]] || fail "a generated credential has the wrong shape"; done
+for v in "$RPCAUTH_LINE" "$WATCH_RPCAUTH_LINE"; do [[ $v =~ $re_auth ]] || fail "a generated rpcauth line has the wrong shape"; done
 # Single quotes: compose reads unquoted and double-quoted values as templates, and the '$' in rpcauth would vanish.
 {
   printf "GD_LAB_RPC_PASSWORD='%s'\n" "$RPC_PASSWORD"

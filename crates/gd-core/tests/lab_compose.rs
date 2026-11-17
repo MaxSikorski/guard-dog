@@ -4,7 +4,7 @@
 //! Deterministic by design: no Docker, no network, no clock, nothing random.
 //! `check()` reads `lab/compose.yml` the way Docker does (the file uses no YAML
 //! anchors) and returns every problem it finds, in a stable order. The checker
-//! is itself tested: `every_unsafe_change_is_caught` makes 37 named unsafe
+//! is itself tested: `every_unsafe_change_is_caught` makes 48 named unsafe
 //! edits and requires each one to be refused with its own problem code.
 
 // Test-only crate: its helper functions (not just `#[test]` ones) read files and
@@ -240,9 +240,76 @@ fn mem_mib(s: &str) -> Option<u64> {
     }
 }
 
+/// A tmpfs `size=` value (`256m`, `1g`, `512k` or plain bytes) in whole MiB, rounded up.
+fn size_mib(s: &str) -> Option<u64> {
+    let last = s.chars().last()?;
+    let (digits, unit) = if last.is_ascii_digit() {
+        (s, 1)
+    } else {
+        let unit = match last {
+            'k' => 1024,
+            'm' => 1024 * 1024,
+            'g' => 1024 * 1024 * 1024,
+            _ => return None,
+        };
+        (&s[..s.len() - 1], unit)
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let bytes = digits.parse::<u64>().ok()?.checked_mul(unit)?;
+    Some(bytes.div_ceil(1024 * 1024))
+}
+
 /// A value for a secret-looking name must be a `${GD_LAB_...:?...}` reference.
+/// The generated values `lab/up.sh` puts in `lab/.data/lab.env` that the
+/// compose file may refer to.
+const ALLOWED_REFERENCES: [&str; 4] = [
+    "GD_LAB_RPC_PASSWORD",
+    "GD_LAB_RPCAUTH",
+    "GD_LAB_WATCH_RPCAUTH",
+    "GD_LAB_MINT_KEY",
+];
+
+/// Whether every `$` in `s` starts a reference of exactly the form
+/// `${NAME:?message}`, with an allowed NAME. That refuses `$VAR`, `$$`,
+/// `${NAME}` and `${NAME:-default}`, which could resolve to a literal value.
+fn interpolations_ok(s: &str) -> bool {
+    let mut rest = s;
+    while let Some(i) = rest.find('$') {
+        let Some(body) = rest[i..].strip_prefix("${") else {
+            return false;
+        };
+        let Some(end) = body.find('}') else {
+            return false;
+        };
+        let Some((name, message)) = body[..end].split_once(":?") else {
+            return false;
+        };
+        if !ALLOWED_REFERENCES.contains(&name) || message.is_empty() || message.contains('$') {
+            return false;
+        }
+        rest = &body[end + 1..];
+    }
+    true
+}
+
+/// A value that is exactly one `${NAME:?message}` reference and nothing else.
 fn is_lab_reference(v: &str) -> bool {
-    v.starts_with("${GD_LAB_") && v.ends_with('}') && v.contains(":?")
+    v.starts_with("${") && v.ends_with('}') && v.matches('$').count() == 1 && interpolations_ok(v)
+}
+
+/// Every string in a YAML value, keys included.
+fn all_strings<'a>(y: &'a Yaml, out: &mut Vec<&'a str>) {
+    match y {
+        Yaml::String(s) => out.push(s),
+        Yaml::Array(a) => a.iter().for_each(|v| all_strings(v, out)),
+        Yaml::Hash(h) => h.iter().for_each(|(k, v)| {
+            all_strings(k, out);
+            all_strings(v, out);
+        }),
+        _ => {}
+    }
 }
 
 fn has_secret_word(name: &str) -> bool {
@@ -392,6 +459,18 @@ fn check(text: &str) -> Vec<Problem> {
         out.push(problem(
             "wrong-subnet",
             format!("networks.lab.ipam.config must be the one subnet {SUBNET}"),
+        ));
+    }
+
+    // Every `$` in the file is an allowed `${NAME:?message}` reference.
+    let mut strs = Vec::new();
+    all_strings(doc, &mut strs);
+    if let Some(bad) = strs.iter().find(|s| !interpolations_ok(s)) {
+        out.push(problem(
+            "bad-interpolation",
+            format!(
+                "{bad:?} has a `$` that is not exactly ${{NAME:?message}} with an allowed name"
+            ),
         ));
     }
 
@@ -565,8 +644,16 @@ fn check_service(
     {
         add("no-pids-limit", "pids_limit must be from 1 to 1024".into());
     }
-    let tmpfs_ok = strings(&svc["tmpfs"])
-        .is_some_and(|v| v.iter().all(|t| t.starts_with('/') && t.contains("size=")));
+    let mem_cap = svc["mem_limit"].as_str().and_then(mem_mib).unwrap_or(0);
+    let tmpfs_ok = strings(&svc["tmpfs"]).is_some_and(|v| {
+        v.iter().all(|t| {
+            t.starts_with('/')
+                && t.split_once(':')
+                    .and_then(|(_, opts)| opts.split(',').find_map(|o| o.strip_prefix("size=")))
+                    .and_then(size_mib)
+                    .is_some_and(|m| m >= 1 && m <= mem_cap)
+        })
+    });
     if !tmpfs_ok {
         add(
             "tmpfs-unbounded",
@@ -647,6 +734,21 @@ fn check_service(
         }
     }
 
+    // A bare `-` or `--` ends option parsing, so options after it would be ignored.
+    let entry_items = strings(&svc["entrypoint"]).unwrap_or_default();
+    for (where_, items) in [
+        ("command", &command),
+        ("healthcheck", &health),
+        ("entrypoint", &entry_items),
+    ] {
+        if items.iter().any(|i| i == "-" || i == "--") {
+            add(
+                "command-terminator",
+                format!("{where_} has a bare - or -- item"),
+            );
+        }
+    }
+
     // Regtest, per node. Option spellings are normalised, and any other chain
     // selector, or a second one, is refused.
     match name {
@@ -664,15 +766,30 @@ fn check_service(
                     "bitcoind must run exactly one chain selector, -chain=regtest".into(),
                 );
             }
-            let allow: Vec<&String> = command
-                .iter()
-                .filter(|c| c.starts_with("-rpcallowip="))
-                .collect();
-            let want = format!("-rpcallowip={SUBNET}");
-            if allow.is_empty() || allow.iter().any(|a| **a != want) {
+            // Core stops reading options at the first item that is not one.
+            if command.iter().any(|c| !c.starts_with('-')) {
+                add(
+                    "command-terminator",
+                    "every bitcoind item must be an option".into(),
+                );
+            }
+            // RPC access: normalised, so `--rpcallowip v` and `-rpcallowip=v` read alike.
+            let opts = options(&command);
+            let values = |name: &str| -> Vec<Option<String>> {
+                opts.iter()
+                    .filter(|(n, _)| n == name)
+                    .map(|(_, v)| v.clone())
+                    .collect()
+            };
+            let allow = values("rpcallowip");
+            let bind = values("rpcbind");
+            if allow.is_empty()
+                || allow.iter().any(|a| a.as_deref() != Some(SUBNET))
+                || bind != [Some("0.0.0.0".to_owned())]
+            {
                 add(
                     "rpc-open-beyond-lab",
-                    format!("every -rpcallowip must be exactly {SUBNET}"),
+                    format!("rpcallowip must be only {SUBNET} and rpcbind only 0.0.0.0"),
                 );
             }
         }
@@ -750,7 +867,7 @@ fn describe(problems: &[Problem]) -> String {
 
 /// Unsafe edits to the real file: (text to find, text to put there, the
 /// problem code that must catch it). An empty `from` appends `to` to the end.
-const MUTATIONS: [(&str, &str, &str); 37] = [
+const MUTATIONS: [(&str, &str, &str); 48] = [
     (
         "bitcoin/bitcoin@sha256:d2454aaf2ff4ce1ebbc49f4aa05ed044c907b849a80a3f4c0ad23e488e50bbe0",
         "bitcoin/bitcoin:32.1",
@@ -912,6 +1029,61 @@ const MUTATIONS: [(&str, &str, &str); 37] = [
         "\"--network=regtest\", \"--rpcpassword=hunter2\", \"getinfo\"]",
         "literal-secret",
     ),
+    (
+        "      - -chain=regtest\n",
+        "      - \"-\"\n      - -chain=regtest\n",
+        "command-terminator",
+    ),
+    (
+        "      - --alias=gd-lab-cln\n",
+        "      - --\n      - --alias=gd-lab-cln\n",
+        "command-terminator",
+    ),
+    (
+        "      - -chain=regtest\n",
+        "      - some-word\n      - -chain=regtest\n",
+        "command-terminator",
+    ),
+    (
+        "-rpcallowip=172.29.208.0/24",
+        "-rpcallowip=172.29.208.0/24\n      - --rpcallowip=0.0.0.0/0",
+        "rpc-open-beyond-lab",
+    ),
+    (
+        "-rpcallowip=172.29.208.0/24",
+        "-rpcallowip=172.29.208.0/24\n      - --rpcallowip\n      - 0.0.0.0/0",
+        "rpc-open-beyond-lab",
+    ),
+    (
+        "      - -rpcbind=0.0.0.0\n",
+        "      - -rpcbind=0.0.0.0\n      - --rpcbind=::\n",
+        "rpc-open-beyond-lab",
+    ),
+    (
+        "${GD_LAB_MINT_KEY:?run lab/up.sh, not docker compose}",
+        "${GD_LAB_MISSING:-hunter2:?x}",
+        "bad-interpolation",
+    ),
+    (
+        "      PYTHONPATH: /app",
+        "      PYTHONPATH: /app:$HOME",
+        "bad-interpolation",
+    ),
+    (
+        "${GD_LAB_RPCAUTH:?run lab/up.sh, not docker compose}",
+        "${GD_LAB_OTHER:?run lab/up.sh, not docker compose}",
+        "bad-interpolation",
+    ),
+    (
+        "      - /root/.lnd:size=1m\n",
+        "      - /root/.lnd:size=0\n",
+        "tmpfs-unbounded",
+    ),
+    (
+        "      - /data:uid=1000,gid=1000,mode=0700,size=256m\n",
+        "      - /data:uid=1000,gid=1000,mode=0700,size=4096m\n",
+        "tmpfs-unbounded",
+    ),
 ];
 
 /// The real compose file passes every check.
@@ -1023,18 +1195,44 @@ fn lab_scripts_stay_on_the_lab_project_and_regtest() {
         "unset GD_LAB_RPC_PASSWORD",
         "-stdinrpcpass",
         "trap cleanup EXIT",
-        "mkdir \"$LOCK\"",
+        "lab_lock",
+        "lab_teardown",
     ] {
         if !up.contains(needle) {
             problems.push(format!("up.sh lacks {needle:?}"));
         }
     }
+    for needle in ["lab_lock", "lab_teardown", "trap lab_unlock EXIT"] {
+        if !down.contains(needle) {
+            problems.push(format!("down.sh lacks {needle:?}"));
+        }
+    }
+    if down.contains("GD_LAB_LOCK_HELD") || up.contains("GD_LAB_LOCK_HELD") {
+        problems.push("a lock bypass variable is back".to_owned());
+    }
+    // The shared library holds the teardown, and gets the same banned-word check.
+    let lib = read("lab/lib.sh");
     for needle in [
         "down --volumes --remove-orphans",
         "rm -rf \"$LAB_DIR/.data\"",
+        "ln -s",
     ] {
-        if !down.contains(needle) {
-            problems.push(format!("down.sh lacks {needle:?}"));
+        if !lib.contains(needle) {
+            problems.push(format!("lib.sh lacks {needle:?}"));
+        }
+    }
+    for banned in [
+        "mainnet",
+        "prune",
+        "docker.sock",
+        "sudo",
+        "eval ",
+        "rm -rf /",
+        "docker run",
+        "--privileged",
+    ] {
+        if lib.contains(banned) {
+            problems.push(format!("lib.sh contains {banned:?}"));
         }
     }
     #[cfg(unix)]
@@ -1048,6 +1246,137 @@ fn lab_scripts_stay_on_the_lab_project_and_regtest() {
         }
     }
     assert!(problems.is_empty(), "problems:\n{}", problems.join("\n"));
+}
+
+/// A scratch copy of the lab scripts with fake `docker`, `jq` and `openssl`
+/// commands first on the PATH, so the scripts can run without Docker.
+#[cfg(unix)]
+struct Scratch {
+    dir: PathBuf,
+}
+
+#[cfg(unix)]
+impl Scratch {
+    fn new(name: &str, openssl: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("gd-lab-test-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("lab")).unwrap();
+        fs::create_dir_all(dir.join("bin")).unwrap();
+        for f in ["up.sh", "down.sh", "lib.sh"] {
+            fs::copy(root().join("lab").join(f), dir.join("lab").join(f)).unwrap();
+        }
+        for (cmd, body) in [("docker", "exit 0"), ("jq", "exit 0"), ("openssl", openssl)] {
+            let p = dir.join("bin").join(cmd);
+            fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        Scratch { dir }
+    }
+
+    /// Run `lab/<script>` with only the fake commands and the system tools.
+    fn run(&self, script: &str) -> std::process::Output {
+        std::process::Command::new("/bin/bash")
+            .arg(self.dir.join("lab").join(script))
+            .env_clear()
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", self.dir.join("bin").display()),
+            )
+            .output()
+            .unwrap()
+    }
+
+    fn lock(&self) -> PathBuf {
+        self.dir.join("lab/.lock")
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// A failing or odd `openssl` must stop `up.sh` before anything starts: no
+/// prefix-only password and no empty salt may ever reach lab.env.
+#[cfg(unix)]
+#[test]
+fn a_failing_openssl_stops_up_sh_before_anything_starts() {
+    for (name, body) in [
+        ("exit1", "exit 1"),
+        ("silent", "exit 0"),
+        ("short", "printf zz"),
+    ] {
+        let s = Scratch::new(name, body);
+        let out = s.run("up.sh");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{name}: {err}");
+        assert!(err.contains("openssl"), "{name}: {err}");
+        assert!(
+            !err.contains("REFUSED"),
+            "{name} got past credential generation: {err}"
+        );
+        assert!(
+            !s.dir.join("lab/.data").exists(),
+            "{name}: lab/.data left behind"
+        );
+        assert!(
+            s.lock().symlink_metadata().is_err(),
+            "{name}: lock left behind"
+        );
+    }
+}
+
+/// A lock left by a crashed run (dead owner, or a recycled process id that is
+/// not one of our scripts) is taken over; a lock held by a live lab script
+/// is respected and left untouched.
+#[cfg(unix)]
+#[test]
+fn a_stale_lock_is_taken_over_and_a_live_one_is_respected() {
+    use std::os::unix::fs::symlink;
+    use std::process::Command;
+    let s = Scratch::new("lock", "exit 1");
+
+    // Dead owner.
+    symlink("99999999", s.lock()).unwrap();
+    let out = s.run("down.sh");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(s.lock().symlink_metadata().is_err(), "lock not released");
+
+    // A live process that is not a lab script (a recycled id).
+    let mut other = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+    symlink(other.id().to_string(), s.lock()).unwrap();
+    let out = s.run("down.sh");
+    let _ = other.kill();
+    let _ = other.wait();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(s.lock().symlink_metadata().is_err(), "lock not released");
+
+    // A live lab script holds it: refused, lock untouched.
+    fs::create_dir_all(s.dir.join("holder")).unwrap();
+    fs::write(s.dir.join("holder/up.sh"), "#!/bin/sh\nsleep 30\n").unwrap();
+    let mut holder = Command::new("/bin/sh")
+        .arg(s.dir.join("holder/up.sh"))
+        .spawn()
+        .unwrap();
+    symlink(holder.id().to_string(), s.lock()).unwrap();
+    let out = s.run("down.sh");
+    let still = fs::read_link(s.lock()).ok();
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("running"));
+    assert_eq!(still, Some(PathBuf::from(holder.id().to_string())));
 }
 
 fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
@@ -1068,19 +1397,49 @@ fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
-/// The sorted list of tracked regular files under `lab/`, from `git ls-files`
-/// (the working-tree walk is only a fallback outside a git checkout).
+/// Whether an index path must never be committed: anything under `lab/.data`
+/// (where `up.sh` writes credentials) or the lock. Case-insensitive, for macOS.
+fn forbidden_index_path(path: &str) -> bool {
+    let p = path.to_lowercase();
+    p.starts_with("lab/.data") || p.starts_with("lab/.lock")
+}
+
+/// Parse `git ls-files -s -z` output into (mode, path) pairs.
+fn parse_index(raw: &str) -> Vec<(String, String)> {
+    raw.split('\0')
+        .filter(|e| !e.is_empty())
+        .filter_map(|e| {
+            let (meta, path) = e.split_once('\t')?;
+            let mode = meta.split(' ').next()?;
+            Some((mode.to_owned(), path.to_owned()))
+        })
+        .collect()
+}
+
+/// The sorted regular files under `lab/` that git tracks (`git ls-files -s`).
+/// Every index entry of any kind, symlinks and files deleted from the working
+/// tree included, is checked for a forbidden path before anything is filtered
+/// out. The working-tree walk is only a fallback outside a git checkout.
 fn tracked_lab_files() -> Vec<PathBuf> {
     let out = std::process::Command::new("git")
-        .args(["ls-files", "-z", "--", "lab"])
+        .args(["ls-files", "-s", "-z", "--", "lab"])
         .current_dir(root())
         .output();
     let mut files: Vec<PathBuf> = match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .split('\0')
-            .filter(|p| !p.is_empty())
-            .map(|p| root().join(p))
-            .collect(),
+        Ok(o) if o.status.success() => {
+            let entries = parse_index(&String::from_utf8_lossy(&o.stdout));
+            for (mode, path) in &entries {
+                assert!(
+                    !forbidden_index_path(path),
+                    "{path} (mode {mode}) is in the git index, but lab/.data and lab/.lock must never be committed"
+                );
+            }
+            entries
+                .into_iter()
+                .filter(|(mode, _)| mode == "100644" || mode == "100755")
+                .map(|(_, path)| root().join(path))
+                .collect()
+        }
         _ => {
             assert!(
                 !root().join(".git").exists(),
@@ -1094,6 +1453,21 @@ fn tracked_lab_files() -> Vec<PathBuf> {
     files.sort();
     files.retain(|p| p.symlink_metadata().is_ok_and(|m| m.file_type().is_file()));
     files
+}
+
+/// The index check refuses `lab/.data` paths of every kind, however spelled.
+#[test]
+fn index_paths_under_lab_data_are_refused() {
+    let raw = "100644 aaaa 0\tlab/up.sh\x00120000 bbbb 0\tlab/.data/link\x00100644 cccc 0\tlab/.DATA/x\x00100644 dddd 0\tlab/.lock\x00";
+    let entries = parse_index(raw);
+    assert_eq!(entries.len(), 4);
+    let bad: Vec<&str> = entries
+        .iter()
+        .filter(|(_, p)| forbidden_index_path(p))
+        .map(|(_, p)| p.as_str())
+        .collect();
+    assert_eq!(bad, ["lab/.data/link", "lab/.DATA/x", "lab/.lock"]);
+    assert!(!forbidden_index_path("lab/up.sh"));
 }
 
 /// No tracked file under `lab/` holds a generated credential, nothing under
