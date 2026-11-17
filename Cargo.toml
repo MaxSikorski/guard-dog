@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/guard-dog", "crates/gd-core"]
+members = ["crates/guard-dog", "crates/gd-core", "crates/gd-egress"]
 # Resolver 3 is resolver 2 plus one thing: when picking dependency versions it
 # prefers ones that build with our pinned Rust (`rust-version` below).
 resolver = "3"
@@ -23,6 +23,8 @@ serde_json = "1"
 toml = { version = "=1.1.8", default-features = false, features = ["parse", "std", "serde"] }
 # YAML parser for the lab compose test. No default features (no encoding_rs).
 yaml-rust2 = { version = "=0.13.0", default-features = false }
+# Regex engine for the egress judge's secret-shape detectors. Exact version already locked via jsonschema.
+regex = { version = "=1.13.1", default-features = false, features = ["std", "unicode-perl"] }
 
 [workspace.lints.rust]
 # Guard Dog guards money. No crate of ours may use `unsafe`; a crate that ever

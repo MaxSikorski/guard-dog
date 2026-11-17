@@ -1,0 +1,6 @@
+Judge C (egress capture): FAIL
+control: dns ok, https ok, wire ok, blocked-path ok
+destinations: 1 unlisted, 0 allowlisted
+F1 unlisted-destination tcp 192.0.2.7:7777
+F2 canary-leaked xpub in tcp-data to 192.0.2.7:7777
+F2 canary-leaked xpub in wire to 192.0.2.7:7777
