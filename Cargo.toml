@@ -19,6 +19,8 @@ trybuild = "1.0"
 # JSON Schema checker for the advisory corpus test. No default features: no HTTP, no file resolving.
 jsonschema = { version = "=0.60.2", default-features = false }
 serde_json = "1"
+# TOML reader for the release-profile policy test. Exact version already locked via trybuild.
+toml = { version = "=1.1.8", default-features = false, features = ["parse", "std", "serde"] }
 
 [workspace.lints.rust]
 # Guard Dog guards money. No crate of ours may use `unsafe`; a crate that ever
@@ -30,9 +32,19 @@ missing_docs = "warn"
 # `dbg!` and `todo!` must never reach `main`.
 dbg_macro = "warn"
 todo = "warn"
+# Panic policy (Max, 2026-11-16): shipped code never panics on bad input.
+# Handle the error, or return it. Tests are exempt (see clippy.toml).
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
 
+# Release builds unwind on panic (the default) so one crashing sensor can be
+# contained and restarted. Abort will apply only to a future separate
+# action-executor process (Max, 2026-11-16). Overflow checks stay on: wrong
+# arithmetic must not silently wrap.
 [profile.release]
 lto = true
 codegen-units = 1
-panic = "abort"
+overflow-checks = true
 strip = true
