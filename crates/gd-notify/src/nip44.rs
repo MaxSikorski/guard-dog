@@ -83,25 +83,23 @@ pub fn message_keys(
     })
 }
 
-/// The padded length for a message of `unpadded` bytes (1 or more). Checked
-/// arithmetic: a length so large that the padded size would not fit in a
-/// `usize` gives `usize::MAX` (no real message is anywhere near that; both
-/// callers first limit the length to 65,535).
+/// The padded length for a message of `unpadded` bytes (1 or more). Worked in
+/// `u128`, so the exact value is returned whenever it fits in a `usize`; only
+/// a length whose padded size does not fit gives `usize::MAX` (no real message
+/// is anywhere near that; both callers first limit the length to 65,535).
 pub fn calc_padded_len(unpadded: usize) -> usize {
     if unpadded <= 32 {
         return 32;
     }
-    let below = unpadded - 1;
-    let bits = usize::BITS - below.leading_zeros();
-    let Some(next_power) = 1usize.checked_shl(bits) else {
-        return usize::MAX;
-    };
+    let below = (unpadded - 1) as u128;
+    let bits = u128::BITS - below.leading_zeros();
+    let next_power = 1u128 << bits;
     let chunk = if next_power <= 256 {
         32
     } else {
         next_power / 8
     };
-    (below / chunk + 1).saturating_mul(chunk)
+    usize::try_from((below / chunk + 1) * chunk).unwrap_or(usize::MAX)
 }
 
 fn mac_of(

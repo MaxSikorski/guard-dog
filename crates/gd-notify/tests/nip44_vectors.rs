@@ -197,9 +197,10 @@ fn nip44_random_round_trip_and_tampering() {
 
 #[test]
 fn nip44_padding_length_does_not_panic_on_huge_input() {
-    // Checked arithmetic: a length whose padded size cannot fit saturates.
+    // Checked arithmetic: a length whose padded size cannot fit saturates; one that fits is exact.
     assert_eq!(nip44::calc_padded_len(usize::MAX), usize::MAX);
-    assert_eq!(nip44::calc_padded_len(usize::MAX / 2 + 2), usize::MAX);
+    // 2^63 + 1 pads to 5 * 2^61, which still fits: exact, not saturated.
+    assert_eq!(nip44::calc_padded_len(usize::MAX / 2 + 2), 5 << 61);
     // The largest sizes that still fit are exact (no overflow, no saturation).
     assert_eq!(nip44::calc_padded_len(1 << 62), 1 << 62);
     assert_eq!(nip44::calc_padded_len(0), 32);

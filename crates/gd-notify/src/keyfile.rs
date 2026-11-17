@@ -34,6 +34,13 @@
 //! written or read, the mount holding the state folder is found in
 //! `/proc/self/mountinfo` and refused with [`NotifyError::NotLocalFilesystem`]
 //! unless its type is ext2, ext3, ext4, xfs, btrfs, f2fs, tmpfs or overlay.
+//! That table is read before the state path is looked at in any way, and every
+//! mount on or above each path the walk will visit (links included) must be
+//! local, so a network mount is never contacted. The chosen mount's
+//! `major:minor` must equal the folder's `st_dev`, which refuses a mount hidden
+//! by a later one and a bind-mounted key (the key file and temporary must share
+//! the folder's device too). A btrfs subvolume, whose `st_dev` mountinfo does
+//! not show, may be refused: fail safe.
 
 use crate::encoding::{hex_encode, hex32_secret};
 use crate::{Entropy, Keys, NotifyError};
@@ -86,14 +93,33 @@ fn mount_covers(mount: &[u8], path: &[u8]) -> bool {
     path.starts_with(mount) && (path.len() == mount.len() || path.get(mount.len()) == Some(&b'/'))
 }
 
-/// From the text of `/proc/self/mountinfo` and an absolute, canonical path,
-/// the filesystem type of the mount holding it: the mount whose mount point is
-/// the longest whole-name prefix of the path (a later line wins a tie, as an
-/// over-mount does). Any malformed line makes the whole text an error, so a
-/// damaged file is never half trusted. Pure, so it is tested on every target.
-fn filesystem_type_of(mountinfo: &[u8], path: &Path) -> Result<Vec<u8>, NotifyError> {
-    let path = path.as_os_str().as_bytes();
-    let mut best: Option<(usize, Vec<u8>)> = None;
+/// One line of `/proc/self/mountinfo`, reduced to what is checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Mount {
+    /// The `major:minor` device number of the mounted filesystem.
+    dev: (u32, u32),
+    mount_point: Vec<u8>,
+    fstype: Vec<u8>,
+}
+
+impl Mount {
+    fn is_local(&self) -> bool {
+        LOCAL_FILESYSTEMS.contains(&self.fstype.as_slice())
+    }
+}
+
+/// Parses `major:minor` (decimal numbers).
+fn parse_dev(field: &[u8]) -> Option<(u32, u32)> {
+    let text = std::str::from_utf8(field).ok()?;
+    let (major, minor) = text.split_once(':')?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// Parses the text of `/proc/self/mountinfo`. Any malformed line makes the
+/// whole text an error, so a damaged file is never half trusted. Pure, so it
+/// is tested on every target.
+fn parse_mountinfo(mountinfo: &[u8]) -> Result<Vec<Mount>, NotifyError> {
+    let mut table = Vec::new();
     for line in mountinfo.split(|b| *b == b'\n') {
         if line.is_empty() {
             continue;
@@ -107,36 +133,110 @@ fn filesystem_type_of(mountinfo: &[u8], path: &Path) -> Result<Vec<u8>, NotifyEr
             .find(|(_, f)| **f == b"-")
             .map(|(i, _)| i)
             .ok_or(NotifyError::NotLocalFilesystem)?;
+        let dev = fields
+            .get(2)
+            .and_then(|f| parse_dev(f))
+            .ok_or(NotifyError::NotLocalFilesystem)?;
         let mount_field = fields.get(4).ok_or(NotifyError::NotLocalFilesystem)?;
         let fstype = fields
             .get(sep + 1)
             .filter(|t| !t.is_empty())
             .ok_or(NotifyError::NotLocalFilesystem)?;
-        let mount = unescape_mount_field(mount_field);
-        if mount.first() != Some(&b'/') {
+        let mount_point = unescape_mount_field(mount_field);
+        if mount_point.first() != Some(&b'/') {
             return Err(NotifyError::NotLocalFilesystem);
         }
-        if mount_covers(&mount, path) && best.as_ref().is_none_or(|(len, _)| mount.len() >= *len) {
-            best = Some((mount.len(), fstype.to_vec()));
+        table.push(Mount {
+            dev,
+            mount_point,
+            fstype: fstype.to_vec(),
+        });
+    }
+    Ok(table)
+}
+
+/// The mount holding `path`: the one whose mount point is the longest
+/// whole-name prefix of it (a later line wins a tie, as an over-mount does).
+fn covering_mount<'a>(table: &'a [Mount], path: &Path) -> Option<&'a Mount> {
+    let path = path.as_os_str().as_bytes();
+    let mut best: Option<&Mount> = None;
+    for m in table {
+        if mount_covers(&m.mount_point, path)
+            && best.is_none_or(|b| m.mount_point.len() >= b.mount_point.len())
+        {
+            best = Some(m);
         }
     }
-    best.map(|(_, t)| t).ok_or(NotifyError::NotLocalFilesystem)
+    best
+}
+
+/// Refuses when ANY mount whose mount point equals or is a folder above `path`
+/// is not a local filesystem. Pure text, no file access: the walk calls it for
+/// each name before it looks at that name, so a network mount is never
+/// contacted, not even by a `stat`.
+fn check_not_remote(table: &[Mount], path: &Path) -> Result<(), NotifyError> {
+    let bytes = path.as_os_str().as_bytes();
+    if table
+        .iter()
+        .any(|m| mount_covers(&m.mount_point, bytes) && !m.is_local())
+    {
+        return Err(NotifyError::NotLocalFilesystem);
+    }
+    Ok(())
+}
+
+/// Splits a `st_dev` into the `(major, minor)` of Linux (glibc's
+/// `gnu_dev_major` and `gnu_dev_minor`), the numbers mountinfo shows.
+fn split_dev(dev: u64) -> (u32, u32) {
+    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & 0xffff_f000);
+    let minor = (dev & 0xff) | ((dev >> 12) & 0xffff_ff00);
+    (
+        u32::try_from(major).unwrap_or(u32::MAX),
+        u32::try_from(minor).unwrap_or(u32::MAX),
+    )
+}
+
+/// From a mount table and a canonical path, the mount holding it, which must
+/// be local and must be the very filesystem the folder is on: its `major:minor`
+/// has to equal the folder's `st_dev`. A mount laid over the longer one later
+/// (a hidden mount) or a bind mount makes the two differ and is refused. A
+/// btrfs subvolume reports its own device number that mountinfo does not
+/// show, so such a folder may be refused too; that is on purpose (fail safe).
+fn check_mount_of(table: &[Mount], path: &Path, st_dev: u64) -> Result<(), NotifyError> {
+    check_not_remote(table, path)?;
+    let mount = covering_mount(table, path).ok_or(NotifyError::NotLocalFilesystem)?;
+    if !mount.is_local() || mount.dev != split_dev(st_dev) {
+        return Err(NotifyError::NotLocalFilesystem);
+    }
+    Ok(())
+}
+
+/// The mount table of this machine. Off Linux it is empty (the public entry
+/// point refuses there before any file is touched; the helpers still run in
+/// tests).
+fn read_mount_table() -> Result<Vec<Mount>, NotifyError> {
+    if cfg!(not(target_os = "linux")) {
+        return Ok(Vec::new());
+    }
+    let text = fs::read("/proc/self/mountinfo").map_err(|_| NotifyError::NotLocalFilesystem)?;
+    parse_mountinfo(&text)
 }
 
 /// Refuses unless the folder is on one of the local filesystems in
-/// [`LOCAL_FILESYSTEMS`]. Linux only: elsewhere it refuses outright.
+/// [`LOCAL_FILESYSTEMS`] and on the very filesystem mountinfo says holds it.
+/// Linux only: elsewhere it refuses outright.
 fn check_local_filesystem(state_dir: &Path) -> Result<(), NotifyError> {
     if cfg!(not(target_os = "linux")) {
         return Err(NotifyError::UnsupportedPlatform);
     }
+    let table = read_mount_table()?;
+    // The path as given, before anything is looked at.
+    check_not_remote(&table, state_dir)?;
     let real = fs::canonicalize(state_dir).map_err(|_| NotifyError::NotLocalFilesystem)?;
-    let text = fs::read("/proc/self/mountinfo").map_err(|_| NotifyError::NotLocalFilesystem)?;
-    let fstype = filesystem_type_of(&text, &real)?;
-    if LOCAL_FILESYSTEMS.contains(&fstype.as_slice()) {
-        Ok(())
-    } else {
-        Err(NotifyError::NotLocalFilesystem)
-    }
+    let st_dev = fs::metadata(&real)
+        .map_err(|_| NotifyError::NotLocalFilesystem)?
+        .dev();
+    check_mount_of(&table, &real, st_dev)
 }
 
 fn refuse(message: &'static str) -> NotifyError {
@@ -241,18 +341,24 @@ fn check_passed_dir(m: &fs::Metadata, euid: u32) -> Result<(), NotifyError> {
 /// Walks to the state folder like OpenSSH's `secure_path`: from `/`, one name
 /// at a time, `lstat` on each. A symlink is read and its target spliced in
 /// front of the names still to come (a relative target starts at the folder
-/// that holds the link, an absolute one at `/`), at most 40 times. Every
-/// folder passed through, including the ones reached through links and the
-/// folder holding each link, must belong to root or the running user and not
-/// be writable by others unless sticky; so must each link's owner. Otherwise
-/// someone else could rename something in the chain and swap the state folder
-/// for another one. A sticky folder such as `/tmp` is fine because only an
-/// entry's owner can rename it there, and every entry below it is checked.
-fn check_ancestors(dir: &Path, euid: u32) -> Result<(), NotifyError> {
+/// that holds the link, an absolute one at `/`), at most 40 times. Before each
+/// name (and before `/`) is looked at, its path is checked against the mount
+/// `table`: a network or userspace mount on the way is refused before it is
+/// touched, so no `lstat` ever reaches it. `lstat` is passed in so a test can
+/// see which paths were looked at. `on_dir` sees every folder passed through
+/// and `on_link` every link.
+fn walk_path(
+    dir: &Path,
+    table: &[Mount],
+    lstat: &mut dyn FnMut(&Path) -> std::io::Result<fs::Metadata>,
+    on_dir: &mut dyn FnMut(&fs::Metadata) -> Result<(), NotifyError>,
+    on_link: &mut dyn FnMut(&fs::Metadata) -> Result<(), NotifyError>,
+) -> Result<(), NotifyError> {
     check_path_text(dir)?;
     let mut current = PathBuf::from("/");
-    let root = fs::symlink_metadata(&current).map_err(|_| refuse(ABOVE_UNREADABLE))?;
-    check_passed_dir(&root, euid)?;
+    check_not_remote(table, &current)?;
+    let root = lstat(&current).map_err(|_| refuse(ABOVE_UNREADABLE))?;
+    on_dir(&root)?;
     let mut rest = segments(dir.as_os_str());
     let mut hops = 0u32;
     while let Some(name) = rest.pop_front() {
@@ -265,13 +371,12 @@ fn check_ancestors(dir: &Path, euid: u32) -> Result<(), NotifyError> {
             continue;
         }
         let next = current.join(&name);
-        let m = fs::symlink_metadata(&next).map_err(|_| refuse(ABOVE_UNREADABLE))?;
+        // Before the path is touched; this covers a link's target too, since
+        // its names are walked one by one like any others.
+        check_not_remote(table, &next)?;
+        let m = lstat(&next).map_err(|_| refuse(ABOVE_UNREADABLE))?;
         if m.file_type().is_symlink() {
-            if m.uid() != 0 && m.uid() != euid {
-                return Err(refuse(
-                    "a folder above the state folder belongs to another user",
-                ));
-            }
+            on_link(&m)?;
             hops += 1;
             if hops > MAX_LINK_HOPS {
                 return Err(refuse("too many symlinks on the way to the state folder"));
@@ -284,13 +389,51 @@ fn check_ancestors(dir: &Path, euid: u32) -> Result<(), NotifyError> {
                 rest.push_front(part);
             }
         } else if m.file_type().is_dir() {
-            check_passed_dir(&m, euid)?;
+            on_dir(&m)?;
             current = next;
         } else {
             return Err(refuse(ABOVE_UNREADABLE));
         }
     }
     Ok(())
+}
+
+/// The walk without any network contact and without any owner check: every
+/// path it will look at is first checked against the mount table. Run before
+/// the state path is looked at in any other way.
+fn check_no_remote_on_the_way(dir: &Path, table: &[Mount]) -> Result<(), NotifyError> {
+    walk_path(
+        dir,
+        table,
+        &mut |p| fs::symlink_metadata(p),
+        &mut |_| Ok(()),
+        &mut |_| Ok(()),
+    )
+}
+
+/// The walk with its owner and writability checks. Every folder passed
+/// through, including the ones reached through links and the folder holding
+/// each link, must belong to root or the running user and not be writable by
+/// others unless sticky; so must each link's owner. Otherwise someone else
+/// could rename something in the chain and swap the state folder for another
+/// one. A sticky folder such as `/tmp` is fine because only an entry's owner
+/// can rename it there, and every entry below it is checked.
+fn check_ancestors(dir: &Path, euid: u32) -> Result<(), NotifyError> {
+    let table = read_mount_table()?;
+    walk_path(
+        dir,
+        &table,
+        &mut |p| fs::symlink_metadata(p),
+        &mut |m| check_passed_dir(m, euid),
+        &mut |m| {
+            if m.uid() != 0 && m.uid() != euid {
+                return Err(refuse(
+                    "a folder above the state folder belongs to another user",
+                ));
+            }
+            Ok(())
+        },
+    )
 }
 
 const DIR_CHANGED_INSTALL: &str = "the state folder changed while the key was being installed";
@@ -335,7 +478,7 @@ fn owners_match(file_uid: u32, euid: u32) -> bool {
     file_uid == euid
 }
 
-fn read_key(path: &Path, euid: u32) -> Result<Keys, NotifyError> {
+fn read_key(path: &Path, euid: u32, dir_dev: u64) -> Result<Keys, NotifyError> {
     let before = fs::symlink_metadata(path).map_err(|_| refuse("cannot look at the key file"))?;
     if !before.file_type().is_file() {
         return Err(refuse("the key file is a symlink or not a regular file"));
@@ -355,6 +498,13 @@ fn read_key(path: &Path, euid: u32) -> Result<Keys, NotifyError> {
         .map_err(|_| refuse("cannot look at the key file"))?;
     if after.dev() != before.dev() || after.ino() != before.ino() || !after.file_type().is_file() {
         return Err(refuse("the key file changed while it was being opened"));
+    }
+    // A key file on another filesystem than its folder is a bind mount laid
+    // over it: whoever controls that mount controls the key.
+    if after.dev() != dir_dev {
+        return Err(refuse(
+            "the key file is on a different filesystem than the state folder",
+        ));
     }
     if !owners_match(after.uid(), euid) {
         return Err(refuse(
@@ -400,6 +550,12 @@ pub fn load_or_create(state_dir: &Path, entropy: &mut dyn Entropy) -> Result<Key
     // The raw text first: `link/` and `link/.` would make `symlink_metadata`
     // follow a symlink and report a folder.
     check_path_text(state_dir)?;
+    // Before ANY look at the path (stat, lstat or canonicalize): read the mount
+    // table once and walk the path, and every link target on the way, as text
+    // against it. A network or userspace mount is refused without being
+    // contacted.
+    let table = read_mount_table()?;
+    check_no_remote_on_the_way(state_dir, &table)?;
     // Nothing is written until the folder is known to be a real 0700 folder, so
     // a symlink or a loose folder is refused without touching its target.
     check_state_dir_shape(state_dir)?;
@@ -458,6 +614,7 @@ fn load_or_create_as(
     // two first uses at once end with one key.
     let (temporary, file) = create_temporary(
         state_dir,
+        dir_id.0,
         || {
             entropy.fill(&mut suffix)?;
             Ok(format!("{TEMP_PREFIX}{}", hex_encode(&suffix)))
@@ -496,7 +653,7 @@ fn read_existing(
     state_dir: &Path,
     dir_id: (u64, u64),
 ) -> Result<Keys, NotifyError> {
-    let keys = read_key(path, euid)?;
+    let keys = read_key(path, euid, dir_id.0)?;
     same_dir(state_dir, dir_id, DIR_CHANGED_READ)?;
     Ok(keys)
 }
@@ -554,12 +711,13 @@ fn remove_stale_temporaries(dir: &Path) {
 /// `contents`, trying up to 4 names; a taken name moves on to the next.
 fn create_temporary(
     dir: &Path,
+    dir_dev: u64,
     mut next_name: impl FnMut() -> Result<String, NotifyError>,
     contents: &[u8],
 ) -> Result<(PathBuf, fs::File), NotifyError> {
     for _ in 0..4 {
         let path = dir.join(next_name()?);
-        match write_new(&path, |file| {
+        match write_new(&path, dir_dev, |file| {
             file.write_all(contents)?;
             file.sync_all()
         }) {
@@ -576,6 +734,7 @@ fn create_temporary(
 /// does not meet a broken key. Returns the open file.
 fn write_new(
     path: &Path,
+    dir_dev: u64,
     fill: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
 ) -> std::io::Result<fs::File> {
     let mut file = OpenOptions::new()
@@ -583,7 +742,17 @@ fn write_new(
         .create_new(true)
         .mode(0o600)
         .open(path)?;
-    if let Err(e) = fill(&mut file) {
+    // The new file must be on the state folder's own filesystem, and its mode
+    // is set to 0600 explicitly (a strict umask such as 0400 would have taken
+    // bits off the mode given to `open`), both before anything is written.
+    let ready = file.metadata().and_then(|m| {
+        if m.dev() == dir_dev {
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+        } else {
+            Err(std::io::Error::other("different filesystem"))
+        }
+    });
+    if let Err(e) = ready.and_then(|()| fill(&mut file)) {
         drop(file);
         let _ = fs::remove_file(path);
         return Err(e);
@@ -613,7 +782,15 @@ mod tests {
 ";
 
     fn fstype(text: &str, path: &str) -> Result<String, NotifyError> {
-        filesystem_type_of(text.as_bytes(), Path::new(path)).map(|t| String::from_utf8(t).unwrap())
+        let table = parse_mountinfo(text.as_bytes())?;
+        covering_mount(&table, Path::new(path))
+            .map(|m| String::from_utf8(m.fstype.clone()).unwrap())
+            .ok_or(NotifyError::NotLocalFilesystem)
+    }
+
+    /// The `st_dev` of a folder, as `read_key` and `write_new` compare it.
+    fn dev_of(p: &Path) -> u64 {
+        fs::metadata(p).unwrap().dev()
     }
 
     #[test]
@@ -685,7 +862,7 @@ mod tests {
     fn a_failed_write_leaves_no_key_file_behind() {
         let dir = temp_dir("partial");
         let path = dir.join(KEY_FILE_NAME);
-        let result = write_new(&path, |file| {
+        let result = write_new(&path, dev_of(&dir), |file| {
             file.write_all(b"half a ke")?;
             Err(io::Error::other("disk full"))
         });
@@ -701,7 +878,12 @@ mod tests {
     fn a_failed_sync_is_also_cleaned_up() {
         let dir = temp_dir("sync");
         let path = dir.join(KEY_FILE_NAME);
-        assert!(write_new(&path, |_| Err(io::Error::other("sync failed"))).is_err());
+        assert!(
+            write_new(&path, dev_of(&dir), |_| Err(io::Error::other(
+                "sync failed"
+            )))
+            .is_err()
+        );
         assert!(!path.exists());
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -770,7 +952,7 @@ mod tests {
             assert_eq!(fs::metadata(&path).unwrap().len(), 65, "not a whole key");
             // The key on disk is the one every caller got, and nothing else is left.
             assert_eq!(
-                read_key(&path, effective_uid(&dir).unwrap())
+                read_key(&path, effective_uid(&dir).unwrap(), dev_of(&dir))
                     .unwrap()
                     .public_hex()
                     .unwrap(),
@@ -832,12 +1014,12 @@ mod tests {
         ] {
             fs::write(&path, &body).unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-            assert!(read_key(&path, euid).is_err());
+            assert!(read_key(&path, euid, dev_of(path.parent().unwrap())).is_err());
         }
         // With and without the final newline, a good key is read.
         for body in ["1f".repeat(32), "1f".repeat(32) + "\n"] {
             fs::write(&path, &body).unwrap();
-            assert!(read_key(&path, euid).is_ok());
+            assert!(read_key(&path, euid, dev_of(path.parent().unwrap())).is_ok());
         }
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -850,12 +1032,12 @@ mod tests {
         load_or_create(&dir, &mut crate::OsEntropy).unwrap();
         let path = dir.join(KEY_FILE_NAME);
         // Same user: read back fine, through the real read path.
-        assert!(read_key(&path, euid).is_ok());
+        assert!(read_key(&path, euid, dev_of(path.parent().unwrap())).is_ok());
         assert!(load_or_create_as(&dir, &mut crate::OsEntropy, euid).is_ok());
         // Someone else is "the user": the existing key file is refused ...
         let other = euid.wrapping_add(1);
         assert!(matches!(
-            read_key(&path, other),
+            read_key(&path, other, dev_of(path.parent().unwrap())),
             Err(NotifyError::KeyFile(m)) if m.contains("does not belong")
         ));
         // ... and so is the whole load, because the folder is not theirs either.
@@ -1159,6 +1341,7 @@ mod tests {
         let mut names = ["aa", "bb"].into_iter();
         let (path, _file) = create_temporary(
             &dir,
+            dev_of(&dir),
             || Ok(format!("{TEMP_PREFIX}{}", names.next().unwrap())),
             b"contents",
         )
@@ -1167,8 +1350,179 @@ mod tests {
         assert_eq!(fs::read_to_string(&aa).unwrap(), "x");
         assert_eq!(fs::read_to_string(&path).unwrap(), "contents");
         // Four collisions in a row give up.
-        let result = create_temporary(&dir, || Ok(format!("{TEMP_PREFIX}aa")), b"y");
+        let result = create_temporary(&dir, dev_of(&dir), || Ok(format!("{TEMP_PREFIX}aa")), b"y");
         assert!(result.is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn st_dev_is_split_into_major_and_minor_like_linux() {
+        // glibc's makedev, written out, so the split is checked against it.
+        fn makedev(major: u64, minor: u64) -> u64 {
+            (minor & 0xff)
+                | ((major & 0xfff) << 8)
+                | ((minor & !0xff) << 12)
+                | ((major & !0xfff) << 32)
+        }
+        assert_eq!(split_dev(0x0801), (8, 1));
+        assert_eq!(split_dev(0), (0, 0));
+        for (major, minor) in [(8, 1), (259, 3), (0, 27), (4095, 255), (0x1234, 0x5_6789)] {
+            assert_eq!(
+                split_dev(makedev(major, minor)),
+                (major as u32, minor as u32)
+            );
+        }
+        // 12-bit major and 20-bit minor fields reach into the high bits.
+        assert_eq!(split_dev(makedev(0x12345, 0xabcde)), (0x12345, 0xabcde));
+    }
+
+    #[test]
+    fn a_later_mount_hiding_the_longer_one_is_caught_by_the_device_check() {
+        // The third line was mounted over `/a` after `/a/b`, so it hides
+        // `/a/b`; the longest-prefix rule still picks `/a/b` (ext4, 8:2), but
+        // the folder's real st_dev is that of the tmpfs on top (0:50).
+        let text = "\
+22 1 8:1 / / rw - ext4 /dev/sda1 rw
+40 22 8:2 / /a rw - ext4 /dev/sda2 rw
+41 40 8:3 / /a/b rw - ext4 /dev/sda3 rw
+42 22 0:50 / /a rw - tmpfs tmpfs rw
+";
+        let table = parse_mountinfo(text.as_bytes()).unwrap();
+        let path = Path::new("/a/b/state");
+        assert_eq!(covering_mount(&table, path).unwrap().dev, (8, 3));
+        // The device the folder really reports is the tmpfs's: refused.
+        assert_eq!(
+            check_mount_of(&table, path, 50),
+            Err(NotifyError::NotLocalFilesystem)
+        );
+        // Were the folder really on /a/b's filesystem, it is accepted.
+        assert_eq!(check_mount_of(&table, path, (8 << 8) | 3), Ok(()));
+        // A mismatch alone refuses, even with a local type.
+        assert_eq!(
+            check_mount_of(&table, Path::new("/x"), (8 << 8) | 9),
+            Err(NotifyError::NotLocalFilesystem)
+        );
+        // No bind-mount case is tested against a real kernel here.
+    }
+
+    #[test]
+    fn any_remote_mount_on_or_above_a_path_refuses_it() {
+        let table = parse_mountinfo(MOUNTINFO.as_bytes()).unwrap();
+        assert!(check_not_remote(&table, Path::new("/var/state")).is_ok());
+        for p in ["/srv/nfs", "/srv/nfs/state", "/mnt/share/x"] {
+            assert_eq!(
+                check_not_remote(&table, Path::new(p)),
+                Err(NotifyError::NotLocalFilesystem),
+                "{p}"
+            );
+        }
+        // Stricter than the longest-prefix rule: an xfs mount inside the nfs one.
+        assert!(check_not_remote(&table, Path::new("/srv/nfs/local/x")).is_err());
+        // A folder above a network mount is not on it.
+        assert!(check_not_remote(&table, Path::new("/srv")).is_ok());
+    }
+
+    #[test]
+    fn the_walk_refuses_a_network_mount_before_it_is_looked_at() {
+        let table = parse_mountinfo(
+            "22 1 8:1 / / rw - ext4 /dev/sda1 rw\n30 22 0:27 / /srv rw - nfs4 host:/e rw\n"
+                .as_bytes(),
+        )
+        .unwrap();
+        let mut seen: Vec<PathBuf> = Vec::new();
+        let r = walk_path(
+            Path::new("/srv/state"),
+            &table,
+            &mut |p| {
+                seen.push(p.to_path_buf());
+                fs::symlink_metadata("/")
+            },
+            &mut |_| Ok(()),
+            &mut |_| Ok(()),
+        );
+        assert_eq!(r, Err(NotifyError::NotLocalFilesystem));
+        // Only `/` was looked at; `/srv` and below never were.
+        assert_eq!(seen, vec![PathBuf::from("/")]);
+        // A network root is refused before even `/` is looked at.
+        let table = parse_mountinfo(b"22 1 0:27 / / rw - nfs4 host:/e rw\n").unwrap();
+        let mut calls = 0;
+        let r = walk_path(
+            Path::new("/state"),
+            &table,
+            &mut |_| {
+                calls += 1;
+                fs::symlink_metadata("/")
+            },
+            &mut |_| Ok(()),
+            &mut |_| Ok(()),
+        );
+        assert_eq!(r, Err(NotifyError::NotLocalFilesystem));
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn a_link_target_on_a_network_mount_is_refused_before_it_is_looked_at() {
+        use std::os::unix::fs::symlink;
+        let base = temp_dir("remote-link");
+        symlink("/srv/elsewhere", base.join("l")).unwrap();
+        let table = parse_mountinfo(
+            "22 1 8:1 / / rw - ext4 /dev/sda1 rw\n30 22 0:27 / /srv rw - nfs4 host:/e rw\n"
+                .as_bytes(),
+        )
+        .unwrap();
+        let mut seen: Vec<PathBuf> = Vec::new();
+        let r = walk_path(
+            &base.join("l").join("state"),
+            &table,
+            &mut |p| {
+                seen.push(p.to_path_buf());
+                fs::symlink_metadata(p)
+            },
+            &mut |_| Ok(()),
+            &mut |_| Ok(()),
+        );
+        assert_eq!(r, Err(NotifyError::NotLocalFilesystem));
+        assert!(seen.iter().all(|p| !p.starts_with("/srv")), "{seen:?}");
+        assert!(seen.iter().any(|p| p.ends_with("l")));
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_new_file_is_0600_and_must_share_the_folders_device() {
+        let dir = temp_dir("devmode");
+        let path = dir.join("f");
+        let file = write_new(&path, dev_of(&dir), |f| f.write_all(b"x")).unwrap();
+        assert_eq!(
+            file.metadata().unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+        // A different device is refused before anything is written, and the
+        // file is not left behind. (A strict umask such as 0400 is not tested:
+        // it cannot be set without `unsafe`; the explicit fchmod covers it.)
+        let other = dir.join("g");
+        let mut wrote = false;
+        let r = write_new(&other, dev_of(&dir).wrapping_add(1), |_| {
+            wrote = true;
+            Ok(())
+        });
+        assert!(r.is_err() && !wrote && !other.exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_key_file_on_another_device_than_its_folder_is_refused() {
+        let dir = temp_dir("keydev");
+        let path = dir.join("k");
+        let mut f = write_new(&path, dev_of(&dir), |_| Ok(())).unwrap();
+        f.write_all(format!("{}\n", "11".repeat(32)).as_bytes())
+            .unwrap();
+        let euid = effective_uid(&dir).unwrap();
+        assert!(read_key(&path, euid, dev_of(&dir)).is_ok());
+        let err = read_key(&path, euid, dev_of(&dir).wrapping_add(1)).unwrap_err();
+        assert!(
+            matches!(err, NotifyError::KeyFile(m) if m.contains("different filesystem")),
+            "{err}"
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 }
