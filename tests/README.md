@@ -129,6 +129,19 @@ cargo fmt --all --check && cargo clippy --locked --all-targets -- -D warnings &&
 
 The property tests use a fixed seed by default, so the same commit gives the same result every run; the seed in use is printed to stderr (`cargo test -- --nocapture` shows it). `GD_PROPTEST_SEED=<number> cargo test --locked -p gd-core` explores a different seed. A failing case is saved under `crates/gd-core/proptest-regressions/` and replayed on every later run; commit that folder when it appears.
 
+## The watch-it-catch-a-leak demo
+
+`cargo run --locked --example watchdog` and `docs/demo/` play planted attacks against the real checks (the safe text renderer and Judge C's egress checker). These tests run the same scenes with no pauses.
+
+|---|---|---|
+| `every_scene_is_caught` | `crates/gd-demo/tests/watchdog.rs` | The five scenes (a hostile changelog, an AI-instruction relay description, a key in an HTTP header, the same key in base64 inside a JSON body, a home IP in a URL) each end in exactly one "caught", in order, with no "missed". |
+| `the_not_yet_slots_are_listed_and_are_not_passes` | same | The three to-do slots (a seed in a gzip body, an xpub re-encoded as a zpub, an affected version flagged) are listed by name and never counted as caught. When one lands it becomes a scene and this list changes. |
+| `nothing_secret_is_printed_whole_and_the_ip_is_documentation_only` | same | None of the generated nsec, xpub, seed phrase or macaroon appears whole in the demo's output, the nsec's base64 (standard and URL-safe, padded and not) doesn't either, and the one IP address it prints is in 198.51.100.0/24. |
+| `the_browser_json_carries_the_same_events` | same | The JSON the browser page reads has the same events: five scenes, five caught, no missed, three to-do. |
+| `the_committed_browser_engine_matches_the_pinned_hash` | same | Two hashes pinned in `docs/demo/README.md`. The module inside the committed `docs/demo/watchdog.wasm.js` has the pinned SHA-256 (catches a hand edit or swap of the script file), and the SHA-256 of the events JSON the scenes produce from source equals the pinned one (catches a change to a scene's text or verdict until the engine is rebuilt and both hashes are re-pinned). Neither proves the committed module was built from this source; that needs a rebuild and compare, done by hand at release time for now. |
+| `scenes_with_a_blind_checker_say_missed`, `scenes_with_a_naive_renderer_say_missed`, `the_real_run_is_all_caught_and_a_broken_one_is_not` | `crates/gd-demo/src/lib.rs` | The failure path works: with Judge C's checker built for other secrets, scenes 3, 4 and 5 each end in "missed" and none in "caught"; with a renderer that returns the text unchanged, scenes 1 and 2 end in "missed"; and the pass rule (`all_caught`) is false for a run with a "missed" or no scenes. The example turns that into "MISSED" and a non-zero exit. |
+
+The browser build is checked by hand: `docs/demo/build.sh` rebuilds `watchdog.wasm.js` and prints the module's size and SHA-256 and the events hash (pinned in `docs/demo/README.md`).
 ## The fact model
 
 Phase 1.1 PR 1 (`crates/gd-core/src/fact.rs`, `view.rs`). Property tests use the fixed seed.

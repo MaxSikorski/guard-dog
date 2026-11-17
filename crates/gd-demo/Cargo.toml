@@ -1,0 +1,21 @@
+[package]
+name = "gd-demo"
+description = "The 'watch it catch a leak' demo: five scenes run by the real checks, in a terminal or in the browser (WebAssembly). Demo only; never shipped."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "gd_demo"
+path = "src/lib.rs"
+
+[dependencies]
+gd-core = { path = "../gd-core" }
+gd-egress = { path = "../gd-egress" }
+serde_json.workspace = true
+
+[lints]
+workspace = true
