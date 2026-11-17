@@ -23,6 +23,16 @@
 //! intentional deviation from NIP-17's sender copy, and it means no
 //! sender-side history of what was sent exists anywhere.
 //!
+//! # Inbox list (kind 10050)
+//!
+//! Before sending, Guard Dog asks the relay for the recipient's kind-10050
+//! direct-message inbox list and sends only if the newest validly signed one
+//! lists that relay. Otherwise nothing is sent and the error says why (NIP-17
+//! asks senders not to send to someone without one). Blind spot: the list is
+//! looked for only on the lab relay being sent to. A live lab send needs a
+//! kind-10050 for the test recipient on the lab relay, which the later
+//! lab-check work will publish.
+//!
 //! # Sending
 //!
 //! ```
@@ -78,6 +88,10 @@ use relay::{PublishOutcome, RelayUrl};
 /// Plans the direct messages for `alerts` (policy, cap and summary included),
 /// wraps each for `recipient`, and publishes them to the lab relay.
 ///
+/// Before sending anything it asks the relay for the recipient's kind-10050
+/// inbox list and sends only if the newest validly signed one lists that relay;
+/// otherwise nothing is sent and the error says why.
+///
 /// Refuses, before touching the network, unless [`notify_allowed`] says the
 /// node's chains are regtest or signet only. An alert about any other chain
 /// (or an unknown one) is dropped, never sent, and counted in the summary.
@@ -116,5 +130,5 @@ pub fn send_alerts(
     if wraps.is_empty() {
         return Ok(Vec::new());
     }
-    relay::publish(relay, &wraps)
+    relay::publish(relay, recipient, &wraps)
 }

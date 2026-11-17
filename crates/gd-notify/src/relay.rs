@@ -5,8 +5,20 @@
 //! is an error), messages capped at 64 KiB, 5 seconds to connect and 10 in all (a relay that
 //! sends a byte at a time still runs out the same 10 seconds). The name must
 //! resolve only to the lab's own subnet, 172.29.208.0/24.
+//!
+//! Before any event is sent, one `REQ` asks the relay for the recipient's
+//! kind-10050 direct-message inbox list on the same connection; nothing is
+//! sent unless the newest validly signed list names this relay. A live lab
+//! send therefore needs a kind-10050 for the test recipient on the lab relay,
+//! which the later lab-check work will publish.
+//!
+//! The relay could hide a list or replay an old one. That can only stop a send,
+//! never redirect one, because the relay is still the allowlisted lab relay.
+//! The lookup shows the recipient's key to that relay, which the wraps' `p`
+//! tag already does.
 
 use crate::NotifyError;
+use crate::encoding::hex_encode;
 use crate::event::Event;
 use gd_core::Untrusted;
 use serde_json::Value;
@@ -27,6 +39,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 /// Frames that are not an answer to us (notices, pings) we will skip, at most.
 const MAX_SKIPPED_MESSAGES: usize = 200;
+const INBOX_SUB: &str = "gd-inbox";
+const NO_INBOX: &str = "the recipient has no verified direct-message inbox list (kind 10050) on this relay, so nothing was sent; NIP-17 asks senders not to send without one";
+const NOT_LISTED: &str = "the recipient's direct-message inbox list (kind 10050) does not include this relay, so nothing was sent";
+const LOOKUP_REFUSED: &str = "the relay refused the inbox lookup (kind 10050), so nothing was sent";
 
 /// A relay address that passed the allowlist.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,18 +212,112 @@ fn ws_error(e: &WsError) -> NotifyError {
     }
 }
 
-/// Sends `["EVENT", <event>]` for each event and waits (at most 10 seconds in
-/// all) for the relay's `["OK", id, true|false, message]` for each. Returns
-/// one outcome per event, in order.
+/// First checks the recipient's kind-10050 inbox list on the relay (nothing is
+/// sent unless the newest valid one lists this relay), then sends
+/// `["EVENT", <event>]` for each event and waits (at most 10 seconds in all,
+/// lookup included) for the relay's `["OK", id, true|false, message]` for each.
+/// Returns one outcome per event, in order.
 pub(crate) fn publish(
     relay: &RelayUrl,
+    recipient: &[u8; 32],
     events: &[Event],
 ) -> Result<Vec<PublishOutcome>, NotifyError> {
     #[cfg(test)]
     if relay.loopback {
-        return publish_with(relay, events, TOTAL_TIMEOUT, &loopback_resolver);
+        return publish_with(relay, recipient, events, TOTAL_TIMEOUT, &loopback_resolver);
     }
-    publish_with(relay, events, TOTAL_TIMEOUT, &system_resolver)
+    publish_with(relay, recipient, events, TOTAL_TIMEOUT, &system_resolver)
+}
+
+/// True if `event` is a verified kind-10050 by `recipient_hex` that has a
+/// `relay` tag naming exactly this relay (with or without a trailing slash).
+fn lists_relay(event: &Event, relay_url: &str) -> bool {
+    let with_slash = format!("{relay_url}/");
+    event.tags.iter().any(|t| {
+        t.len() >= 2
+            && t.first().is_some_and(|k| k == "relay")
+            && t.get(1).is_some_and(|u| u == relay_url || *u == with_slash)
+    })
+}
+
+/// Asks for the recipient's newest kind-10050 on this connection and checks
+/// that it lists this relay. Sends nothing but the `REQ` and the `CLOSE`.
+fn check_inbox_list(
+    socket: &mut tungstenite::WebSocket<DeadlineStream>,
+    relay: &RelayUrl,
+    recipient_hex: &str,
+    ignored: &mut usize,
+) -> Result<(), NotifyError> {
+    let req = serde_json::json!([
+        "REQ",
+        INBOX_SUB,
+        {"kinds": [10050], "authors": [recipient_hex], "limit": 1}
+    ]);
+    socket
+        .send(Message::text(req.to_string()))
+        .map_err(|e| ws_error(&e))?;
+    let mut best: Option<Event> = None;
+    loop {
+        let message = socket.read().map_err(|e| ws_error(&e))?;
+        if matches!(message, Message::Close(_)) {
+            return Err(NotifyError::Relay("the relay closed the connection early"));
+        }
+        if let Message::Text(text) = &message
+            && let Ok(Value::Array(fields)) = serde_json::from_str::<Value>(text.as_str())
+        {
+            match fields.as_slice() {
+                [Value::String(kind), Value::String(sub), ..]
+                    if kind == "EOSE" && sub == INBOX_SUB =>
+                {
+                    break;
+                }
+                [Value::String(kind), Value::String(sub), ..]
+                    if kind == "CLOSED" && sub == INBOX_SUB =>
+                {
+                    return Err(NotifyError::Refused(LOOKUP_REFUSED));
+                }
+                [Value::String(kind), Value::String(sub), obj]
+                    if kind == "EVENT" && sub == INBOX_SUB =>
+                {
+                    if let Ok(candidate) = Event::from_json(&obj.to_string())
+                        && candidate.kind == 10050
+                        && candidate.pubkey == recipient_hex
+                        && candidate.verify().is_ok()
+                    {
+                        // The newest wins; on a tie the lowest id (NIP-01).
+                        let better = best.as_ref().is_none_or(|b| {
+                            candidate.created_at > b.created_at
+                                || (candidate.created_at == b.created_at && candidate.id < b.id)
+                        });
+                        if better {
+                            best = Some(candidate);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Every frame but the matching EOSE counts toward the limit.
+        *ignored += 1;
+        if *ignored > MAX_SKIPPED_MESSAGES {
+            return Err(NotifyError::Relay(
+                "the relay sent too many unrelated messages",
+            ));
+        }
+    }
+    let _ = socket.send(Message::text(
+        serde_json::json!(["CLOSE", INBOX_SUB]).to_string(),
+    ));
+    let relay_url = format!("ws://{}:{}", relay.host, relay.port);
+    let verdict = match best {
+        None => Err(NotifyError::Refused(NO_INBOX)),
+        Some(list) if !lists_relay(&list, &relay_url) => Err(NotifyError::Refused(NOT_LISTED)),
+        Some(_) => Ok(()),
+    };
+    if verdict.is_err() {
+        let _ = socket.close(None);
+    }
+    verdict
 }
 
 /// [`publish`] with the name lookup and the total time as parameters (tests
@@ -216,6 +326,7 @@ pub(crate) fn publish(
 /// checked address is the one connected to.
 fn publish_with<R>(
     relay: &RelayUrl,
+    recipient: &[u8; 32],
     events: &[Event],
     total: Duration,
     resolver: &R,
@@ -262,6 +373,9 @@ where
             },
         )?;
 
+    let mut ignored = 0usize;
+    check_inbox_list(&mut socket, relay, &hex_encode(recipient), &mut ignored)?;
+
     for event in events {
         let text = format!("[\"EVENT\",{}]", event.to_json());
         if text.len() > MAX_MESSAGE_BYTES {
@@ -273,7 +387,6 @@ where
     }
 
     let mut outcomes: Vec<Option<PublishOutcome>> = vec![None; events.len()];
-    let mut ignored = 0usize;
     while outcomes.iter().any(Option::is_none) {
         let message = socket.read().map_err(|e| ws_error(&e))?;
         if matches!(message, Message::Close(_)) {
@@ -348,7 +461,7 @@ mod tests {
     )]
 
     use super::*;
-    use crate::event::{gift_wrap_dm, unwrap_dm};
+    use crate::event::{UnsignedEvent, gift_wrap_dm, unwrap_dm};
     use crate::{Clock, Entropy, Keys, NotifyError};
     use sha2::{Digest, Sha256};
     use std::net::TcpListener;
@@ -383,7 +496,8 @@ mod tests {
         Reject,
         Silent,
         NoiseThenAccept,
-        Redirect,
+        /// Answers the handshake with a redirect to 127.0.0.1 on this port.
+        Redirect(u16),
         Huge,
         /// Answers a two-event batch with a short, a conflicting and a good ack.
         Conflicting,
@@ -395,21 +509,98 @@ mod tests {
         BadFifth,
     }
 
+    /// What the fake relay answers to the inbox-list lookup (the REQ).
+    #[derive(Clone, Copy)]
+    enum Inbox {
+        /// One valid list naming this relay.
+        Listed,
+        /// The same, written with a trailing slash.
+        ListedSlash,
+        /// End of stored events and nothing else.
+        Missing,
+        /// A valid list naming another relay only.
+        OtherRelay,
+        /// A list signed for another relay, then edited to name this one.
+        Forged,
+        /// A valid list naming this relay, written by someone else.
+        WrongAuthor,
+        /// A newer list without this relay, then an older one with it.
+        NewerWithout,
+        /// A newer list with this relay, then an older one without it.
+        NewerWith,
+        /// A refusal of the subscription.
+        Closed,
+        /// Never finishes.
+        Silent,
+        /// Floods notices and never finishes.
+        Flood,
+    }
+
+    const T0: u64 = 1_795_000_000;
+
+    /// The kind-10050 events the fake relay at `port` answers with.
+    fn inbox_events(inbox: Inbox, port: u16) -> Vec<Event> {
+        let own = format!("ws://strfry:{port}");
+        let other = "ws://strfry:7778".to_owned();
+        let recipient = Keys::generate(&mut Seq(2)).unwrap();
+        let make = |keys: &Keys, at: u64, url: &str| {
+            Event::sign(
+                UnsignedEvent {
+                    pubkey: keys.public_hex().unwrap(),
+                    created_at: at,
+                    kind: 10050,
+                    tags: vec![vec!["relay".to_owned(), url.to_owned()]],
+                    content: String::new(),
+                },
+                keys,
+                &mut Seq(500),
+            )
+            .unwrap()
+        };
+        match inbox {
+            Inbox::Listed => vec![make(&recipient, T0, &own)],
+            Inbox::ListedSlash => vec![make(&recipient, T0, &format!("{own}/"))],
+            Inbox::OtherRelay => vec![make(&recipient, T0, &other)],
+            Inbox::Forged => {
+                let mut e = make(&recipient, T0, &other);
+                e.tags = vec![vec!["relay".to_owned(), own]];
+                vec![e]
+            }
+            Inbox::WrongAuthor => {
+                let stranger = Keys::generate(&mut Seq(9)).unwrap();
+                vec![make(&stranger, T0, &own)]
+            }
+            Inbox::NewerWithout => vec![
+                make(&recipient, T0 + 10, &other),
+                make(&recipient, T0, &own),
+            ],
+            Inbox::NewerWith => vec![
+                make(&recipient, T0 + 10, &own),
+                make(&recipient, T0, &other),
+            ],
+            Inbox::Missing | Inbox::Closed | Inbox::Silent | Inbox::Flood => vec![],
+        }
+    }
+
     /// An in-process relay on 127.0.0.1: records every message it gets.
-    fn fake_relay(mode: Mode) -> (u16, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
+    fn fake_relay(
+        mode: Mode,
+        inbox: Inbox,
+    ) -> (u16, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&seen);
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            if matches!(mode, Mode::Redirect) {
+            if let Mode::Redirect(trap) = mode {
                 use std::io::{Read, Write};
                 let mut buf = [0u8; 2048];
                 let _ = stream.read(&mut buf);
-                let _ = stream.write_all(
-                    b"HTTP/1.1 301 Moved Permanently\r\nLocation: ws://elsewhere.example:7777/\r\nContent-Length: 0\r\n\r\n",
+                let reply = format!(
+                    "HTTP/1.1 301 Moved Permanently\r\nLocation: ws://127.0.0.1:{trap}/\r\nContent-Length: 0\r\n\r\n"
                 );
+                let _ = stream.write_all(reply.as_bytes());
                 return;
             }
             let mut ws = tungstenite::accept(stream).unwrap();
@@ -419,6 +610,38 @@ mod tests {
                 let Message::Text(text) = msg else { continue };
                 log.lock().unwrap().push(text.as_str().to_owned());
                 let v: Value = serde_json::from_str(text.as_str()).unwrap();
+                match v[0].as_str() {
+                    Some("REQ") => {
+                        let sub = serde_json::json!("gd-inbox");
+                        match inbox {
+                            Inbox::Silent => {}
+                            Inbox::Flood => {
+                                for _ in 0..250 {
+                                    let _ = ws.send(Message::text(r#"["NOTICE","x"]"#));
+                                }
+                            }
+                            Inbox::Closed => {
+                                let _ = ws.send(Message::text(
+                                    serde_json::json!(["CLOSED", sub, "auth-required: no"])
+                                        .to_string(),
+                                ));
+                            }
+                            _ => {
+                                for e in inbox_events(inbox, port) {
+                                    let obj: Value = serde_json::from_str(&e.to_json()).unwrap();
+                                    let frame = serde_json::json!(["EVENT", sub, obj]);
+                                    let _ = ws.send(Message::text(frame.to_string()));
+                                }
+                                let _ = ws.send(Message::text(
+                                    serde_json::json!(["EOSE", sub]).to_string(),
+                                ));
+                            }
+                        }
+                        continue;
+                    }
+                    Some("EVENT") => {}
+                    _ => continue,
+                }
                 let id = v[1]["id"].as_str().unwrap().to_owned();
                 ids.push(id.clone());
                 if matches!(mode, Mode::FiveFields) {
@@ -459,7 +682,7 @@ mod tests {
                     Mode::Reject => serde_json::json!(["OK", id, false, "blocked: \u{1b}[31mnope"]),
                     Mode::Huge => serde_json::json!(["NOTICE", "x".repeat(100_000)]),
                     Mode::Silent
-                    | Mode::Redirect
+                    | Mode::Redirect(_)
                     | Mode::Conflicting
                     | Mode::Pings
                     | Mode::FiveFields
@@ -476,6 +699,21 @@ mod tests {
             }
         });
         (port, seen, handle)
+    }
+
+    /// The EVENT frames the fake relay recorded (not the REQ or CLOSE).
+    fn event_frames(seen: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|raw| serde_json::from_str::<Value>(raw).is_ok_and(|v| v[0] == "EVENT"))
+            .cloned()
+            .collect()
+    }
+
+    /// The recipient's public key (the same key `wraps` wraps for).
+    fn rpk() -> [u8; 32] {
+        Keys::generate(&mut Seq(2)).unwrap().public_x().unwrap()
     }
 
     fn wraps(n: usize) -> (Keys, Vec<Event>) {
@@ -500,15 +738,15 @@ mod tests {
     #[test]
     fn fake_relay_receives_exactly_the_wraps_and_answers_ok() {
         let (recipient, events) = wraps(3);
-        let (port, seen, handle) = fake_relay(Mode::Accept);
-        let out = publish(&RelayUrl::loopback_for_test(port), &events).unwrap();
+        let (port, seen, handle) = fake_relay(Mode::Accept, Inbox::Listed);
+        let out = publish(&RelayUrl::loopback_for_test(port), &rpk(), &events).unwrap();
         assert_eq!(out.len(), 3);
         for (o, e) in out.iter().zip(&events) {
             assert!(o.accepted);
             assert_eq!(o.event_id, e.id);
         }
         handle.join().unwrap();
-        let got = seen.lock().unwrap().clone();
+        let got = event_frames(&seen);
         assert_eq!(got.len(), 3);
         for (i, text) in got.iter().enumerate() {
             let v: Value = serde_json::from_str(text).unwrap();
@@ -518,15 +756,18 @@ mod tests {
             assert_eq!(event, events[i]);
             event.verify().unwrap();
             let opened = unwrap_dm(&recipient, &event).unwrap();
-            assert_eq!(opened.rumor.content, format!("message {i}"));
+            assert!(
+                opened.rumor.content == format!("message {i}"),
+                "message {i} did not round-trip"
+            );
         }
     }
 
     #[test]
     fn a_rejection_is_reported_and_its_text_is_untrusted() {
         let (_, events) = wraps(1);
-        let (port, _seen, handle) = fake_relay(Mode::Reject);
-        let out = publish(&RelayUrl::loopback_for_test(port), &events).unwrap();
+        let (port, _seen, handle) = fake_relay(Mode::Reject, Inbox::Listed);
+        let out = publish(&RelayUrl::loopback_for_test(port), &rpk(), &events).unwrap();
         assert!(!out[0].accepted);
         let shown = format!("{:?}", out[0]);
         assert!(!shown.contains("blocked"), "{shown}");
@@ -542,8 +783,8 @@ mod tests {
     #[test]
     fn notices_and_other_answers_are_skipped() {
         let (_, events) = wraps(1);
-        let (port, _seen, handle) = fake_relay(Mode::NoiseThenAccept);
-        let out = publish(&RelayUrl::loopback_for_test(port), &events).unwrap();
+        let (port, _seen, handle) = fake_relay(Mode::NoiseThenAccept, Inbox::Listed);
+        let out = publish(&RelayUrl::loopback_for_test(port), &rpk(), &events).unwrap();
         assert!(out[0].accepted);
         handle.join().unwrap();
     }
@@ -551,9 +792,9 @@ mod tests {
     #[test]
     fn a_silent_relay_times_out_inside_ten_seconds() {
         let (_, events) = wraps(1);
-        let (port, _seen, handle) = fake_relay(Mode::Silent);
+        let (port, _seen, handle) = fake_relay(Mode::Silent, Inbox::Listed);
         let start = Instant::now();
-        let err = publish(&RelayUrl::loopback_for_test(port), &events).unwrap_err();
+        let err = publish(&RelayUrl::loopback_for_test(port), &rpk(), &events).unwrap_err();
         assert!(matches!(err, NotifyError::Relay(_)), "{err}");
         assert!(
             start.elapsed() < Duration::from_secs(12),
@@ -566,18 +807,33 @@ mod tests {
     #[test]
     fn a_redirect_is_not_followed() {
         let (_, events) = wraps(1);
-        let (port, _seen, handle) = fake_relay(Mode::Redirect);
-        let err = publish(&RelayUrl::loopback_for_test(port), &events).unwrap_err();
-        assert!(matches!(err, NotifyError::Relay(_)), "{err}");
+        let trap = TcpListener::bind("127.0.0.1:0").unwrap();
+        trap.set_nonblocking(true).unwrap();
+        let trap_port = trap.local_addr().unwrap().port();
+        let (port, _seen, handle) = fake_relay(Mode::Redirect(trap_port), Inbox::Listed);
+        let err = publish(&RelayUrl::loopback_for_test(port), &rpk(), &events).unwrap_err();
+        assert!(
+            matches!(err, NotifyError::Relay(m) if m == "the relay answered with an HTTP status, not a websocket"),
+            "{err}"
+        );
         handle.join().unwrap();
+        // The redirect target got no connection at all.
+        let accepted = trap.accept();
+        assert!(
+            matches!(&accepted, Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+            "the redirect target was connected to"
+        );
     }
 
     #[test]
     fn a_message_over_64_kib_is_refused() {
         let (_, events) = wraps(1);
-        let (port, _seen, handle) = fake_relay(Mode::Huge);
-        let err = publish(&RelayUrl::loopback_for_test(port), &events).unwrap_err();
-        assert!(matches!(err, NotifyError::Relay(_)), "{err}");
+        let (port, _seen, handle) = fake_relay(Mode::Huge, Inbox::Listed);
+        let err = publish(&RelayUrl::loopback_for_test(port), &rpk(), &events).unwrap_err();
+        assert!(
+            matches!(err, NotifyError::Relay(m) if m == "the relay sent a message that is too large"),
+            "{err}"
+        );
         handle.join().unwrap();
     }
 
@@ -633,7 +889,7 @@ mod tests {
             alert("held-back", Severity::Low),
             alert("sent-one", Severity::High),
         ];
-        let (port, seen, handle) = fake_relay(Mode::Accept);
+        let (port, seen, handle) = fake_relay(Mode::Accept, Inbox::Listed);
         let out = crate::send_alerts(
             &RelayUrl::loopback_for_test(port),
             &sender,
@@ -647,7 +903,7 @@ mod tests {
         // The high one, then one summary for the low one that was held back.
         assert_eq!(out.len(), 2);
         handle.join().unwrap();
-        let got = seen.lock().unwrap().clone();
+        let got = event_frames(&seen);
         assert_eq!(got.len(), 2);
         let open = |raw: &str| {
             let v: Value = serde_json::from_str(raw).unwrap();
@@ -659,6 +915,107 @@ mod tests {
         let summary = open(&got[1]);
         assert!(summary.contains("1 medium or low finding not sent as direct messages"));
         assert!(!summary.contains("held-back"));
+    }
+
+    /// Runs one publish against a fake relay with the given inbox answer.
+    fn run_with_inbox(inbox: Inbox) -> (Result<Vec<PublishOutcome>, NotifyError>, usize) {
+        let (_, events) = wraps(1);
+        let (port, seen, handle) = fake_relay(Mode::Accept, inbox);
+        let result = publish(&RelayUrl::loopback_for_test(port), &rpk(), &events);
+        if matches!(inbox, Inbox::Silent | Inbox::Flood) {
+            drop(handle);
+        } else {
+            handle.join().unwrap();
+        }
+        let count = event_frames(&seen).len();
+        (result, count)
+    }
+
+    #[test]
+    fn the_inbox_lookup_is_one_req_for_the_recipient_closed_before_any_event() {
+        let (_, events) = wraps(1);
+        let (port, seen, handle) = fake_relay(Mode::Accept, Inbox::Listed);
+        publish(&RelayUrl::loopback_for_test(port), &rpk(), &events).unwrap();
+        handle.join().unwrap();
+        let got = seen.lock().unwrap().clone();
+        let parse = |i: usize| serde_json::from_str::<Value>(&got[i]).unwrap();
+        let want = serde_json::json!([
+            "REQ",
+            "gd-inbox",
+            {"kinds": [10050], "authors": [crate::encoding::hex_encode(&rpk())], "limit": 1}
+        ]);
+        assert!(parse(0) == want, "the REQ is not the expected one");
+        assert!(parse(1) == serde_json::json!(["CLOSE", "gd-inbox"]));
+        assert!(parse(2)[0] == "EVENT");
+        assert_eq!(got.len(), 3);
+    }
+
+    #[test]
+    fn without_an_inbox_list_nothing_is_sent() {
+        let (result, events) = run_with_inbox(Inbox::Missing);
+        assert!(matches!(result, Err(NotifyError::Refused(m)) if m == NO_INBOX));
+        assert_eq!(events, 0);
+    }
+
+    #[test]
+    fn an_inbox_list_without_this_relay_sends_nothing() {
+        let (result, events) = run_with_inbox(Inbox::OtherRelay);
+        assert!(matches!(result, Err(NotifyError::Refused(m)) if m == NOT_LISTED));
+        assert_eq!(events, 0);
+    }
+
+    #[test]
+    fn a_forged_or_foreign_inbox_list_counts_as_none() {
+        for inbox in [Inbox::Forged, Inbox::WrongAuthor] {
+            let (result, events) = run_with_inbox(inbox);
+            assert!(matches!(result, Err(NotifyError::Refused(m)) if m == NO_INBOX));
+            assert_eq!(events, 0);
+        }
+    }
+
+    #[test]
+    fn the_newest_inbox_list_wins() {
+        let (result, events) = run_with_inbox(Inbox::NewerWithout);
+        assert!(matches!(result, Err(NotifyError::Refused(m)) if m == NOT_LISTED));
+        assert_eq!(events, 0);
+        let (result, events) = run_with_inbox(Inbox::NewerWith);
+        let out = result.unwrap();
+        assert!(out.len() == 1 && out[0].accepted);
+        assert_eq!(events, 1);
+    }
+
+    #[test]
+    fn the_relay_may_be_listed_with_a_trailing_slash() {
+        let (result, events) = run_with_inbox(Inbox::ListedSlash);
+        assert!(result.is_ok());
+        assert_eq!(events, 1);
+    }
+
+    #[test]
+    fn a_refused_inbox_lookup_sends_nothing() {
+        let (result, events) = run_with_inbox(Inbox::Closed);
+        assert!(matches!(result, Err(NotifyError::Refused(m)) if m == LOOKUP_REFUSED));
+        assert_eq!(events, 0);
+    }
+
+    #[test]
+    fn an_unfinished_inbox_lookup_times_out_inside_ten_seconds() {
+        let start = Instant::now();
+        let (result, events) = run_with_inbox(Inbox::Silent);
+        assert!(matches!(result, Err(NotifyError::Relay(_))));
+        assert!(
+            start.elapsed() < Duration::from_secs(12),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(events, 0);
+    }
+
+    #[test]
+    fn a_flood_during_the_inbox_lookup_hits_the_limit() {
+        let (result, events) = run_with_inbox(Inbox::Flood);
+        assert!(matches!(result, Err(NotifyError::Relay(m)) if m.contains("too many unrelated")));
+        assert_eq!(events, 0);
     }
 
     fn sock(ip: &str) -> SocketAddr {
@@ -720,7 +1077,7 @@ mod tests {
         let resolver = |_: &str, _: u16| -> std::io::Result<Vec<SocketAddr>> {
             Ok(vec![sock("192.168.1.20")])
         };
-        let err = publish_with(&relay, &events, TOTAL_TIMEOUT, &resolver).unwrap_err();
+        let err = publish_with(&relay, &rpk(), &events, TOTAL_TIMEOUT, &resolver).unwrap_err();
         assert!(matches!(err, NotifyError::Refused(_)), "{err}");
     }
 
@@ -732,7 +1089,7 @@ mod tests {
             Ok(vec![sock("93.184.216.34")])
         };
         // The loopback test relay may use loopback, but never a public address.
-        let err = publish_with(&relay, &events, TOTAL_TIMEOUT, &resolver).unwrap_err();
+        let err = publish_with(&relay, &rpk(), &events, TOTAL_TIMEOUT, &resolver).unwrap_err();
         assert!(matches!(err, NotifyError::Refused(_)), "{err}");
     }
 
@@ -745,7 +1102,8 @@ mod tests {
             Ok(vec![sock("127.0.0.1")])
         };
         let start = Instant::now();
-        let err = publish_with(&relay, &events, Duration::from_secs(1), &resolver).unwrap_err();
+        let err =
+            publish_with(&relay, &rpk(), &events, Duration::from_secs(1), &resolver).unwrap_err();
         assert!(matches!(err, NotifyError::Relay(_)), "{err}");
         assert!(
             start.elapsed() < Duration::from_secs(3),
@@ -757,14 +1115,14 @@ mod tests {
     #[test]
     fn the_checked_address_is_the_one_connected_to() {
         let (_, events) = wraps(1);
-        let (port, _seen, handle) = fake_relay(Mode::Accept);
+        let (port, _seen, handle) = fake_relay(Mode::Accept, Inbox::Listed);
         let relay = RelayUrl::loopback_for_test(port);
         let resolver = move |host: &str, p: u16| -> std::io::Result<Vec<SocketAddr>> {
             assert_eq!(host, "strfry");
             assert_eq!(p, port);
             Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])
         };
-        let out = publish_with(&relay, &events, TOTAL_TIMEOUT, &resolver).unwrap();
+        let out = publish_with(&relay, &rpk(), &events, TOTAL_TIMEOUT, &resolver).unwrap();
         assert!(out[0].accepted);
         handle.join().unwrap();
     }
@@ -792,7 +1150,7 @@ mod tests {
         let (recipient, _) = wraps(0);
         let sender = Keys::generate(&mut Seq(1)).unwrap();
         for chain in [Chain::Mainnet, Chain::Testnet, Chain::Unknown] {
-            let (port, seen, handle) = fake_relay(Mode::Accept);
+            let (port, seen, handle) = fake_relay(Mode::Accept, Inbox::Listed);
             // The node set is fine, but this one alert is on another chain: it is
             // never sent, the good one still is, and the summary counts it.
             let out = crate::send_alerts(
@@ -807,7 +1165,7 @@ mod tests {
             .unwrap();
             assert_eq!(out.len(), 2, "{chain:?}");
             handle.join().unwrap();
-            let got = seen.lock().unwrap().clone();
+            let got = event_frames(&seen);
             let texts: Vec<String> = got
                 .iter()
                 .map(|raw| {
@@ -848,8 +1206,8 @@ mod tests {
     #[test]
     fn a_short_ack_a_conflicting_repeat_and_an_unknown_id_do_not_change_the_outcome() {
         let (_, events) = wraps(2);
-        let (port, _seen, handle) = fake_relay(Mode::Conflicting);
-        let out = publish(&RelayUrl::loopback_for_test(port), &events).unwrap();
+        let (port, _seen, handle) = fake_relay(Mode::Conflicting, Inbox::Listed);
+        let out = publish(&RelayUrl::loopback_for_test(port), &rpk(), &events).unwrap();
         assert_eq!(out.len(), 2);
         // The first answer for the first event stands; the later "false" is ignored.
         assert!(out[0].accepted && out[1].accepted);
@@ -862,8 +1220,8 @@ mod tests {
     #[test]
     fn a_valid_five_field_rejection_is_reported_as_that_rejection() {
         let (_, events) = wraps(1);
-        let (port, _seen, handle) = fake_relay(Mode::FiveFields);
-        let out = publish(&RelayUrl::loopback_for_test(port), &events).unwrap();
+        let (port, _seen, handle) = fake_relay(Mode::FiveFields, Inbox::Listed);
+        let out = publish(&RelayUrl::loopback_for_test(port), &rpk(), &events).unwrap();
         assert!(!out[0].accepted);
         assert!(
             out[0]
@@ -877,8 +1235,8 @@ mod tests {
     #[test]
     fn a_five_field_ack_with_a_fifth_field_that_is_not_text_counts_as_ignored() {
         let (_, events) = wraps(1);
-        let (port, _seen, handle) = fake_relay(Mode::BadFifth);
-        let err = publish(&RelayUrl::loopback_for_test(port), &events).unwrap_err();
+        let (port, _seen, handle) = fake_relay(Mode::BadFifth, Inbox::Listed);
+        let err = publish(&RelayUrl::loopback_for_test(port), &rpk(), &events).unwrap_err();
         assert!(
             matches!(err, NotifyError::Relay(m) if m.contains("too many")),
             "{err}"
@@ -889,8 +1247,8 @@ mod tests {
     #[test]
     fn pings_count_toward_the_limit_on_unrelated_messages() {
         let (_, events) = wraps(1);
-        let (port, _seen, handle) = fake_relay(Mode::Pings);
-        let err = publish(&RelayUrl::loopback_for_test(port), &events).unwrap_err();
+        let (port, _seen, handle) = fake_relay(Mode::Pings, Inbox::Listed);
+        let err = publish(&RelayUrl::loopback_for_test(port), &rpk(), &events).unwrap_err();
         assert!(
             matches!(err, NotifyError::Relay(m) if m.contains("too many")),
             "{err}"
@@ -985,6 +1343,7 @@ mod tests {
             let start = Instant::now();
             let err = publish_with(
                 &RelayUrl::loopback_for_test(port),
+                &rpk(),
                 &events,
                 total,
                 &loopback_resolver,

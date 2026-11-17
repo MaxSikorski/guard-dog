@@ -7,12 +7,12 @@
 //! user running Guard Dog, so a key planted by anyone else (root included) is
 //! refused.
 
-use crate::encoding::hex32_secret;
+use crate::encoding::{hex_encode, hex32_secret};
 use crate::{Entropy, Keys, NotifyError};
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use zeroize::Zeroizing;
 
 /// The key file's name inside the state folder.
@@ -59,15 +59,97 @@ fn check_state_dir_shape(dir: &Path) -> Result<fs::Metadata, NotifyError> {
     Ok(meta)
 }
 
-/// The folder must be a real 0700 folder owned by `euid`.
-fn check_state_dir(dir: &Path, euid: u32) -> Result<(), NotifyError> {
+/// The folder must be a real 0700 folder owned by `euid`. Returns its metadata,
+/// so the caller can remember which folder was checked.
+fn check_state_dir(dir: &Path, euid: u32) -> Result<fs::Metadata, NotifyError> {
     let meta = check_state_dir_shape(dir)?;
     if meta.uid() != euid {
         return Err(refuse(
             "the state folder does not belong to the user running Guard Dog",
         ));
     }
+    Ok(meta)
+}
+
+const ABOVE_UNREADABLE: &str = "cannot look at a folder above the state folder";
+
+/// Every folder above the state folder (as written, and as it really is after
+/// symlinks) must belong to root or the running user, and must not be
+/// writable by others unless it is sticky. Otherwise someone else could
+/// rename a folder in the chain and swap the state folder for another one.
+/// A sticky folder such as `/tmp` is safe here because every entry below it in
+/// the chain is itself checked, and in a sticky folder only an entry's owner
+/// can rename it.
+fn check_ancestors(dir: &Path, euid: u32) -> Result<(), NotifyError> {
+    if !dir.is_absolute()
+        || dir
+            .components()
+            .any(|c| matches!(c, Component::CurDir | Component::ParentDir))
+    {
+        return Err(refuse(
+            "the state folder must be an absolute path without . or ..",
+        ));
+    }
+    let real = fs::canonicalize(dir).map_err(|_| refuse(ABOVE_UNREADABLE))?;
+    for p in dir.ancestors().skip(1).chain(real.ancestors().skip(1)) {
+        let m = fs::symlink_metadata(p).map_err(|_| refuse(ABOVE_UNREADABLE))?;
+        if m.uid() != 0 && m.uid() != euid {
+            return Err(refuse(
+                "a folder above the state folder belongs to another user",
+            ));
+        }
+        // A symlink passes once its owner is checked; its target's folders are
+        // covered by the real path's ancestors.
+        if m.file_type().is_symlink() {
+            continue;
+        }
+        if !m.file_type().is_dir() {
+            return Err(refuse(ABOVE_UNREADABLE));
+        }
+        if m.mode() & 0o022 != 0 && m.mode() & 0o1000 == 0 {
+            return Err(refuse(
+                "a folder above the state folder can be changed by other users",
+            ));
+        }
+    }
     Ok(())
+}
+
+const DIR_CHANGED_INSTALL: &str = "the state folder changed while the key was being installed";
+const DIR_CHANGED_READ: &str = "the state folder changed while the key was being read";
+
+/// The folder at `dir` must still be the same directory (device and inode) as
+/// the one that was checked.
+fn same_dir(dir: &Path, dir_id: (u64, u64), message: &'static str) -> Result<(), NotifyError> {
+    let m = fs::symlink_metadata(dir).map_err(|_| refuse(message))?;
+    if !m.file_type().is_dir() || (m.dev(), m.ino()) != dir_id {
+        return Err(refuse(message));
+    }
+    Ok(())
+}
+
+/// After linking: the folder we sync is the one we checked, the key name holds
+/// our own temporary's file, and the folder is still the same one.
+fn verify_installed(
+    dir: &Path,
+    dir_id: (u64, u64),
+    temp_id: (u64, u64),
+) -> Result<(), NotifyError> {
+    let d = fs::File::open(dir).map_err(|_| refuse("cannot save the key file's folder entry"))?;
+    let dm = d
+        .metadata()
+        .map_err(|_| refuse("cannot save the key file's folder entry"))?;
+    if (dm.dev(), dm.ino()) != dir_id {
+        return Err(refuse(DIR_CHANGED_INSTALL));
+    }
+    d.sync_all()
+        .map_err(|_| refuse("cannot save the key file's folder entry"))?;
+    let k =
+        fs::symlink_metadata(dir.join(KEY_FILE_NAME)).map_err(|_| refuse(DIR_CHANGED_INSTALL))?;
+    if !k.file_type().is_file() || (k.dev(), k.ino()) != temp_id {
+        return Err(refuse(DIR_CHANGED_INSTALL));
+    }
+    same_dir(dir, dir_id, DIR_CHANGED_INSTALL)
 }
 
 /// The key file must belong to the user running Guard Dog.
@@ -130,11 +212,14 @@ fn read_key(path: &Path, euid: u32) -> Result<Keys, NotifyError> {
 }
 
 /// Reads Guard Dog's key, creating it on first use. `state_dir` must already
-/// exist with mode 0700 and belong to the user running Guard Dog.
+/// exist with mode 0700 and belong to the user running Guard Dog, and must be
+/// an absolute path whose folders above it are not open to other users.
 pub fn load_or_create(state_dir: &Path, entropy: &mut dyn Entropy) -> Result<Keys, NotifyError> {
     // Nothing is written until the folder is known to be a real 0700 folder, so
     // a symlink or a loose folder is refused without touching its target.
     check_state_dir_shape(state_dir)?;
+    // The ancestor check needs the user id, so the probe writes first: it is
+    // created `create_new` with mode 0600 and removed straight away.
     let euid = effective_uid(state_dir)?;
     load_or_create_as(state_dir, entropy, euid)
 }
@@ -145,55 +230,90 @@ fn load_or_create_as(
     entropy: &mut dyn Entropy,
     euid: u32,
 ) -> Result<Keys, NotifyError> {
-    check_state_dir(state_dir, euid)?;
+    let meta = check_state_dir(state_dir, euid)?;
+    let dir_id = (meta.dev(), meta.ino());
+    check_ancestors(state_dir, euid)?;
+    // Real folder identity (after symlinks) must be the one just checked.
+    let real_meta =
+        fs::metadata(fs::canonicalize(state_dir).map_err(|_| refuse(ABOVE_UNREADABLE))?)
+            .map_err(|_| refuse(ABOVE_UNREADABLE))?;
+    if (real_meta.dev(), real_meta.ino()) != dir_id {
+        return Err(refuse(
+            "the state folder changed while it was being checked",
+        ));
+    }
+    remove_stale_temporaries(state_dir);
     let path = state_dir.join(KEY_FILE_NAME);
     match fs::symlink_metadata(&path) {
-        Ok(_) => return read_key(&path, euid),
+        Ok(_) => return read_existing(&path, euid, state_dir, dir_id),
         Err(e) if e.kind() == ErrorKind::NotFound => {}
         Err(_) => return Err(refuse("cannot look at the key file")),
     }
-    remove_stale_temporaries(state_dir);
     let keys = Keys::generate(entropy)?;
     let mut line = keys.secret_hex();
     line.push('\n');
+    let mut suffix = [0u8; 8];
     // The key is written and synced in a private temporary file first, then
     // installed under its real name with a hard link, which fails if a key is
     // already there. So `notify.key` is never seen empty or half written, and
     // two first uses at once end with one key.
-    let temporary = state_dir.join(format!(
-        "{TEMP_PREFIX}{}-{}",
-        std::process::id(),
-        TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    write_new(&temporary, |file| {
-        file.write_all(line.as_bytes())?;
-        file.sync_all()
-    })
-    .map_err(|_| refuse("cannot create the key file"))?;
+    let (temporary, file) = create_temporary(
+        state_dir,
+        || {
+            entropy.fill(&mut suffix)?;
+            Ok(format!("{TEMP_PREFIX}{}", hex_encode(&suffix)))
+        },
+        line.as_bytes(),
+    )?;
+    let temp_meta = file
+        .metadata()
+        .map_err(|_| refuse("cannot create the key file"))?;
+    let temp_id = (temp_meta.dev(), temp_meta.ino());
+    if let Err(e) = same_dir(state_dir, dir_id, DIR_CHANGED_INSTALL) {
+        let _ = fs::remove_file(&temporary);
+        return Err(e);
+    }
     let linked = fs::hard_link(&temporary, &path);
     let _ = fs::remove_file(&temporary);
     match linked {
+        // On a refusal here nothing is removed: we no longer know which
+        // folder we would be removing from.
         Ok(()) => {
-            // Make the new directory entry durable too.
-            fs::File::open(state_dir)
-                .and_then(|d| d.sync_all())
-                .map_err(|_| refuse("cannot save the key file's folder entry"))?;
+            verify_installed(state_dir, dir_id, temp_id)?;
             Ok(keys)
         }
         // Someone else installed a key a moment ago: use theirs, after the same checks.
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => read_key(&path, euid),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+            read_existing(&path, euid, state_dir, dir_id)
+        }
         Err(_) => Err(refuse("cannot create the key file")),
     }
 }
 
+/// Reads the key, then confirms the folder was not swapped meanwhile.
+fn read_existing(
+    path: &Path,
+    euid: u32,
+    state_dir: &Path,
+    dir_id: (u64, u64),
+) -> Result<Keys, NotifyError> {
+    let keys = read_key(path, euid)?;
+    same_dir(state_dir, dir_id, DIR_CHANGED_READ)?;
+    Ok(keys)
+}
+
 const TEMP_PREFIX: &str = ".notify-key-tmp-";
-static TEMP_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 /// A temporary this old is from a run that was killed; a live run needs
-/// milliseconds.
+/// milliseconds. The age is wall-clock time against the file's mtime. If the
+/// clock jumps forward, a live temporary can look stale and be removed; that
+/// run's hard link then fails with `NotFound` and returns an error, never a
+/// wrong key. If the clock jumps back, cleanup just waits. Both fail safe.
 const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Removes temporaries left by a killed run. They are never read as the key
-/// (only `notify.key` is), this just tidies the folder.
+/// Removes temporaries left by a killed run, on every run. A temporary from a
+/// run killed between link and unlink is a second name for the key file, and
+/// removing it removes that name. It is never read as the key (only
+/// `notify.key` is).
 fn remove_stale_temporaries(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -215,13 +335,34 @@ fn remove_stale_temporaries(dir: &Path) {
     }
 }
 
+/// Creates a temporary (never over an existing file, mode 0600) holding
+/// `contents`, trying up to 4 names; a taken name moves on to the next.
+fn create_temporary(
+    dir: &Path,
+    mut next_name: impl FnMut() -> Result<String, NotifyError>,
+    contents: &[u8],
+) -> Result<(PathBuf, fs::File), NotifyError> {
+    for _ in 0..4 {
+        let path = dir.join(next_name()?);
+        match write_new(&path, |file| {
+            file.write_all(contents)?;
+            file.sync_all()
+        }) {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+            Err(_) => break,
+        }
+    }
+    Err(refuse("cannot create the key file"))
+}
+
 /// Creates the file (never over an existing one, mode 0600) and fills it with
 /// `fill`. If filling fails, the half-written file is removed, so a later run
-/// does not meet a broken key.
+/// does not meet a broken key. Returns the open file.
 fn write_new(
     path: &Path,
     fill: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
-) -> std::io::Result<()> {
+) -> std::io::Result<fs::File> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -232,7 +373,7 @@ fn write_new(
         let _ = fs::remove_file(path);
         return Err(e);
     }
-    Ok(())
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -435,6 +576,123 @@ mod tests {
             Err(NotifyError::KeyFile(_))
         ));
         assert!(owners_match(euid, euid) && !owners_match(0, 501));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn id_of(p: &Path) -> (u64, u64) {
+        let m = fs::metadata(p).unwrap();
+        (m.dev(), m.ino())
+    }
+
+    #[test]
+    fn a_folder_above_that_others_can_write_is_refused() {
+        let base = temp_dir("anc");
+        let open = base.join("open");
+        fs::create_dir(&open).unwrap();
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o777)).unwrap();
+        let state = open.join("state");
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        let err = load_or_create(&state, &mut crate::OsEntropy).unwrap_err();
+        assert!(
+            matches!(err, NotifyError::KeyFile(m) if m.contains("can be changed by other users")),
+            "{err}"
+        );
+        assert_eq!(fs::read_dir(&state).unwrap().count(), 0);
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o1777)).unwrap();
+        assert!(load_or_create(&state, &mut crate::OsEntropy).is_ok());
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_folder_above_owned_by_another_user_is_refused() {
+        let dir = temp_dir("anc2");
+        let euid = effective_uid(&dir).unwrap();
+        let err = check_ancestors(&dir, euid.wrapping_add(1)).unwrap_err();
+        assert!(
+            matches!(err, NotifyError::KeyFile(m) if m.contains("belongs to another user")),
+            "{err}"
+        );
+        assert!(check_ancestors(&dir, euid).is_ok());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_relative_or_dotted_state_path_is_refused() {
+        let dir = temp_dir("anc3");
+        let euid = effective_uid(&dir).unwrap();
+        for bad in [Path::new("rel/state").to_path_buf(), dir.join("x/../state")] {
+            let err = check_ancestors(&bad, euid).unwrap_err();
+            assert!(
+                matches!(err, NotifyError::KeyFile(m) if m.contains("absolute path")),
+                "{err}"
+            );
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_swapped_folder_or_key_is_caught_after_linking() {
+        let a = temp_dir("swapa");
+        let b = temp_dir("swapb");
+        let err = same_dir(&a, id_of(&b), DIR_CHANGED_INSTALL).unwrap_err();
+        assert!(matches!(err, NotifyError::KeyFile(m) if m.contains("changed")));
+        assert!(same_dir(&a, id_of(&a), DIR_CHANGED_INSTALL).is_ok());
+        load_or_create(&a, &mut crate::OsEntropy).unwrap();
+        let key_id = id_of(&a.join(KEY_FILE_NAME));
+        assert!(verify_installed(&a, id_of(&a), (0, 0)).is_err());
+        assert!(verify_installed(&a, id_of(&b), key_id).is_err());
+        assert!(verify_installed(&a, id_of(&a), key_id).is_ok());
+        fs::remove_dir_all(&a).unwrap();
+        fs::remove_dir_all(&b).unwrap();
+    }
+
+    #[test]
+    fn a_stale_hard_link_to_an_installed_key_is_removed_on_the_read_path() {
+        let dir = temp_dir("hardlink");
+        let k = load_or_create(&dir, &mut crate::OsEntropy)
+            .unwrap()
+            .public_hex()
+            .unwrap();
+        let crashed = dir.join(format!("{TEMP_PREFIX}crashed"));
+        fs::hard_link(dir.join(KEY_FILE_NAME), &crashed).unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(&crashed)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let again = load_or_create(&dir, &mut crate::OsEntropy)
+            .unwrap()
+            .public_hex()
+            .unwrap();
+        assert!(again == k, "a different key was returned");
+        assert!(!crashed.exists(), "the stale name was left");
+        let meta = fs::metadata(dir.join(KEY_FILE_NAME)).unwrap();
+        assert_eq!(meta.nlink(), 1);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_taken_temporary_name_is_skipped() {
+        let dir = temp_dir("taken");
+        let aa = dir.join(format!("{TEMP_PREFIX}aa"));
+        fs::write(&aa, "x").unwrap();
+        let mut names = ["aa", "bb"].into_iter();
+        let (path, _file) = create_temporary(
+            &dir,
+            || Ok(format!("{TEMP_PREFIX}{}", names.next().unwrap())),
+            b"contents",
+        )
+        .unwrap();
+        assert!(path.ends_with(format!("{TEMP_PREFIX}bb")));
+        assert_eq!(fs::read_to_string(&aa).unwrap(), "x");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "contents");
+        // Four collisions in a row give up.
+        let result = create_temporary(&dir, || Ok(format!("{TEMP_PREFIX}aa")), b"y");
+        assert!(result.is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
 }

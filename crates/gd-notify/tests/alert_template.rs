@@ -66,9 +66,9 @@ fn the_message_reads_in_the_planned_order() {
     let text =
         alert(|p| p.question = Some(Untrusted::new("Is port 9735 open?".to_owned()))).render();
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(
-        lines[0],
-        "LND 0.18.4-beta on this node is affected by x_lightning-labs-example-1."
+    assert!(
+        lines[0] == "LND 0.18.4-beta on this node is affected by x_lightning-labs-example-1.",
+        "headline differs from the template"
     );
     let at = |needle: &str| lines.iter().position(|l| l.starts_with(needle)).unwrap();
     assert!(at("What is affected") < at("Why") && at("Why") < at("What to do"));
@@ -81,18 +81,19 @@ fn the_message_reads_in_the_planned_order() {
     assert!(text.contains("Checked: 2026-"));
     assert!(text.contains("UTC"));
     assert!(text.contains("- Container images were not checked."));
-    assert_eq!(
-        lines.last().copied(),
-        Some("No known issues is not the same as secure.")
+    assert!(
+        lines.last().copied() == Some("No known issues is not the same as secure."),
+        "footer differs from the template"
     );
 }
 
 #[test]
 fn possibly_affected_says_may_be() {
     let text = alert(|p| p.result = MatchResult::PossiblyAffected).render();
-    assert_eq!(
-        text.lines().next().unwrap(),
-        "LND 0.18.4-beta on this node may be affected by x_lightning-labs-example-1."
+    assert!(
+        text.lines().next().unwrap()
+            == "LND 0.18.4-beta on this node may be affected by x_lightning-labs-example-1.",
+        "headline differs from the template"
     );
 }
 
@@ -482,6 +483,19 @@ fn product_and_blind_spots_must_be_bounded_single_lines() {
         "a\u{1b}[31mb",
         "a\0b",
         "",
+        "a\u{034F}b",
+        "a\u{2800}b",
+        "\u{2800}",
+        "a\u{115F}b",
+        "a\u{1160}b",
+        "a\u{3164}b",
+        "a\u{FFA0}b",
+        "a\u{FE00}b",
+        "a\u{180B}b",
+        "\u{0301}LND",
+        "a\\b",
+        "   ",
+        "\u{3164}\u{3164}",
     ];
     for text in bad.iter().copied().chain([leak("x".repeat(121))]) {
         let mut p = parts();
@@ -498,6 +512,10 @@ fn product_and_blind_spots_must_be_bounded_single_lines() {
     let mut p = parts();
     p.blind_spots = vec!["one"; 17];
     assert!(Alert::new(p).is_err());
+    let mut p = parts();
+    p.product = "Core Lightning";
+    p.blind_spots = vec!["Tor was not checked.", "❤\u{FE0F} ok"];
+    assert!(Alert::new(p).is_ok());
 }
 
 #[test]

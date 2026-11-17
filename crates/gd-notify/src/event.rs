@@ -50,8 +50,8 @@ impl UnsignedEvent {
     }
 }
 
-/// A signed event. `Debug` shows only the kind, the first characters of the id
-/// and how many tags there are, never content or tag values.
+/// A signed event. `Debug` shows only the kind and how many tags there are,
+/// never any part of the id, content or tag values.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Event {
     /// SHA-256 id, 64 hex characters.
@@ -72,23 +72,7 @@ pub struct Event {
 
 impl fmt::Debug for Event {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // An id that came from outside is shown only when the whole of it is
-        // 64 lowercase hex characters; otherwise none of it is.
-        let valid = self.id.len() == 64
-            && self
-                .id
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-        let id = match (valid, self.id.get(..8)) {
-            (true, Some(prefix)) => format!("{prefix}.."),
-            _ => "<unverified>".to_owned(),
-        };
-        write!(
-            f,
-            "Event(kind {}, id {id}, {} tags)",
-            self.kind,
-            self.tags.len()
-        )
+        write!(f, "Event(kind {}, {} tags)", self.kind, self.tags.len())
     }
 }
 
@@ -422,9 +406,9 @@ mod tests {
     #[test]
     fn a_normal_wrap_opens() {
         let (recipient, event) = wrap(&Extras::default());
-        assert_eq!(
-            unwrap_dm(&recipient, &event).unwrap().rumor.content,
-            "hello"
+        assert!(
+            unwrap_dm(&recipient, &event).unwrap().rumor.content == "hello",
+            "the message did not round-trip"
         );
     }
 
@@ -449,32 +433,34 @@ mod tests {
     }
 
     #[test]
-    fn debug_never_prints_an_id_that_is_not_64_lowercase_hex() {
+    fn debug_never_prints_any_part_of_the_id() {
         let (_, event) = wrap(&Extras::default());
         for bad_id in [
             "line\nbreak and \u{1b}[31mred".to_owned(),
             format!("{}\u{1b}", &event.id[..63]),
             event.id.to_uppercase(),
             event.id[..8].to_owned(),
+            "ab".repeat(32),
             String::new(),
         ] {
             let mut json: Value = serde_json::from_str(&event.to_json()).unwrap();
             json["id"] = Value::String(bad_id.clone());
             let from_json = Event::from_json(&json.to_string()).unwrap();
+            if bad_id == "ab".repeat(32) {
+                assert!(from_json.verify().is_err());
+            }
             let shown = format!("{from_json:?} {from_json:#?}");
-            assert!(shown.contains("<unverified>"), "{shown:?}");
             assert!(!shown.contains('\u{1b}') && !shown.contains('\n'));
             assert!(bad_id.is_empty() || !shown.contains(&bad_id[..bad_id.len().min(4)]));
         }
     }
 
     #[test]
-    fn debug_shows_the_kind_the_id_start_and_the_tag_count_only() {
+    fn debug_shows_the_kind_and_the_tag_count_only() {
         let (_, event) = wrap(&Extras::default());
         let shown = format!("{event:?} {event:#?}");
         assert!(shown.contains("kind 1059") && shown.contains("1 tags"));
-        assert!(shown.contains(&event.id[..8]));
-        assert!(!shown.contains(&event.id));
+        assert!(!shown.contains(&event.id[..8]));
         assert!(!shown.contains(&event.content[..20]));
         assert!(!shown.contains(&event.pubkey));
         assert!(!shown.contains(&event.sig));

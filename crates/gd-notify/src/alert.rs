@@ -174,27 +174,19 @@ fn quote_text(text: &Untrusted<String>, cap: usize) -> String {
     cut
 }
 
-/// Unicode format characters (category Cf): the bidi controls, zero-width and
-/// joiner characters, the byte order mark, tag characters and the rest.
-fn is_format_char(c: char) -> bool {
-    matches!(c,
-        '\u{00AD}' | '\u{0600}'..='\u{0605}' | '\u{061C}' | '\u{06DD}' | '\u{070F}'
-        | '\u{0890}'..='\u{0891}' | '\u{08E2}' | '\u{180E}' | '\u{200B}'..='\u{200F}'
-        | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}'
-        | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}' | '\u{110BD}' | '\u{110CD}'
-        | '\u{13430}'..='\u{1343F}' | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}'
-        | '\u{E0001}' | '\u{E0020}'..='\u{E007F}')
-}
-
 /// A bounded single-line value of ours: not empty, at most [`LINE_CAP`]
-/// characters, no control character, no line or paragraph separator and no
-/// bidi or other invisible format character.
+/// characters (checked first, so a long input is never escaped), not only
+/// whitespace, and unchanged by gd-core's terminal escape. That last rule
+/// refuses every control character, bidi and other invisible format
+/// character, the fillers and other blank-looking characters on gd-core's
+/// hidden list (U+034F, Hangul fillers, U+2800, variation selectors, tags,
+/// U+2028 and U+2029), a leading combining mark and a backslash. It reuses
+/// gd-core's policy, so the two lists cannot drift apart.
 fn single_line_ok(text: &str) -> bool {
     !text.is_empty()
         && text.chars().count() <= LINE_CAP
-        && !text
-            .chars()
-            .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') || is_format_char(c))
+        && text.chars().any(|c| !c.is_whitespace())
+        && Untrusted::new(text).escape_for_terminal() == text
 }
 
 impl Alert {

@@ -49,13 +49,13 @@ fn open(name: &str, any_kind: bool) {
     } else {
         unwrap_dm(&recipient, &wrap).unwrap()
     };
-    assert_eq!(
-        opened.rumor.content,
-        case["expect_content"].as_str().unwrap()
+    assert!(
+        opened.rumor.content == case["expect_content"].as_str().unwrap(),
+        "{name}: content differs"
     );
-    assert_eq!(
-        opened.rumor.kind,
-        case["expect_rumor_kind"].as_u64().unwrap()
+    assert!(
+        opened.rumor.kind == case["expect_rumor_kind"].as_u64().unwrap(),
+        "{name}: rumor kind differs"
     );
     opened.seal.verify().unwrap();
     assert_eq!(opened.rumor.pubkey, opened.seal.pubkey);
