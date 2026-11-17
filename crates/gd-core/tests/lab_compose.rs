@@ -7,6 +7,17 @@
 //! is itself tested: `every_unsafe_change_is_caught` makes 21 named unsafe
 //! edits and requires each one to be refused with its own problem code.
 
+// Test-only crate: its helper functions (not just `#[test]` ones) read files and
+// check data, and a panic there is a failed check. The workspace panic lints
+// protect shipped code; clippy.toml exempts `#[test]` functions and code under `#[cfg(test)]`,
+// but not these unannotated helpers.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
