@@ -1857,3 +1857,142 @@ fn duplicate_keys_and_an_empty_object_are_refused() {
         );
     }
 }
+
+// ------------------------------------------------- unidentified instances
+
+fn unrecognized_on(candidates: Vec<CatalogId>) -> Fact {
+    fact(
+        Subject::Host,
+        Claim::Unrecognized {
+            candidates,
+            runs_as: container("mystery"),
+            version_label: None,
+            source_label: None,
+        },
+    )
+}
+
+#[test]
+fn a_running_product_can_still_have_an_unidentified_second_instance() {
+    let lnd = instance("lnd");
+    let facts = [
+        service_fact("lnd", "0.18.0", Method::ServiceReply),
+        unrecognized_on(vec![cat("lnd")]),
+    ];
+    let v = setup_view(&facts);
+    // Running is unchanged, and the view still says something else may be lnd.
+    assert!(matches!(
+        v.state(&lnd),
+        Observed::Seen(ServiceState::Running)
+    ));
+    assert!(matches!(v.service(&lnd), Observed::Seen(_)));
+    assert!(v.may_be_unidentified(&cat("lnd")));
+    assert!(!v.may_be_unidentified(&cat("strfry")));
+}
+
+#[test]
+fn no_service_fact_plus_an_unidentified_endpoint_is_unknown_not_absent() {
+    let lnd = instance("lnd");
+    let v = setup_view(&[unrecognized_on(vec![cat("lnd")])]);
+    assert!(v.may_be_unidentified(&cat("lnd")));
+    assert!(is_unknown(&v.state(&lnd), UnknownReason::Unidentified));
+    assert!(is_unknown(
+        &v.package(&instance("bitcoin-core"), &cat("lnd")),
+        UnknownReason::Unidentified
+    ));
+    // A not-found state names the same reason, not a bare NotChecked.
+    let not_found = fact(
+        Subject::Service(lnd.clone()),
+        Claim::Service {
+            state: ServiceState::not_found(Coverage::Complete, witness()),
+            version: unknown(UnknownReason::NotChecked),
+            runs_as: container("lnd"),
+            method: Method::Port,
+        },
+    );
+    let v = setup_view(&[not_found, unrecognized_on(vec![cat("lnd")])]);
+    assert!(is_unknown(&v.state(&lnd), UnknownReason::Unidentified));
+}
+
+#[test]
+fn without_an_unidentified_endpoint_nothing_is_flagged() {
+    let v = setup_view(&[service_fact("lnd", "0.18.0", Method::ServiceReply)]);
+    assert!(!v.may_be_unidentified(&cat("lnd")));
+    assert!(is_unknown(
+        &v.state(&instance("strfry")),
+        UnknownReason::NotChecked
+    ));
+    let v = setup_view(&[unrecognized_on(vec![])]);
+    assert!(!v.may_be_unidentified(&cat("lnd")));
+}
+
+#[test]
+fn a_conflict_is_reported_over_not_checked() {
+    let id = SettingId::parse("option_enabled").unwrap();
+    let setting = |value: Observed<SettingValue>| {
+        fact(
+            Subject::Service(instance("bitcoin-core")),
+            Claim::Setting {
+                key: id.clone(),
+                value,
+            },
+        )
+    };
+    let conflict = || setting(unknown(UnknownReason::Conflict));
+    let gap = || setting(unknown(UnknownReason::NotChecked));
+    for facts in [[conflict(), gap()], [gap(), conflict()]] {
+        assert!(is_unknown(
+            &setup_view(&facts).setting(&id),
+            UnknownReason::Conflict
+        ));
+    }
+}
+
+#[test]
+fn candidates_are_deduplicated_and_a_long_list_is_refused_on_load() {
+    let many = |n: usize| -> Vec<CatalogId> {
+        (0..n).map(|i| cat(&format!("product-{i}"))).collect()
+    };
+    // Repeats collapse; the same id forty times is one candidate.
+    let repeated = unrecognized_on(vec![cat("lnd"); 40]);
+    let back: Fact = serde_json::from_str(&json(&repeated)).unwrap();
+    assert!(matches!(
+        &back.claim,
+        Claim::Unrecognized { candidates, .. } if candidates.len() == 1
+    ));
+    // 32 distinct ids load; 33 are refused, and the error is a plain message.
+    let ok = unrecognized_on(many(32));
+    assert!(serde_json::from_str::<Fact>(&json(&ok)).is_ok());
+    let long = unrecognized_on(many(33));
+    let err = serde_json::from_str::<Fact>(&json(&long)).unwrap_err();
+    assert!(err.to_string().contains("candidates"), "{err}");
+}
+
+#[test]
+fn wire_structs_refuse_unknown_keys() {
+    let f = fact(
+        Subject::Host,
+        Claim::Chain(unknown(UnknownReason::NoReply)),
+    );
+    let mut top: Json = serde_json::from_str(&json(&f)).unwrap();
+    assert!(serde_json::from_value::<Fact>(top.clone()).is_ok());
+    top["extra"] = Json::Bool(true);
+    assert!(serde_json::from_value::<Fact>(top).is_err());
+
+    let u: Json = serde_json::from_str(&json(&Unknown::new(UnknownReason::NoReply))).unwrap();
+    assert!(serde_json::from_value::<Unknown>(u.clone()).is_ok());
+    let mut u = u;
+    u["extra"] = Json::Bool(true);
+    assert!(serde_json::from_value::<Unknown>(u).is_err());
+
+    let e = Evidence::new(CallId::parse("version").unwrap(), "x");
+    let mut e: Json = serde_json::from_str(&json(&e)).unwrap();
+    e["extra"] = Json::Bool(true);
+    assert!(serde_json::from_value::<Evidence>(e).is_err());
+
+    let s = json(&Presence::absent(Coverage::Complete, witness()));
+    let mut s: Json = serde_json::from_str(&s).unwrap();
+    assert!(serde_json::from_value::<Observed<Presence>>(s.clone()).is_ok());
+    s["Seen"]["Absent"]["extra"] = Json::Bool(true);
+    assert!(serde_json::from_value::<Observed<Presence>>(s).is_err());
+}
