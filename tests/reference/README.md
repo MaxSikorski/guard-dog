@@ -13,3 +13,8 @@ available in the build environment, so the Go adapter is tested against the
 specification list above and the design's own examples (`v0.5.1` equals `0.5.1`,
 the `v` removal is exact, pseudo-versions stay whole prereleases). Recording a
 pinned Go generator's output is a later, explicit development step.
+
+No Go reference vectors yet: nothing here is checked against
+`golang.org/x/mod/semver` output, so the Go adapter's agreement with real Go
+tooling is untested. Nor is there external ground truth for the Bitcoin Core and
+`semver-beta` channel orders beyond the design's own examples.

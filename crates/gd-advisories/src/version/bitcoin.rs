@@ -3,7 +3,8 @@
 //! Optional `v`, then `major.minor[.patch][rcN]`. An absent patch is 0, a release
 //! candidate sorts below its final release, and numbers have no leading zeros.
 //! Historical numbering is not rewritten: `0.21.1 < 22.0`. Release candidates
-//! are numbered from 1 here, so `rc0` is refused.
+//! are numbered from 1 here, so `rc0` is refused. The old four-part
+//! numbers of the 0.x.y.z releases (`0.9.2.1`) are refused too.
 //!
 //! The catalog extracts `32.1` from `/Satoshi:32.1.0/`; this parser never
 //! searches banners.
@@ -132,8 +133,12 @@ impl VersionScheme for BitcoinCore {
 
     /// With [`RcEvidence::Unknown`], a value without `rcN` is the interval from
     /// the lowest release candidate of that release up to, and including, the
-    /// final release (the end is the next patch, since the end is exclusive).
-    /// A range that treats the two differently therefore ends unknown.
+    /// final release (the end, exclusive, is just below the first release
+    /// candidate of the next patch). A range that treats the two differently
+    /// therefore ends unknown.
+    ///
+    /// Four-part numbers from the 0.x.y.z releases (`0.9.2.1`) are refused, like
+    /// every other form this scheme does not read.
     fn candidate(&self, raw: &str) -> Result<Candidate<CoreVersion>, VersionError> {
         let v = read(raw)?;
         if self.installed_rc == RcEvidence::Unknown && v.rc.is_none() {
@@ -141,8 +146,11 @@ impl VersionScheme for BitcoinCore {
                 rc: Some(Num::zero()),
                 ..v.clone()
             };
+            // Just below the first release candidate of the next patch: a value
+            // that may be any rc of the next release is not inside the interval.
             let high = CoreVersion {
                 patch: v.patch.plus_one(),
+                rc: Some(Num::zero()),
                 ..v
             };
             return Ok(Candidate::Between {
@@ -151,6 +159,11 @@ impl VersionScheme for BitcoinCore {
             });
         }
         Ok(Candidate::Exact(v))
+    }
+
+    /// The release-candidate question of design 2.1 section 2.
+    fn interval_question(&self) -> &'static str {
+        "What full version does bitcoind report, including any rcN?"
     }
 
     /// Identity is the canonical text: an absent patch is 0, so `28.1` and

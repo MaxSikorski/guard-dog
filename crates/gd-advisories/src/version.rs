@@ -72,9 +72,10 @@ pub enum Candidate<V> {
 ///   versions are checked, by identity.
 /// - Channel schemes with two orders (such as lnd's SemVer-and-beta check) are
 ///   evaluated by the caller running the evaluator once per scheme; one scheme
-///   object never mixes two orders. The combination rule: in range only if both
-///   say in range, out of range only if both say out of range, otherwise
-///   `Unknown(SchemeConflict)` (a reason the channel-scheme PR adds).
+///   object never mixes two orders. The combination rule ([`dual_check`]): in
+///   range only if both say in range, out of range only if both say out of
+///   range, `Unknown(SchemeConflict)` when one says in and the other out, and
+///   an unknown side keeps its own reason.
 pub trait VersionScheme {
     /// A parsed version, ordered by precedence.
     type Version: Ord + Clone;
@@ -96,6 +97,14 @@ pub trait VersionScheme {
     /// same identity is never treated as a miss.
     fn same_version(&self, installed: &Self::Version, listed: &str) -> Option<bool> {
         self.parse(listed).ok().map(|l| l == *installed)
+    }
+
+    /// The question to ask when the installed value is only known to lie in an
+    /// interval (`Candidate::Between`) that the ranges do not settle. Plain text,
+    /// never advisory text. A scheme that returns intervals words it for its own
+    /// source.
+    fn interval_question(&self) -> &'static str {
+        "Only a span of possible versions is known for the installed build. Which exact upstream release is it?"
     }
 
     /// Whether this scheme has declared that it can evaluate `SEMVER` ranges.

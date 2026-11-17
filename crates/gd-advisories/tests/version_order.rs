@@ -22,9 +22,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use gd_advisories::{
-    Advisory, BitcoinCore, Candidate, Channel, ChannelScheme, GoTag, RcEvidence, SemVer, Source,
-    UnknownReason, VersionError, VersionEvidence, VersionScheme, dual_check, evaluate_entry,
-    parse_advisory, parse_advisory_from,
+    Advisory, BitcoinCore, Candidate, Channel, ChannelScheme, GoTag, Place, RcEvidence, SemVer,
+    Source, UnknownReason, VersionError, VersionEvidence, VersionScheme, dual_check,
+    evaluate_entry, parse_advisory, parse_advisory_from,
 };
 use proptest::prelude::*;
 use serde_json::{Value, json};
@@ -83,6 +83,13 @@ fn entry(ecosystem: &str, name: &str, ranges: Value, versions: Value) -> Advisor
 
 fn range(kind: &str, events: Value) -> Value {
     json!([{"type": kind, "events": events}])
+}
+
+fn place(e: &VersionEvidence) -> Place {
+    match e {
+        VersionEvidence::Unknown { at, .. } => at.place,
+        other => panic!("expected unknown, got {other:?}"),
+    }
 }
 
 fn reason(e: &VersionEvidence) -> UnknownReason {
@@ -413,7 +420,12 @@ fn marks_rc_unknown(s: &BitcoinCore) -> bool {
         }) => {
             let rc1 = s.parse("28.1rc1").unwrap();
             let fin = s.parse("28.1").unwrap();
-            low < rc1 && fin >= low && fin < high && s.parse("28.1.1").unwrap() >= high
+            low < rc1
+                && fin >= low
+                && fin < high
+                && s.parse("28.1.1rc1").unwrap() >= high
+                && s.parse("28.1.1rc0").is_err()
+                && s.parse("28.1.1").unwrap() > high
         }
         _ => false,
     }
@@ -499,19 +511,17 @@ fn core_rc_unknown_ends_unknown_when_rc_and_final_differ() {
 fn channel_reads_the_valid_forms() {
     let b = ChannelScheme::beta();
     for ok in [
-        "0.18.3",
-        "v0.18.3",
         "0.18.3-beta",
         "v0.18.3-beta",
         "0.18.3-beta.rc2",
         "0.18.3-rc2",
         "v0.20.0-beta.rc10",
-        "10.0.0",
+        "10.0.0-beta",
     ] {
         assert!(b.parse(ok).is_ok(), "{ok}");
     }
     let a = ChannelScheme::alpha();
-    for ok in ["0.15.0-alpha", "v0.15.0-alpha.rc1", "0.15.0-rc1", "0.15.0"] {
+    for ok in ["0.15.0-alpha", "v0.15.0-alpha.rc1", "0.15.0-rc1"] {
         assert!(a.parse(ok).is_ok(), "{ok}");
     }
 }
@@ -522,6 +532,11 @@ fn channel_refuses_everything_else() {
         &ChannelScheme::beta(),
         &[
             "",
+            // A bare X.Y.Z has no channel: refused, never ranked above the
+            // channel release.
+            "0.18.3",
+            "v0.18.3",
+            "10.0.0",
             "0.18",
             "0.18.3.1",
             "0.18.03",
@@ -555,14 +570,12 @@ fn channel_refuses_everything_else() {
 }
 
 #[test]
-fn channel_orders_rc_then_channel_release_then_final() {
+fn channel_orders_rc_then_channel_release() {
     let b = ChannelScheme::beta();
     lt(&b, "0.18.3-beta.rc2", "0.18.3-beta.rc10");
     lt(&b, "0.18.3-beta.rc10", "0.18.3-beta");
-    lt(&b, "0.18.3-beta", "0.18.3");
-    lt(&b, "0.18.3-beta.rc2", "0.18.3");
-    lt(&b, "0.18.2", "0.18.3-beta.rc1");
-    lt(&b, "0.18.3", "0.18.4-beta.rc1");
+    lt(&b, "0.18.2-beta", "0.18.3-beta.rc1");
+    lt(&b, "0.18.3-beta", "0.18.4-beta.rc1");
     lt(&b, "0.9.0-beta", "0.10.0-beta.rc1");
     // The alias.
     eq(&b, "0.18.3-rc2", "0.18.3-beta.rc2");
@@ -572,7 +585,6 @@ fn channel_orders_rc_then_channel_release_then_final() {
     let a = ChannelScheme::alpha();
     lt(&a, "0.15.0-alpha.rc1", "0.15.0-alpha");
     lt(&a, "0.15.0-alpha.rc2", "0.15.0-alpha.rc10");
-    lt(&a, "0.15.0-alpha", "0.15.0");
     eq(&a, "v0.15.0-alpha", "0.15.0-alpha");
 }
 
@@ -586,13 +598,8 @@ fn channel_is_never_erased() {
         b.parse("v0.18.3-rc2").unwrap().to_string(),
         "0.18.3-beta.rc2"
     );
-    assert_eq!(b.parse("v0.18.3").unwrap().to_string(), "0.18.3");
-    assert_ne!(
-        b.parse("0.18.3-beta").unwrap(),
-        b.parse("0.18.3").unwrap(),
-        "the channel release is not the bare final"
-    );
-    assert_eq!(b.same_identity("0.18.3-beta", "0.18.3"), Some(false));
+    // The bare final has no channel and is not readable at all.
+    assert_eq!(b.same_identity("0.18.3-beta", "0.18.3"), None);
     assert_eq!(
         b.same_identity("v0.18.3-rc2", "0.18.3-beta.rc2"),
         Some(true)
@@ -602,7 +609,8 @@ fn channel_is_never_erased() {
     assert_eq!(Channel::from_name("alpha"), Some(Channel::Alpha));
     assert_eq!(Channel::from_name("gamma"), None);
     assert_eq!(Channel::from_name("Beta"), None);
-    assert!(b.reads_semver_ranges() && b.orders());
+    // Only the dual check may read SEMVER ranges for a channel product.
+    assert!(!b.reads_semver_ranges() && b.orders());
 }
 
 // ---------------------------------------------------------------- dual check
@@ -630,9 +638,19 @@ fn dual_check_rc_before_the_fix_stays_possible() {
         reason(&dual(&adv, "v0.20.0-rc1")),
         UnknownReason::SchemeConflict
     );
-    // Each order alone gives a confident, and different, answer.
+    // Each order alone gives a confident, and different, answer (the channel
+    // scheme alone reads only the ECOSYSTEM form of the same range).
+    let eco = entry(
+        "Go",
+        "github.com/lightningnetwork/lnd",
+        range(
+            "ECOSYSTEM",
+            json!([{"introduced": "0"}, {"fixed": "0.20.0-beta"}]),
+        ),
+        json!([]),
+    );
     assert!(matches!(
-        evaluate_entry(&ChannelScheme::beta(), &adv, 0, Some("0.20.0-beta.rc1")),
+        evaluate_entry(&ChannelScheme::beta(), &eco, 0, Some("0.20.0-beta.rc1")),
         VersionEvidence::InRange(_)
     ));
     assert_eq!(
@@ -648,15 +666,21 @@ fn dual_check_agreeing_orders_answer() {
         dual(&adv, "0.18.4-beta"),
         VersionEvidence::InRange(_)
     ));
-    assert!(matches!(dual(&adv, "0.0.1"), VersionEvidence::InRange(_)));
+    assert!(matches!(
+        dual(&adv, "0.0.1-beta"),
+        VersionEvidence::InRange(_)
+    ));
     assert_eq!(dual(&adv, "0.20.0-beta"), VersionEvidence::OutOfRange);
-    assert_eq!(dual(&adv, "0.20.0"), VersionEvidence::OutOfRange);
     assert_eq!(dual(&adv, "0.21.6-beta"), VersionEvidence::OutOfRange);
-    // A final release against a channel fix: both say out.
-    assert_eq!(
-        dual(&lnd_fix("0.20.0"), "0.20.0"),
-        VersionEvidence::OutOfRange
-    );
+    // A bare X.Y.Z has no channel, so the channel scheme refuses it and the
+    // answer is unknown for that reason, never the SemVer side alone.
+    for v in ["0.20.0", "0.0.1", "0.21.6"] {
+        assert_eq!(
+            reason(&dual(&adv, v)),
+            UnknownReason::InstalledVersionUnparseable,
+            "{v}"
+        );
+    }
 }
 
 #[test]
@@ -673,15 +697,32 @@ fn dual_check_final_release_inside_a_range_ended_by_a_rc() {
 #[test]
 fn dual_check_a_parser_failure_never_lets_the_other_answer_alone() {
     let adv = lnd_fix("0.20.0-beta");
-    // A Go pseudo-version: SemVer reads it, the channel scheme cannot.
+    // A Go pseudo-version: SemVer reads it, the channel scheme cannot. The
+    // unreadable side's own reason and place come back, not a conflict.
     let e = dual(&adv, "v0.0.0-20240101000000-abcdef123456");
-    assert_eq!(reason(&e), UnknownReason::SchemeConflict);
-    // A bound only SemVer can read.
+    assert_eq!(reason(&e), UnknownReason::InstalledVersionUnparseable);
+    assert_eq!(place(&e), Place::Entry);
+    // A bound only SemVer can read: the channel side names the boundary.
     let odd = lnd_fix("0.20.0-nightly");
+    let e = dual(&odd, "0.18.4-beta");
+    assert_eq!(reason(&e), UnknownReason::UnparseableBoundary);
     assert_eq!(
-        reason(&dual(&odd, "0.18.4-beta")),
-        UnknownReason::SchemeConflict
+        place(&e),
+        Place::Range {
+            range: 0,
+            event: Some(1)
+        }
     );
+    // The same through a listed version only the channel side cannot read.
+    let listed = entry(
+        "Go",
+        "github.com/lightningnetwork/lnd",
+        json!([]),
+        json!(["0.20.0-nightly"]),
+    );
+    let e = dual(&listed, "0.18.4-beta");
+    assert_eq!(reason(&e), UnknownReason::UnreadableListedVersion);
+    assert_eq!(place(&e), Place::Listed { index: 0 });
     // Neither can read the installed value: the evaluator's own reason stands.
     let e = dual(&adv, "garbage");
     assert_eq!(reason(&e), UnknownReason::InstalledVersionUnparseable);
@@ -739,7 +780,10 @@ fn dual_check_lightning_terminal_alpha() {
     let d = |v: &str| dual_check(&ChannelScheme::alpha(), &GoTag, &adv, 0, Some(v));
     assert!(matches!(d("0.14.0-alpha"), VersionEvidence::InRange(_)));
     assert_eq!(d("0.15.0-alpha"), VersionEvidence::OutOfRange);
-    assert_eq!(d("0.15.0"), VersionEvidence::OutOfRange);
+    assert_eq!(
+        reason(&d("0.15.0")),
+        UnknownReason::InstalledVersionUnparseable
+    );
     assert_eq!(
         reason(&d("0.15.0-alpha.rc1")),
         UnknownReason::SchemeConflict
@@ -989,6 +1033,16 @@ fn union(results: &[VersionEvidence]) -> &'static str {
     }
 }
 
+/// The fixture pairs whose version subresult changes once Core's installed value
+/// is read as a subversion (no `rcN`): the answer key says `out-of-range`, the
+/// derived answer is `unknown` (design 2.1 section 2). Each is a pair where the
+/// fixed version equals the installed one. Judge B's key files are not edited
+/// here.
+const SUBVERSION_UNKNOWN: &[(&str, &str, &str, &str)] = &[
+    ("lab-regtest", "bitcoin-core", "32.1", "CVE-2026-117346"),
+    ("lab-regtest", "bitcoin-core", "32.1", "CVE-2026-117349"),
+];
+
 #[test]
 fn fixture_pairs_give_the_expected_version_subresult() {
     let text = fs::read_to_string(root().join("fixtures/expected-matches.toml")).unwrap();
@@ -1007,10 +1061,11 @@ fn fixture_pairs_give_the_expected_version_subresult() {
             let (pkg, got) = match svc.product.as_str() {
                 "bitcoin-core" => {
                     let idx = applicable_entries(adv, CORE_PKG);
-                    // The Core scheme is given the full version (the fixture
-                    // values are recordings of `/Satoshi:X.Y.Z/` read through
-                    // the catalog, with no release candidates).
-                    let c = core();
+                    // The fixture values come from `/Satoshi:X.Y.Z/`, which is
+                    // `getnetworkinfo.subversion`: it drops any `rcN`, so a final-
+                    // looking value is only known to be that release or one of
+                    // its release candidates (design 2.1 section 2).
+                    let c = BitcoinCore::new(RcEvidence::Unknown);
                     let rs: Vec<_> = idx
                         .iter()
                         .map(|&i| evaluate_entry(&c, adv, i, Some(&svc.version)))
@@ -1025,26 +1080,31 @@ fn fixture_pairs_give_the_expected_version_subresult() {
                             dual_check(&ChannelScheme::beta(), &GoTag, adv, i, Some(&svc.version))
                         })
                         .collect();
-                    // The channel scheme alone agrees on these values.
-                    for &i in &idx {
-                        let alone =
-                            evaluate_entry(&ChannelScheme::beta(), adv, i, Some(&svc.version));
-                        assert_eq!(
-                            subresult(&alone),
-                            union(&rs),
-                            "{setup} {advisory} channel scheme alone"
-                        );
-                    }
                     ("lnd", (!idx.is_empty()).then(|| union(&rs)))
                 }
                 _ => continue,
             };
             let Some(got) = got else { continue };
-            assert_eq!(
-                got, expected,
-                "{setup} {pkg} {} against {advisory}",
-                svc.version
-            );
+            // The answer key (Judge B) was written for full versions. Where the
+            // fix is the installed release itself, a subversion value cannot
+            // tell an rc (affected) from the final (fixed): possibly affected.
+            let changed = SUBVERSION_UNKNOWN.iter().any(|(s, p, v, a)| {
+                (*s, *p, *v, *a) == (setup.as_str(), pkg, svc.version.as_str(), advisory.as_str())
+            });
+            if changed {
+                assert_eq!(expected, "out-of-range", "the key's old value");
+                assert_eq!(
+                    got, "unknown",
+                    "{setup} {pkg} {} against {advisory}",
+                    svc.version
+                );
+            } else {
+                assert_eq!(
+                    got, expected,
+                    "{setup} {pkg} {} against {advisory}",
+                    svc.version
+                );
+            }
             checked.push(format!("{setup}/{pkg}/{advisory}"));
         }
     }
@@ -1131,7 +1191,7 @@ fn channel_text() -> impl Strategy<Value = String> {
         num(),
         num(),
         num(),
-        0u8..4,
+        0u8..3,
         "[1-9][0-9]{0,2}",
     )
         .prop_map(|(v, a, b, c, kind, rc)| {
@@ -1141,9 +1201,8 @@ fn channel_text() -> impl Strategy<Value = String> {
             }
             s.push_str(&format!("{a}.{b}.{c}"));
             match kind {
-                0 => {}
-                1 => s.push_str("-beta"),
-                2 => s.push_str(&format!("-beta.rc{rc}")),
+                0 => s.push_str("-beta"),
+                1 => s.push_str(&format!("-beta.rc{rc}")),
                 _ => s.push_str(&format!("-rc{rc}")),
             }
             s
@@ -1230,15 +1289,17 @@ proptest! {
     }
 
     #[test]
-    fn channel_release_sits_between_its_rcs_and_the_final(a in num(), b in num(), c in num(), rc in "[1-9][0-9]{0,3}") {
+    fn channel_release_sits_above_its_rcs_and_a_bare_form_is_refused(a in num(), b in num(), c in num(), rc in "[1-9][0-9]{0,3}") {
         let s = ChannelScheme::beta();
         let p = |t: String| s.parse(&t).unwrap();
-        let (rcv, rel, fin) = (
+        let (rcv, rel) = (
             p(format!("{a}.{b}.{c}-beta.rc{rc}")),
             p(format!("{a}.{b}.{c}-beta")),
-            p(format!("{a}.{b}.{c}")),
         );
-        prop_assert!(rcv < rel && rel < fin);
+        prop_assert!(rcv < rel);
+        // A bare X.Y.Z is never read.
+        let bare = format!("{a}.{b}.{c}");
+        prop_assert!(s.parse(&bare).is_err());
         let alias = p(format!("{a}.{b}.{c}-rc{rc}"));
         prop_assert!(alias == rcv);
     }
@@ -1254,18 +1315,23 @@ proptest! {
     }
 
     #[test]
-    fn nothing_panics_and_accepted_text_round_trips(s in "\\PC{0,300}") {
-        if let Ok(v) = SemVer.parse(&s) {
-            prop_assert_eq!(SemVer.parse(&v.identity()).unwrap().identity(), v.identity());
-            prop_assert_eq!(&v.identity(), &s);
-        }
+    fn nothing_panics_on_arbitrary_text(s in "\\PC{0,300}") {
+        let _ = SemVer.parse(&s);
         let _ = GoTag.parse(&s);
-        if let Ok(v) = core().parse(&s) {
-            prop_assert!(core().parse(&v.to_string()).unwrap() == v);
-        }
-        if let Ok(v) = ChannelScheme::beta().parse(&s) {
-            prop_assert!(ChannelScheme::beta().parse(&v.to_string()).unwrap() == v);
-        }
+        let _ = core().parse(&s);
+        let _ = ChannelScheme::beta().parse(&s);
+        let _ = ChannelScheme::alpha().parse(&s);
+    }
+
+    // Round trips are driven from valid strings with one mutation each, so the
+    // accepted branch is reached often (the reach test below counts it).
+    #[test]
+    fn accepted_text_round_trips(
+        a in mutated(semver_text()),
+        b in mutated(core_text()),
+        c in mutated(channel_text()),
+    ) {
+        round_trips(&a, &b, &c);
     }
 
     #[test]
@@ -1314,7 +1380,7 @@ const FINAL_ABOVE_PRE_PAIRS: &[(&str, &str)] = &[
 const CHANNEL_PAIRS: &[(&str, &str)] = &[
     ("0.18.3-beta.rc2", "0.18.3-beta.rc10"),
     ("0.18.3-beta.rc10", "0.18.3-beta"),
-    ("0.18.3-beta", "0.18.3"),
+    ("0.18.3-beta", "0.18.4-beta.rc1"),
 ];
 
 #[test]
@@ -1395,9 +1461,10 @@ fn mutant_alpha_beta_stripped_is_caught() {
     let strip = |s: &str| s.replace("-beta", "");
     let stripped = |x: &str, y: &str| real(&strip(x), &strip(y));
     assert!(!all_less(&stripped, CHANNEL_PAIRS));
-    // The identity check catches it too: the channel release is not the final.
-    assert_eq!(b.same_identity("0.18.3-beta", "0.18.3"), Some(false));
-    assert_eq!(b.same_identity(&strip("0.18.3-beta"), "0.18.3"), Some(true));
+    // The refusal catches it too: the channel release is readable, the bare
+    // text it would be stripped to is not.
+    assert!(b.parse("0.18.3-beta").is_ok());
+    assert!(b.parse(&strip("0.18.3-beta")).is_err());
     // And an alpha string is not readable by the beta scheme.
     assert!(b.parse("0.15.0-alpha").is_err());
 }
@@ -1460,11 +1527,295 @@ fn mutant_core_rc_flag_lost_is_caught() {
 
 #[test]
 fn mutant_single_order_channel_answer_is_caught() {
-    // Mutant: trust the channel order alone (skip the SemVer side).
-    let adv = lnd_fix("0.20.0-beta");
+    // Mutant: trust the channel order alone (skip the SemVer side). An
+    // ECOSYSTEM range is the form the channel scheme reads on its own.
+    let adv = entry(
+        "Go",
+        "github.com/lightningnetwork/lnd",
+        range(
+            "ECOSYSTEM",
+            json!([{"introduced": "0"}, {"fixed": "0.20.0-beta"}]),
+        ),
+        json!([]),
+    );
     let honest = dual(&adv, "0.20.0-beta.rc1");
     let mutant = evaluate_entry(&ChannelScheme::beta(), &adv, 0, Some("0.20.0-beta.rc1"));
     assert!(matches!(honest, VersionEvidence::Unknown { .. }));
     assert!(matches!(mutant, VersionEvidence::InRange(_)));
     assert_ne!(subresult(&honest), subresult(&mutant));
+}
+
+// ---------------------------------------------- round trips and their reach
+
+/// One mutation of a valid string: kind 0 keeps it, the rest delete, insert,
+/// replace, append or prepend one character at a position that wraps.
+fn mutate(base: &str, kind: u8, pos: usize, ch: char) -> String {
+    let mut chars: Vec<char> = base.chars().collect();
+    let at = if chars.is_empty() {
+        0
+    } else {
+        pos % chars.len()
+    };
+    match kind {
+        1 if !chars.is_empty() => {
+            chars.remove(at);
+        }
+        2 => chars.insert(at, ch),
+        3 if !chars.is_empty() => chars[at] = ch,
+        4 => chars.push(ch),
+        5 => chars.insert(0, ch),
+        _ => {}
+    }
+    chars.into_iter().collect()
+}
+
+fn mutated(text: impl Strategy<Value = String>) -> impl Strategy<Value = String> {
+    (
+        text,
+        0u8..6,
+        any::<usize>(),
+        prop::sample::select(vec![
+            '.', '-', '+', 'v', 'r', 'c', 'x', '0', '1', '9', ' ', 'b', 'e', 't', 'a',
+        ]),
+    )
+        .prop_map(|(s, kind, pos, ch)| mutate(&s, kind, pos, ch))
+}
+
+/// How many strings of each scheme were accepted and round-tripped.
+#[derive(Default)]
+struct Reach {
+    semver: usize,
+    core: usize,
+    channel: usize,
+}
+
+fn round_trips(a: &str, b: &str, c: &str) -> Reach {
+    let mut reach = Reach::default();
+    if let Ok(v) = SemVer.parse(a) {
+        assert_eq!(
+            SemVer.parse(&v.identity()).unwrap().identity(),
+            v.identity()
+        );
+        assert_eq!(v.identity(), a);
+        reach.semver += 1;
+    }
+    let _ = GoTag.parse(a);
+    if let Ok(v) = core().parse(b) {
+        assert!(core().parse(&v.to_string()).unwrap() == v);
+        reach.core += 1;
+    }
+    if let Ok(v) = ChannelScheme::beta().parse(c) {
+        assert!(ChannelScheme::beta().parse(&v.to_string()).unwrap() == v);
+        reach.channel += 1;
+    }
+    reach
+}
+
+#[test]
+fn the_round_trip_generators_reach_the_accepted_branch() {
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestRunner;
+    let mut runner = TestRunner::new(config());
+    let (sa, sb, sc) = (
+        mutated(semver_text()),
+        mutated(core_text()),
+        mutated(channel_text()),
+    );
+    let mut total = Reach::default();
+    let mut refused_any = [false; 3];
+    for _ in 0..1024 {
+        let a = sa.new_tree(&mut runner).unwrap().current();
+        let b = sb.new_tree(&mut runner).unwrap().current();
+        let c = sc.new_tree(&mut runner).unwrap().current();
+        let r = round_trips(&a, &b, &c);
+        total.semver += r.semver;
+        total.core += r.core;
+        total.channel += r.channel;
+        refused_any[0] |= SemVer.parse(&a).is_err();
+        refused_any[1] |= core().parse(&b).is_err();
+        refused_any[2] |= ChannelScheme::beta().parse(&c).is_err();
+    }
+    // Most strings stay valid (a mutation is one of six kinds and many keep the
+    // text readable), and the mutations also produce refusals.
+    assert!(total.semver >= 250, "semver reached {}", total.semver);
+    assert!(total.core >= 250, "core reached {}", total.core);
+    assert!(total.channel >= 250, "channel reached {}", total.channel);
+    assert!(
+        refused_any.iter().all(|r| *r),
+        "no mutation was ever refused"
+    );
+}
+
+// ------------------------------------------------- fix round 1 (2026-11-17)
+
+fn core_entry(kind: &str, events: Value) -> Advisory {
+    entry(
+        "GIT",
+        "https://github.com/bitcoin/bitcoin",
+        range(kind, events),
+        json!([]),
+    )
+}
+
+#[test]
+fn core_interval_wholly_inside_a_range_is_in_range() {
+    // Opus M1: the installed 28.3 from a source that drops rcN is somewhere in
+    // 28.3rc1 .. 28.3. A range 28.0 to 29.0 holds every one of them.
+    let unknown = BitcoinCore::new(RcEvidence::Unknown);
+    let wide = core_entry(
+        "ECOSYSTEM",
+        json!([{"introduced": "28.0"}, {"fixed": "29.0"}]),
+    );
+    assert!(matches!(
+        evaluate_entry(&unknown, &wide, 0, Some("28.3")),
+        VersionEvidence::InRange(_)
+    ));
+    // A fix on the very release splits the interval (the rcs are affected, the
+    // final is not): unknown.
+    let split = core_entry(
+        "ECOSYSTEM",
+        json!([{"introduced": "28.0"}, {"fixed": "28.3"}]),
+    );
+    assert_eq!(
+        reason(&evaluate_entry(&unknown, &split, 0, Some("28.3"))),
+        UnknownReason::CandidateIsAnInterval
+    );
+    // A last_affected on the release is a closing inside the interval too.
+    let last = core_entry(
+        "ECOSYSTEM",
+        json!([{"introduced": "28.0"}, {"last_affected": "28.3"}]),
+    );
+    assert_eq!(
+        reason(&evaluate_entry(&unknown, &last, 0, Some("28.3"))),
+        UnknownReason::CandidateIsAnInterval
+    );
+    // A fix in the next patch is outside the interval: every candidate is in.
+    let next = core_entry(
+        "ECOSYSTEM",
+        json!([{"introduced": "28.0"}, {"fixed": "28.3.1"}]),
+    );
+    assert!(matches!(
+        evaluate_entry(&unknown, &next, 0, Some("28.3")),
+        VersionEvidence::InRange(_)
+    ));
+    // A limit below the end of the interval keeps it unsettled.
+    let capped = core_entry(
+        "ECOSYSTEM",
+        json!([{"introduced": "28.0"}, {"limit": "28.3"}]),
+    );
+    assert_eq!(
+        reason(&evaluate_entry(&unknown, &capped, 0, Some("28.3"))),
+        UnknownReason::CandidateIsAnInterval
+    );
+}
+
+#[test]
+fn core_interval_end_is_just_below_the_next_patch_rc() {
+    // A fix that is the first rc of the next patch does not split 28.3's
+    // interval: every rc of 28.3 and 28.3 itself are below it.
+    let unknown = BitcoinCore::new(RcEvidence::Unknown);
+    let adv = core_entry(
+        "ECOSYSTEM",
+        json!([{"introduced": "28.0"}, {"fixed": "28.3.1rc1"}]),
+    );
+    assert!(matches!(
+        evaluate_entry(&unknown, &adv, 0, Some("28.3")),
+        VersionEvidence::InRange(_)
+    ));
+    // An introduction at the next patch's rc is not inside it either.
+    let later = core_entry(
+        "ECOSYSTEM",
+        json!([{"introduced": "28.3.1rc1"}, {"fixed": "29.0"}]),
+    );
+    assert_eq!(
+        evaluate_entry(&unknown, &later, 0, Some("28.3")),
+        VersionEvidence::OutOfRange
+    );
+}
+
+#[test]
+fn core_interval_asks_the_design_question() {
+    let unknown = BitcoinCore::new(RcEvidence::Unknown);
+    let split = core_entry(
+        "ECOSYSTEM",
+        json!([{"introduced": "28.0"}, {"fixed": "28.3"}]),
+    );
+    match evaluate_entry(&unknown, &split, 0, Some("28.3")) {
+        VersionEvidence::Unknown { question, .. } => assert_eq!(
+            question,
+            "What full version does bitcoind report, including any rcN?"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn core_refuses_the_old_four_part_versions() {
+    refused(
+        &core(),
+        &["0.9.2.1", "v0.9.2.1", "0.8.6.0", "0.9.2.1rc1", "28.1.0.0"],
+    );
+    assert!(
+        BitcoinCore::new(RcEvidence::Unknown)
+            .candidate("0.9.2.1")
+            .is_err()
+    );
+}
+
+#[test]
+fn a_channel_scheme_alone_never_answers_a_semver_range() {
+    // Opus M3: the bare scheme is not allowed to read SEMVER ranges; only the
+    // dual check may.
+    let adv = lnd_fix("0.20.0-beta");
+    let alpha_adv = entry(
+        "Go",
+        "github.com/lightninglabs/lightning-terminal",
+        range(
+            "SEMVER",
+            json!([{"introduced": "0"}, {"fixed": "0.15.0-alpha"}]),
+        ),
+        json!([]),
+    );
+    for (scheme, adv, v) in [
+        (ChannelScheme::beta(), &adv, "0.18.4-beta"),
+        (ChannelScheme::alpha(), &alpha_adv, "0.14.0-alpha"),
+    ] {
+        let e = evaluate_entry(&scheme, adv, 0, Some(v));
+        assert_eq!(reason(&e), UnknownReason::SchemeMismatch, "{v}");
+    }
+    // The dual check still answers it.
+    assert!(matches!(
+        dual(&adv, "0.18.4-beta"),
+        VersionEvidence::InRange(_)
+    ));
+}
+
+#[test]
+fn a_bare_final_never_reads_as_past_a_channel_fix() {
+    // pi M: fixed 0.18.3-beta, installed 0.18.3 used to be out of range.
+    let adv = lnd_fix("0.18.3-beta");
+    let e = dual(&adv, "0.18.3");
+    assert_ne!(e, VersionEvidence::OutOfRange);
+    assert_eq!(reason(&e), UnknownReason::InstalledVersionUnparseable);
+    // And as a boundary.
+    let bare_fix = lnd_fix("0.18.3");
+    let e = dual(&bare_fix, "0.18.2-beta");
+    assert_eq!(reason(&e), UnknownReason::UnparseableBoundary);
+}
+
+#[test]
+fn dual_check_both_unknown_keeps_the_smaller_reason() {
+    // The channel side cannot read the listed version (UnreadableListedVersion);
+    // the SemVer side reads it but sees the same version spelled differently
+    // (SameVersionDifferentSpelling, a later reason).
+    let adv = entry(
+        "Go",
+        "github.com/lightningnetwork/lnd",
+        json!([]),
+        json!(["0.18.4-beta+build5"]),
+    );
+    let e = dual(&adv, "0.18.4-beta");
+    assert_eq!(reason(&e), UnknownReason::UnreadableListedVersion);
+    assert_eq!(place(&e), Place::Listed { index: 0 });
+    assert!(UnknownReason::UnreadableListedVersion < UnknownReason::SameVersionDifferentSpelling);
 }

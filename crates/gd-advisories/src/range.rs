@@ -209,7 +209,15 @@ pub fn evaluate_entry<S: VersionScheme + ?Sized>(
             UnknownReason::NoUsableRangeOrVersions,
         );
     };
-    let result = evaluate_inner(scheme, entry_index, entry, installed);
+    let mut result = evaluate_inner(scheme, entry_index, entry, installed);
+    if let VersionEvidence::Unknown {
+        reason: UnknownReason::CandidateIsAnInterval,
+        question,
+        ..
+    } = &mut result
+    {
+        *question = scheme.interval_question().to_string();
+    }
     let uncertain = advisory.gaps.iter().any(|g| {
         matches!(
             g.kind,

@@ -48,16 +48,15 @@ impl Channel {
 }
 
 /// Where a version sits after its numbers. The derived order is the products'
-/// order: release candidates, then the channel release, then the final.
+/// order: release candidates, then the channel release.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum StageKind {
     Rc,
     Release,
-    Final,
 }
 
 /// A channel version. Order: numeric triple, then release candidate (by
-/// number) < channel release < bare final.
+/// number) < channel release.
 #[derive(Clone, Debug)]
 pub struct ChannelVersion {
     major: Num,
@@ -75,15 +74,14 @@ impl ChannelVersion {
         self.channel
     }
 
-    fn key(&self) -> (&Num, &Num, &Num, StageKind, Option<&Channel>, Option<&Num>) {
-        let channel = (self.kind != StageKind::Final).then_some(&self.channel);
+    fn key(&self) -> (&Num, &Num, &Num, StageKind, &Channel, Option<&Num>) {
         let rc = (self.kind == StageKind::Rc).then_some(&self.rc);
         (
             &self.major,
             &self.minor,
             &self.patch,
             self.kind,
-            channel,
+            &self.channel,
             rc,
         )
     }
@@ -94,7 +92,6 @@ impl fmt::Display for ChannelVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}.{}.{}", self.major, self.minor, self.patch)?;
         match self.kind {
-            StageKind::Final => Ok(()),
             StageKind::Release => write!(f, "-{}", self.channel.name()),
             StageKind::Rc => write!(f, "-{}.rc{}", self.channel.name(), self.rc),
         }
@@ -152,10 +149,8 @@ impl ChannelScheme {
     fn read(&self, raw: &str) -> Result<ChannelVersion, VersionError> {
         check_length(raw)?;
         let s = raw.strip_prefix('v').unwrap_or(raw);
-        let (core, rest) = match s.split_once('-') {
-            Some((c, r)) => (c, Some(r)),
-            None => (s, None),
-        };
+        // A bare `X.Y.Z` is refused: the channel is part of the version.
+        let (core, rest) = s.split_once('-').ok_or(VersionError::Malformed)?;
         let mut parts = core.split('.');
         let (Some(a), Some(b), Some(c), None) =
             (parts.next(), parts.next(), parts.next(), parts.next())
@@ -165,9 +160,8 @@ impl ChannelScheme {
         let (major, minor, patch) = (parse_num(a)?, parse_num(b)?, parse_num(c)?);
         let name = self.channel.name();
         let (kind, rc) = match rest {
-            None => (StageKind::Final, Num::zero()),
-            Some(r) if r == name => (StageKind::Release, Num::zero()),
-            Some(r) => {
+            r if r == name => (StageKind::Release, Num::zero()),
+            r => {
                 // `-rcN` is an alias of `-<channel>.rcN`.
                 let n = r
                     .strip_prefix("rc")
@@ -206,9 +200,11 @@ impl VersionScheme for ChannelScheme {
     }
 
     /// Channel ranges are SemVer-shaped, but only the dual check
-    /// ([`dual_check`]) may answer them.
+    /// ([`dual_check`]) may answer them, through its own crate-private wrapper;
+    /// a caller that evaluates a `SEMVER` range with this scheme alone gets
+    /// `Unknown(SchemeMismatch)`.
     fn reads_semver_ranges(&self) -> bool {
-        true
+        false
     }
 
     fn orders(&self) -> bool {
@@ -216,29 +212,67 @@ impl VersionScheme for ChannelScheme {
     }
 }
 
+/// The channel scheme as the dual check uses it: the same parser and order, with
+/// the SemVer-range declaration switched on. Crate-private, so no caller can
+/// answer a `SEMVER` range with one order alone.
+struct DualChannel<'a>(&'a ChannelScheme);
+
+impl VersionScheme for DualChannel<'_> {
+    type Version = ChannelVersion;
+
+    fn parse(&self, raw: &str) -> Result<ChannelVersion, VersionError> {
+        self.0.parse(raw)
+    }
+
+    fn same_identity(&self, a: &str, b: &str) -> Option<bool> {
+        self.0.same_identity(a, b)
+    }
+
+    fn reads_semver_ranges(&self) -> bool {
+        true
+    }
+
+    fn orders(&self) -> bool {
+        self.0.orders()
+    }
+}
+
 /// The dual-order check for a channel product on `SEMVER` and Go ranges.
 ///
 /// The caller passes the channel scheme and the literal SemVer scheme (with the
 /// declared `v` adapter, [`GoTag`](super::GoTag)); each runs the evaluator on the
-/// same entry and installed value. The answers combine as follows:
+/// same entry and installed value, the channel one with `SEMVER` ranges enabled.
+/// The answers combine as follows:
 /// - in range only if both say in range;
 /// - out of range only if both say out of range;
-/// - both unknown: the more fundamental reason (the evaluator's own order);
-/// - anything else, including one parser failing while the other answers, is
-///   `Unknown(SchemeConflict)`. Neither parser's answer is used alone.
-pub fn dual_check<A, B>(
-    channel_scheme: &A,
+/// - both unknown: the more fundamental reason (the evaluator's own order), the
+///   channel scheme's on a tie;
+/// - exactly one unknown (one parser could not read something): that side's own
+///   reason and place. The other side's answer is never used alone;
+/// - in range against out of range: `Unknown(SchemeConflict)`, the real
+///   disagreement between the two orders.
+pub fn dual_check<B>(
+    channel_scheme: &ChannelScheme,
     semver_scheme: &B,
     advisory: &Advisory,
     entry_index: usize,
     installed: Option<&str>,
 ) -> VersionEvidence
 where
-    A: VersionScheme + ?Sized,
     B: VersionScheme + ?Sized,
 {
-    let a = evaluate_entry(channel_scheme, advisory, entry_index, installed);
+    let a = evaluate_entry(
+        &DualChannel(channel_scheme),
+        advisory,
+        entry_index,
+        installed,
+    );
     let b = evaluate_entry(semver_scheme, advisory, entry_index, installed);
+    combine(entry_index, a, b)
+}
+
+/// Combines the channel scheme's answer `a` with the SemVer answer `b`.
+fn combine(entry_index: usize, a: VersionEvidence, b: VersionEvidence) -> VersionEvidence {
     match (a, b) {
         (VersionEvidence::InRange(at), VersionEvidence::InRange(_)) => VersionEvidence::InRange(at),
         (VersionEvidence::OutOfRange, VersionEvidence::OutOfRange) => VersionEvidence::OutOfRange,
@@ -246,16 +280,92 @@ where
             VersionEvidence::NotApplicable
         }
         (u @ VersionEvidence::Unknown { .. }, v @ VersionEvidence::Unknown { .. }) => {
-            // Both orders are unknown: report the earlier reason, from the
-            // channel scheme on a tie.
-            match (&u, &v) {
+            let smaller_b = matches!(
+                (&u, &v),
                 (
                     VersionEvidence::Unknown { reason: ra, .. },
                     VersionEvidence::Unknown { reason: rb, .. },
-                ) if rb < ra => v,
-                _ => u,
-            }
+                ) if rb < ra
+            );
+            if smaller_b { v } else { u }
         }
+        (u @ VersionEvidence::Unknown { .. }, _) | (_, u @ VersionEvidence::Unknown { .. }) => u,
         _ => unknown(entry_index, Place::Entry, UnknownReason::SchemeConflict),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::range::Location;
+
+    fn at(index: usize) -> Place {
+        Place::Listed { index }
+    }
+
+    fn reason_and_place(e: &VersionEvidence) -> Option<(UnknownReason, Place)> {
+        match e {
+            VersionEvidence::Unknown { reason, at, .. } => Some((*reason, at.place)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn both_unknown_keeps_the_smaller_reason_whichever_side_has_it() {
+        let early = || unknown(0, at(1), UnknownReason::UnreadableListedVersion);
+        let late = || unknown(0, at(2), UnknownReason::SameVersionDifferentSpelling);
+        let want = Some((UnknownReason::UnreadableListedVersion, at(1)));
+        // The channel side has the smaller reason, then the SemVer side does.
+        assert_eq!(reason_and_place(&combine(0, early(), late())), want);
+        assert_eq!(reason_and_place(&combine(0, late(), early())), want);
+    }
+
+    #[test]
+    fn both_unknown_with_one_reason_keeps_the_channel_sides_place() {
+        let a = unknown(0, at(1), UnknownReason::UnparseableBoundary);
+        let b = unknown(0, at(2), UnknownReason::UnparseableBoundary);
+        assert_eq!(
+            reason_and_place(&combine(0, a, b)),
+            Some((UnknownReason::UnparseableBoundary, at(1)))
+        );
+    }
+
+    #[test]
+    fn one_unknown_side_speaks_for_itself_in_either_position() {
+        let u = || unknown(0, at(3), UnknownReason::UnparseableLimit);
+        let in_range = || {
+            VersionEvidence::InRange(Location {
+                entry: 0,
+                place: Place::Entry,
+            })
+        };
+        let want = Some((UnknownReason::UnparseableLimit, at(3)));
+        for (a, b) in [
+            (u(), in_range()),
+            (in_range(), u()),
+            (u(), VersionEvidence::OutOfRange),
+            (VersionEvidence::OutOfRange, u()),
+        ] {
+            assert_eq!(reason_and_place(&combine(0, a, b)), want);
+        }
+    }
+
+    #[test]
+    fn only_a_real_order_disagreement_is_a_scheme_conflict() {
+        let in_range = || {
+            VersionEvidence::InRange(Location {
+                entry: 0,
+                place: Place::Entry,
+            })
+        };
+        for (a, b) in [
+            (in_range(), VersionEvidence::OutOfRange),
+            (VersionEvidence::OutOfRange, in_range()),
+        ] {
+            assert_eq!(
+                reason_and_place(&combine(0, a, b)),
+                Some((UnknownReason::SchemeConflict, Place::Entry))
+            );
+        }
     }
 }
