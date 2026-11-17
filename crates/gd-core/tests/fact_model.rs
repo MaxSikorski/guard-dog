@@ -2233,3 +2233,132 @@ fn claim_source_and_run_shapes_refuse_unknown_keys() {
         assert!(serde_json::from_value::<Fact>(bad).is_err(), "{path}");
     }
 }
+
+// ------------------------------------------------------------- round three
+
+#[test]
+fn walking_packages_and_states_never_shows_absence_for_a_candidate() {
+    let inside = instance("bitcoin-core");
+    let absent_pkg = |product: &str| {
+        fact(
+            Subject::Service(inside.clone()),
+            Claim::Package {
+                product: cat(product),
+                presence: Presence::absent(Coverage::Complete, witness()),
+                version: unknown(UnknownReason::NotChecked),
+            },
+        )
+    };
+    let facts = [
+        absent_pkg("xz-utils"),
+        absent_pkg("zlib"),
+        lnd_state_fact(ServiceState::not_found(Coverage::Complete, witness())),
+        // xz-utils might be unidentified, and so might the containing service.
+        unrecognized_on(vec![cat("xz-utils"), cat("lnd")]),
+    ];
+    let v = setup_view(&facts);
+    assert!(
+        v.packages()
+            .any(|(k, _)| k.1 == cat("xz-utils") && k.0 == inside)
+    );
+    for (key, state) in v.packages() {
+        if v.may_be_unidentified(&key.1) {
+            assert!(
+                !matches!(state, Observed::Seen(PackageState::NotInstalled)),
+                "{key:?}"
+            );
+        }
+    }
+    for (key, state) in v.states() {
+        if v.may_be_unidentified(&key.catalog) {
+            assert!(!matches!(state, Observed::Seen(ServiceState::NotFound(_))));
+        }
+    }
+    // The other product is still absent.
+    assert!(matches!(
+        v.package(&inside, &cat("zlib")),
+        Observed::Seen(PackageState::NotInstalled)
+    ));
+    // And when the containing service is the candidate, the walk is guarded too.
+    let v = setup_view(&[absent_pkg("zlib"), unrecognized_on(vec![cat("bitcoin-core")])]);
+    for (_, state) in v.packages() {
+        assert!(!matches!(state, Observed::Seen(PackageState::NotInstalled)));
+    }
+}
+
+#[test]
+fn a_sensors_own_unidentified_unknown_marks_the_catalog_id() {
+    let lnd = instance("lnd");
+    let v = setup_view(&[
+        lnd_state_fact(unknown(UnknownReason::Unidentified)),
+        lnd_state_fact(Observed::Seen(ServiceState::Stopped)),
+    ]);
+    assert!(v.may_be_unidentified(&cat("lnd")));
+    assert!(v.unidentified().any(|c| *c == cat("lnd")));
+    assert!(matches!(
+        v.state(&lnd),
+        Observed::Seen(ServiceState::Stopped)
+    ));
+    // A package presence says the same about the product it names.
+    let v = setup_view(&[pkg_fact(
+        unknown(UnknownReason::Unidentified),
+        unknown(UnknownReason::NotChecked),
+    )]);
+    assert!(v.may_be_unidentified(&cat("xz-utils")));
+}
+
+#[test]
+fn a_fact_that_cannot_be_built_becomes_a_blind_spot_not_a_gap() {
+    let claim = |n: usize| Claim::Unrecognized {
+        candidates: (0..n).map(|i| cat(&format!("product-{i}"))).collect(),
+        runs_as: container("mystery"),
+        version_label: None,
+        source_label: None,
+    };
+    let make = |n| {
+        Fact::new_or_blind_spot(
+            Subject::Host,
+            claim(n),
+            source(SensorId::Fixture),
+            Timestamp(5),
+            vec![],
+        )
+    };
+    assert!(matches!(make(3).claim, Claim::Unrecognized { .. }));
+    let spot = make(33);
+    assert!(matches!(
+        spot.claim,
+        Claim::BlindSpot {
+            area: Area::Services,
+            what: BlindSpotKind::TooBig,
+            ..
+        }
+    ));
+    assert_eq!(spot.subject, Subject::Host);
+    assert_eq!(spot.observed_at, Timestamp(5));
+    assert!(serde_json::from_str::<Fact>(&json(&spot)).is_ok());
+}
+
+#[test]
+fn a_weaker_conflict_under_a_stronger_version_leaves_a_trace() {
+    let lnd = instance("lnd");
+    let weaker_conflict = fact(
+        Subject::Service(lnd.clone()),
+        Claim::Service {
+            state: Observed::Seen(ServiceState::Running),
+            version: unknown(UnknownReason::Conflict),
+            runs_as: container("lnd"),
+            method: Method::Port,
+        },
+    );
+    let strong = service_fact("lnd", "0.18.0", Method::ServiceReply);
+    for facts in orders(strong, weaker_conflict) {
+        let v = setup_view(&facts);
+        assert!(matches!(v.service(&lnd), Observed::Seen(_)));
+        assert!(
+            v.blind_spots
+                .iter()
+                .any(|s| s.what == BlindSpotKind::MethodsDisagree)
+        );
+    }
+}
