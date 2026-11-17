@@ -1,0 +1,52 @@
+{
+  "canaries": [
+    {
+      "class": "seed-phrase",
+      "text": "scout theme pen success spawn emerge panic mushroom grant arrest kit lake torch offer use stairs negative scare venture magic trouble drop alarm combine"
+    },
+    {
+      "class": "nsec",
+      "text": "nsec1hx6sr5wc2jahrqqzzkg07z6dcwjncdkhdnkfncr4s5n3yramu7zsh24xe2"
+    },
+    {
+      "class": "xpub",
+      "text": "xpub6CtVTS4NhyK1erkPMtD4UGd7Ncg8dWQKD8t7Zhp9coGWZZyeBzEmDj9Rgg18EE5bkj5ZX1eS5Gx4BLoqRsQYj8ga93mAgDmrJuUtqVUmbLW"
+    },
+    {
+      "bytes_hex": "0201036c6e640865ef73371863e24687e96568c4e2109c442a5c3c97d714cd8f54d10efdf17eac06f33e6310841f9fb9aad1c5057349f7b677c17d40430c35714a86a71cf983abf72d0defaeb9b627cd5b444516330b8a770919e8676cff84d0c5120bd7",
+      "class": "macaroon",
+      "text": "0201036c6e640865ef73371863e24687e96568c4e2109c442a5c3c97d714cd8f54d10efdf17eac06f33e6310841f9fb9aad1c5057349f7b677c17d40430c35714a86a71cf983abf72d0defaeb9b627cd5b444516330b8a770919e8676cff84d0c5120bd7"
+    },
+    {
+      "class": "onion",
+      "text": "xkeqpslhdevzm3jma5ngryvmmuoobxcif5xwc4ax7tzs4tuc2zappgid.onion"
+    },
+    {
+      "class": "ipv4",
+      "text": "198.51.100.139"
+    },
+    {
+      "class": "ipv6",
+      "text": "2001:db8:e0f5:53c1:9d18:133c:2c86:2907"
+    },
+    {
+      "class": "rpc-password",
+      "text": "gdlabcanary-63811059bf1f823cb2ff8786380dffa78160c69f01d170de387ec812cd6aded6"
+    },
+    {
+      "class": "cln-rune",
+      "text": "XmjpGGEODlOWn00w6vm_KHMwNyEyMNnketXtYQQQpul0Bbp373NGTeW-TEz9jK8h"
+    },
+    {
+      "class": "node-pubkey",
+      "text": "029017ca29e43caff08f4a5b0c0b0bc764afec512727877516af7acd9a859c679b"
+    },
+    {
+      "class": "hostname",
+      "text": "gdcanary-host-zskmnse6l7"
+    }
+  ],
+  "control_token": "gdctlklee2wuskiuoafgo4jol",
+  "format": 1,
+  "seed": "1"
+}
