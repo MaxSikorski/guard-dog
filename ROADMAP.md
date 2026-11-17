@@ -4,7 +4,7 @@ This is where Guard Dog is going, in plain words, and where I could really use y
 
 ## Where things stand
 
-Guard Dog is **pre-alpha**. There's nothing to install yet. Right now we're laying the foundations: a Rust workspace that builds and tests the same way every time, and the "judges", automatic tests that decide whether Guard Dog actually works, so it's never just me or an AI saying so. You can see every test and judge, and what each one proves, in [tests/README.md](tests/README.md).
+Guard Dog is **pre-alpha**. There's nothing to install yet. Right now we're laying the foundations: a Rust workspace that builds and tests the same way every time, and the "judges", automatic tests that decide whether Guard Dog actually works, so it's never just me or an AI saying so. The README's [How we know it works](README.md#how-we-know-it-works) explains the judges, and [tests/README.md](tests/README.md) lists every test and what it proves.
 
 ## How to read this
 
