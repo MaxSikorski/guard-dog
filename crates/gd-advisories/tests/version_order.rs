@@ -22,9 +22,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use gd_advisories::{
-    Advisory, BitcoinCore, Candidate, Channel, ChannelScheme, GoTag, Place, RcEvidence, SemVer,
-    Source, UnknownReason, VersionError, VersionEvidence, VersionScheme, evaluate_channel_entry,
-    evaluate_entry, parse_advisory, parse_advisory_from,
+    Advisory, BitcoinCore, Candidate, Channel, ChannelScheme, GapKind, GoTag, Place, RcEvidence,
+    SemVer, Source, UnknownReason, VersionError, VersionEvidence, VersionScheme, canonical_package,
+    evaluate_channel_entry, evaluate_entry, parse_advisory, parse_advisory_from,
 };
 use proptest::prelude::*;
 use serde_json::{Value, json};
@@ -88,14 +88,14 @@ fn range(kind: &str, events: Value) -> Value {
 fn place(e: &VersionEvidence) -> Place {
     match e {
         VersionEvidence::Unknown { at, .. } => at.place,
-        other => panic!("expected unknown, got {other:?}"),
+        _ => panic!("expected an unknown result"),
     }
 }
 
 fn reason(e: &VersionEvidence) -> UnknownReason {
     match e {
         VersionEvidence::Unknown { reason, .. } => *reason,
-        other => panic!("expected unknown, got {other:?}"),
+        _ => panic!("expected an unknown result"),
     }
 }
 
@@ -828,10 +828,16 @@ fn scheme_conflict_is_declared_last_and_asks_about_release_candidates() {
     let adv = lnd_fix("0.20.0-beta");
     match dual(&adv, "0.20.0-beta.rc1") {
         VersionEvidence::Unknown { question, .. } => {
-            assert!(question.contains("release candidate"), "{question}");
-            assert!(question.contains("final release"), "{question}");
+            assert!(
+                question.contains("release candidate"),
+                "the question names release candidates"
+            );
+            assert!(
+                question.contains("final release"),
+                "the question names the final release"
+            );
         }
-        other => panic!("{other:?}"),
+        _ => panic!("expected an unknown result"),
     }
     // Declaration order is load-bearing: SchemeConflict is the last reason.
     assert!(UnknownReason::SchemeConflict > UnknownReason::NoUsableRangeOrVersions);
@@ -866,13 +872,29 @@ const LND_PKG: (&str, &str) = ("Go", "github.com/lightningnetwork/lnd");
 const LIT_PKG: (&str, &str) = ("Go", "github.com/lightninglabs/lightning-terminal");
 const TAPD_PKG: (&str, &str) = ("Go", "github.com/lightninglabs/taproot-assets");
 
+/// Whether an (ecosystem, name) pair is `pkg` after canonicalisation, so the
+/// same repository spelled two ways is one package.
+fn same_package(ecosystem: &str, name: &str, pkg: (&str, &str)) -> bool {
+    match (
+        canonical_package(ecosystem, name),
+        canonical_package(pkg.0, pkg.1),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// Every range event value (as written) of every entry for `pkg`, with its
 /// position: (entry, range, event, kind, value). The positions are numbers
 /// only, so a failure message never repeats advisory text.
 fn endpoints(raw: &Value, pkg: (&str, &str)) -> Vec<(usize, usize, usize, String, String)> {
     let mut out = Vec::new();
     for (ei, e) in raw["affected"].as_array().into_iter().flatten().enumerate() {
-        if e["package"]["ecosystem"] != pkg.0 || e["package"]["name"] != pkg.1 {
+        if !same_package(
+            e["package"]["ecosystem"].as_str().unwrap_or(""),
+            e["package"]["name"].as_str().unwrap_or(""),
+            pkg,
+        ) {
             continue;
         }
         for (ri, r) in e["ranges"].as_array().into_iter().flatten().enumerate() {
@@ -956,16 +978,16 @@ fn catalog_names_and_examples_parse_in_their_schemes() {
     assert_eq!(toml_values(&core_toml, "scheme"), ["bitcoin-core"]);
     let examples = toml_values(&core_toml, "version");
     assert!(examples.contains(&"32.1".to_string()));
-    for v in examples {
-        assert!(core().parse(&v).is_ok(), "Core example {v}");
+    for (n, v) in examples.iter().enumerate() {
+        assert!(core().parse(v).is_ok(), "Core example #{n}");
     }
     let lnd_toml = fs::read_to_string(root().join("catalog/lnd.toml")).unwrap();
     assert_eq!(toml_values(&lnd_toml, "scheme"), ["semver-beta"]);
-    for v in toml_values(&lnd_toml, "version") {
-        assert!(ChannelScheme::beta().parse(&v).is_ok(), "LND example {v}");
+    for (n, v) in toml_values(&lnd_toml, "version").iter().enumerate() {
+        assert!(ChannelScheme::beta().parse(v).is_ok(), "LND example #{n}");
     }
-    for raw in toml_values(&lnd_toml, "raw") {
-        assert!(ChannelScheme::beta().parse(&raw).is_ok(), "LND raw {raw}");
+    for (n, raw) in toml_values(&lnd_toml, "raw").iter().enumerate() {
+        assert!(ChannelScheme::beta().parse(raw).is_ok(), "LND raw #{n}");
     }
 }
 
@@ -1022,20 +1044,25 @@ fn fixture_expects(text: &str) -> Vec<(String, String, String)> {
 fn every_fixture_version_of_core_and_lnd_parses() {
     let text = fs::read_to_string(root().join("fixtures/expected-matches.toml")).unwrap();
     let mut seen = 0;
-    for p in fixture_services(&text) {
+    for (n, p) in fixture_services(&text).into_iter().enumerate() {
         match p.product.as_str() {
             "bitcoin-core" => {
                 seen += 1;
-                assert!(core().parse(&p.version).is_ok(), "{}", p.version);
+                assert!(
+                    core().parse(&p.version).is_ok(),
+                    "Core fixture service #{n}"
+                );
             }
             "lnd" => {
                 seen += 1;
                 assert!(
                     ChannelScheme::beta().parse(&p.version).is_ok(),
-                    "{}",
-                    p.version
+                    "LND fixture service #{n} (channel)"
                 );
-                assert!(GoTag.parse(&p.version).is_ok(), "{}", p.version);
+                assert!(
+                    GoTag.parse(&p.version).is_ok(),
+                    "LND fixture service #{n} (Go tag)"
+                );
             }
             _ => {}
         }
@@ -1055,10 +1082,24 @@ const PLATFORM_32: &str = "32-bit systems, or blocks stored on a FAT32 file syst
 fn applicable_entries_checked(adv: &Advisory, pkg: (&str, &str)) -> Result<Vec<usize>, usize> {
     let mut out = Vec::new();
     for (i, e) in adv.affected.iter().enumerate() {
-        if e.package.ecosystem.expose_untrusted() != pkg.0
-            || e.package.name.expose_untrusted() != pkg.1
-        {
+        if !same_package(
+            e.package.ecosystem.expose_untrusted(),
+            e.package.name.expose_untrusted(),
+            pkg,
+        ) {
             continue;
+        }
+        // A hardware model note is never reviewed here, and an unreadable
+        // `database_specific` field (a platform or model note of the wrong
+        // type or size) cannot be trusted to mean "no note".
+        let db_at = format!("affected[{i}].database_specific");
+        if e.scope.model.is_some()
+            || adv
+                .gaps
+                .iter()
+                .any(|g| g.kind == GapKind::UnreadableField && g.at == db_at)
+        {
+            return Err(i);
         }
         match e
             .scope
@@ -1093,6 +1134,53 @@ fn an_unreviewed_platform_note_on_a_core_entry_is_rejected() {
     let bytes = serde_json::to_vec(&changed).unwrap();
     let adv = parse_advisory_from(&bytes, Source::GuardDogCorpus).unwrap();
     assert_eq!(applicable_entries_checked(&adv, CORE_PKG), Err(1));
+    // A platform note of 4,097 bytes is unreadable (over the note size), not
+    // "no note": entry 0 is rejected.
+    let mut long = raw.clone();
+    long["affected"][0]["database_specific"]["platform"] = json!("x".repeat(4097));
+    let bytes = serde_json::to_vec(&long).unwrap();
+    let adv = parse_advisory_from(&bytes, Source::GuardDogCorpus).unwrap();
+    assert_eq!(applicable_entries_checked(&adv, CORE_PKG), Err(0));
+    // A hardware model note, whatever its text, is never reviewed here.
+    let mut model = raw.clone();
+    model["affected"][0]["database_specific"]["model"] = json!("a hardware model");
+    let bytes = serde_json::to_vec(&model).unwrap();
+    let adv = parse_advisory_from(&bytes, Source::GuardDogCorpus).unwrap();
+    assert_eq!(applicable_entries_checked(&adv, CORE_PKG), Err(0));
+}
+
+#[test]
+fn the_same_package_spelled_two_ways_is_one_package_for_both_helpers() {
+    let (_, _, raw) = corpus()
+        .into_iter()
+        .find(|(n, _, _)| n == "CVE-2026-117349.json")
+        .unwrap();
+    let mut changed = raw.clone();
+    let before = changed["affected"].as_array().unwrap().len();
+    changed["affected"].as_array_mut().unwrap().push(json!({
+        "package": {
+            "ecosystem": "GIT",
+            "name": "https://github.com/bitcoin/bitcoin.git"
+        },
+        "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "32.1"}]}]
+    }));
+    let bytes = serde_json::to_vec(&changed).unwrap();
+    let adv = parse_advisory_from(&bytes, Source::GuardDogCorpus).unwrap();
+    let idx = applicable_entries_checked(&adv, CORE_PKG).unwrap();
+    assert!(idx.contains(&before), "the appended entry is applicable");
+    let counted = endpoints(&changed, CORE_PKG);
+    assert!(
+        counted.iter().any(|(e, _, _, _, _)| *e == before),
+        "the endpoint counter sees the appended entry"
+    );
+    // Core 32.1 is fixed in every original range but starts the new one, so
+    // the answer is InRange only if the helper kept the new entry.
+    let c = BitcoinCore::new(RcEvidence::Reported);
+    let rs: Vec<_> = idx
+        .iter()
+        .map(|&i| evaluate_entry(&c, &adv, i, Some("32.1")))
+        .collect();
+    assert_eq!(union(&rs), "in-range");
 }
 
 fn subresult(e: &VersionEvidence) -> &'static str {
@@ -1174,8 +1262,8 @@ fn fixture_pairs_give_the_expected_version_subresult() {
                     if !idx.is_empty() {
                         if listed {
                             subversion_unknown += 1;
-                            assert_eq!(
-                                expected, "out-of-range",
+                            assert!(
+                                expected == "out-of-range",
                                 "the key's value, expectation #{xi}"
                             );
                             assert_eq!(union(&srs), "unknown", "expectation #{xi}");
@@ -1199,7 +1287,7 @@ fn fixture_pairs_give_the_expected_version_subresult() {
                                 "What full version does bitcoind report, including any rcN?"
                             );
                         } else {
-                            assert_eq!(union(&srs), expected, "expectation #{xi} as subversion");
+                            assert!(union(&srs) == expected, "expectation #{xi} as subversion");
                         }
                     }
                     ("bitcoin-core", (!idx.is_empty()).then(|| union(&rs)))
@@ -1222,7 +1310,7 @@ fn fixture_pairs_give_the_expected_version_subresult() {
                 _ => continue,
             };
             let Some(got) = got else { continue };
-            assert_eq!(got, expected, "{pkg} expectation #{xi}");
+            assert!(got == expected, "{pkg} expectation #{xi}");
             checked.push(format!("{setup}/{pkg}/{advisory}"));
         }
     }
@@ -1362,14 +1450,18 @@ where
         assert!(va == vc);
     }
     // Normalization is idempotent and the text round-trips.
-    for (raw, v) in [(a, &va), (b, &vb), (c, &vc)] {
+    for (n, (raw, v)) in [(a, &va), (b, &vb), (c, &vc)].into_iter().enumerate() {
         let once = text_of(v);
         let again = s
             .parse(&once)
-            .unwrap_or_else(|e| panic!("{raw} -> {once}: {e}"));
-        assert_eq!(text_of(&again), once, "{raw}");
-        assert!(again == *v, "{raw} -> {once}");
-        assert_eq!(s.same_identity(raw, &once), Some(true), "{raw} -> {once}");
+            .unwrap_or_else(|_| panic!("input #{n} does not re-parse"));
+        assert!(text_of(&again) == once, "input #{n} text is not stable");
+        assert!(again == *v, "input #{n} does not round-trip");
+        assert_eq!(
+            s.same_identity(raw, &once),
+            Some(true),
+            "input #{n} identity"
+        );
     }
 }
 
@@ -1991,6 +2083,11 @@ fn go_tag_refuses_installed_build_metadata_except_incompatible() {
     assert!(GoTag.candidate("v1.2.3+build5").is_err());
     // Go's own `+incompatible` is the one exception, and only exactly so.
     assert!(GoTag.candidate("v2.0.0+incompatible").is_ok());
+    // `+incompatible` exists only for major 2 and above; on major 0 or 1 it is
+    // refused like any other metadata.
+    for bad in ["v1.2.3+incompatible", "v0.1.0+incompatible"] {
+        assert!(GoTag.candidate(bad).is_err(), "{bad}");
+    }
     for bad in ["v2.0.0+INCOMPATIBLE", "v2.0.0+incompatible.build5"] {
         assert!(GoTag.candidate(bad).is_err(), "{bad}");
     }
