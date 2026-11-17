@@ -109,6 +109,10 @@ Guard Dog is free and open source, with no subscriptions and no ads. If it helps
 - **Follow along on Nostr:** `npub18rxdd7k5ayly50965a9rv8r7qrqmxn3tjsdp348xg205msrwyc9sacjx70`
 - **Share it** on Nostr or X. There's a ready-made note on the [website](https://maxsikorski.github.io/guard-dog/#support).
 
+## Thanks
+
+Guard Dog is built the way [Super Testnet](https://github.com/supertestnet) taught me to build: plain HTML, CSS and JavaScript, no frameworks, nothing you need a server for, and everything runnable from a single file you can read. His open-source Bitcoin, Lightning and Nostr tools have been a guiding light for me for years, and his ideas shape how we test Guard Dog and how it talks over Nostr. Thank you, Super.
+
 ## Security
 
 Found a vulnerability in Guard Dog? Please report it privately. See [SECURITY.md](SECURITY.md).
