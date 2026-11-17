@@ -529,7 +529,15 @@ const PINNED_RESULTS: [(&str, &str, &str); 46] = [
 
 /// The lab setups' fact rows, pinned (setup, name, service, subject, value):
 /// changing a value means editing this table in the same pull request.
-const PINNED_FACTS: [(&str, &str, Option<&str>, Option<&str>, &str); 8] = [
+/// A pinned fact row: setup, name, service, subject, value.
+type PinnedFact = (
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+    Option<&'static str>,
+    &'static str,
+);
+const PINNED_FACTS: [PinnedFact; 8] = [
     (
         "lab-old-synthetic",
         "p2p_inbound_or_outbound_peers",
