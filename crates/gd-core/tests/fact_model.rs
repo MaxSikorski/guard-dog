@@ -75,7 +75,7 @@ fn fact(subject: Subject, claim: Claim) -> Fact {
         source(SensorId::Fixture),
         Timestamp(1_700_000_000),
         vec![],
-    )
+    ).unwrap()
 }
 
 fn container(name: &str) -> RunsAs {
@@ -158,7 +158,7 @@ fn hostile_fact(text: &str) -> Fact {
             ),
             Evidence::new(CallId::parse("version").unwrap(), text),
         ],
-    )
+    ).unwrap()
 }
 
 fn hostile_other_claims(text: &str) -> Vec<Claim> {
@@ -858,7 +858,7 @@ fn too_much_evidence_is_dropped_and_oversized_evidence_is_refused_on_load() {
         source(SensorId::BitcoindRpc),
         Timestamp(0),
         five,
-    );
+    ).unwrap();
     assert_eq!(f.evidence().len(), MAX_EVIDENCE);
 
     let big = format!(
@@ -1090,7 +1090,7 @@ fn facts_from_fixture(setup: &Table) -> Vec<Fact> {
             },
             Timestamp(1),
             vec![],
-        )
+        ).unwrap()
     };
     let node = Subject::Service(instance(NODE));
     let mut facts = vec![
@@ -1318,7 +1318,7 @@ fn every_lab_manifest_kind_is_a_fact_and_comes_back_equal() {
             },
             Timestamp(1),
             vec![],
-        )
+        ).unwrap()
     };
     let mut facts = vec![
         mk(
@@ -1949,7 +1949,7 @@ fn a_conflict_is_reported_over_not_checked() {
 }
 
 #[test]
-fn candidates_are_deduplicated_and_a_long_list_is_refused_on_load() {
+fn repeated_candidates_collapse_to_one() {
     let many =
         |n: usize| -> Vec<CatalogId> { (0..n).map(|i| cat(&format!("product-{i}"))).collect() };
     // Repeats collapse; the same id forty times is one candidate.
@@ -1959,12 +1959,6 @@ fn candidates_are_deduplicated_and_a_long_list_is_refused_on_load() {
         &back.claim,
         Claim::Unrecognized { candidates, .. } if candidates.len() == 1
     ));
-    // 32 distinct ids load; 33 are refused, and the error is a plain message.
-    let ok = unrecognized_on(many(32));
-    assert!(serde_json::from_str::<Fact>(&json(&ok)).is_ok());
-    let long = unrecognized_on(many(33));
-    let err = serde_json::from_str::<Fact>(&json(&long)).unwrap_err();
-    assert!(err.to_string().contains("candidates"), "{err}");
 }
 
 #[test]
@@ -1991,4 +1985,238 @@ fn wire_structs_refuse_unknown_keys() {
     assert!(serde_json::from_value::<Observed<Presence>>(s.clone()).is_ok());
     s["Seen"]["Absent"]["extra"] = Json::Bool(true);
     assert!(serde_json::from_value::<Observed<Presence>>(s).is_err());
+}
+
+// -------------------------------------------- round two: conflicts and caps
+
+fn orders<T: Clone>(a: T, b: T) -> [Vec<T>; 2] {
+    [vec![a.clone(), b.clone()], vec![b, a]]
+}
+
+fn lnd_state_fact(state: Observed<ServiceState>) -> Fact {
+    fact(
+        Subject::Service(instance("lnd")),
+        Claim::Service {
+            state,
+            version: unknown(UnknownReason::NotChecked),
+            runs_as: container("lnd"),
+            method: Method::Port,
+        },
+    )
+}
+
+#[test]
+fn a_conflict_is_never_overruled_by_a_seen_value_in_either_order() {
+    let lnd = instance("lnd");
+    let conflict = || lnd_state_fact(unknown(UnknownReason::Conflict));
+    for (seen, name) in [
+        (ServiceState::not_found(Coverage::Complete, witness()), "NotFound"),
+        (Observed::Seen(ServiceState::Running), "Running"),
+    ] {
+        for facts in orders(lnd_state_fact(seen.clone()), conflict()) {
+            let v = setup_view(&facts);
+            assert!(is_unknown(&v.state(&lnd), UnknownReason::Conflict), "{name}");
+        }
+    }
+    // Package presence: Absent against Conflict.
+    let pkg = |presence| pkg_fact(presence, unknown(UnknownReason::NotChecked));
+    for facts in orders(
+        pkg(Presence::absent(Coverage::Complete, witness())),
+        pkg(unknown(UnknownReason::Conflict)),
+    ) {
+        let v = setup_view(&facts);
+        assert!(is_unknown(
+            &v.package(&instance("lnd"), &cat("xz-utils")),
+            UnknownReason::Conflict
+        ));
+    }
+    // Package version: Present with a version against Present with a Conflict.
+    for facts in orders(
+        pkg_fact(Observed::Seen(Presence::Present), Observed::Seen(version("5.4"))),
+        pkg_fact(
+            Observed::Seen(Presence::Present),
+            unknown(UnknownReason::Conflict),
+        ),
+    ) {
+        let v = setup_view(&facts);
+        assert!(matches!(
+            v.package(&instance("lnd"), &cat("xz-utils")),
+            Observed::Seen(PackageState::Installed(o)) if is_unknown(&o, UnknownReason::Conflict)
+        ));
+    }
+    // A setting and the chain.
+    let id = SettingId::parse("option_enabled").unwrap();
+    let setting = |value| {
+        fact(
+            Subject::Setup,
+            Claim::Setting {
+                key: id.clone(),
+                value,
+            },
+        )
+    };
+    for facts in orders(
+        setting(Observed::Seen(SettingValue::Disabled)),
+        setting(unknown(UnknownReason::Conflict)),
+    ) {
+        assert!(is_unknown(
+            &setup_view(&facts).setting(&id),
+            UnknownReason::Conflict
+        ));
+    }
+    let chain = |c| fact(Subject::Setup, Claim::Chain(c));
+    for facts in orders(
+        chain(Observed::Seen(Chain::Mainnet)),
+        chain(unknown(UnknownReason::Conflict)),
+    ) {
+        assert!(is_unknown(&setup_view(&facts).chain, UnknownReason::Conflict));
+    }
+}
+
+#[test]
+fn an_absence_never_beats_an_unidentified_unknown_but_presence_does() {
+    let pkg = |presence| pkg_fact(presence, unknown(UnknownReason::NotChecked));
+    let key = (instance("lnd"), cat("xz-utils"));
+    for facts in orders(
+        pkg(Presence::absent(Coverage::Complete, witness())),
+        pkg(unknown(UnknownReason::Unidentified)),
+    ) {
+        assert!(is_unknown(
+            &setup_view(&facts).package(&key.0, &key.1),
+            UnknownReason::Unidentified
+        ));
+    }
+    for facts in orders(
+        pkg(Observed::Seen(Presence::Present)),
+        pkg(unknown(UnknownReason::Unidentified)),
+    ) {
+        assert!(matches!(
+            setup_view(&facts).package(&key.0, &key.1),
+            Observed::Seen(PackageState::Installed(_))
+        ));
+    }
+    for facts in orders(
+        lnd_state_fact(ServiceState::not_found(Coverage::Complete, witness())),
+        lnd_state_fact(unknown(UnknownReason::Unidentified)),
+    ) {
+        assert!(is_unknown(
+            &setup_view(&facts).state(&instance("lnd")),
+            UnknownReason::Unidentified
+        ));
+    }
+}
+
+#[test]
+fn package_absence_is_also_guarded_by_the_containing_service() {
+    let inside = instance("bitcoin-core");
+    let absent = fact(
+        Subject::Service(inside.clone()),
+        Claim::Package {
+            product: cat("xz-utils"),
+            presence: Presence::absent(Coverage::Complete, witness()),
+            version: unknown(UnknownReason::NotChecked),
+        },
+    );
+    let plain = setup_view(std::slice::from_ref(&absent));
+    assert!(matches!(
+        plain.package(&inside, &cat("xz-utils")),
+        Observed::Seen(PackageState::NotInstalled)
+    ));
+    for facts in orders(absent, unrecognized_on(vec![cat("bitcoin-core")])) {
+        let v = setup_view(&facts);
+        assert!(is_unknown(
+            &v.package(&inside, &cat("xz-utils")),
+            UnknownReason::Unidentified
+        ));
+        // A package nobody mentioned inside it is guarded the same way.
+        assert!(is_unknown(
+            &v.package(&inside, &cat("zlib")),
+            UnknownReason::Unidentified
+        ));
+    }
+}
+
+#[test]
+fn a_stopped_instance_stays_stopped_and_the_product_is_still_flagged() {
+    let lnd = instance("lnd");
+    let v = setup_view(&[
+        lnd_state_fact(Observed::Seen(ServiceState::Stopped)),
+        unrecognized_on(vec![cat("lnd")]),
+    ]);
+    assert!(matches!(
+        v.state(&lnd),
+        Observed::Seen(ServiceState::Stopped)
+    ));
+    assert!(v.may_be_unidentified(&cat("lnd")));
+}
+
+#[test]
+fn products_known_only_from_candidates_are_listed() {
+    let v = setup_view(&[
+        service_fact("lnd", "0.18.0", Method::ServiceReply),
+        unrecognized_on(vec![cat("strfry"), cat("lnd"), cat("strfry")]),
+    ]);
+    let listed: Vec<&str> = v.unidentified().map(|c| c.as_str()).collect();
+    assert_eq!(listed, ["lnd", "strfry"]);
+    // `services()` does not list a product that only a candidate mentions.
+    assert!(v.services().all(|(i, _)| i.catalog != cat("strfry")));
+}
+
+#[test]
+fn a_fact_that_can_be_built_can_be_read_back_and_a_long_candidate_list_is_refused() {
+    let many = |n: usize| -> Vec<CatalogId> {
+        (0..n).map(|i| cat(&format!("product-{i}"))).collect()
+    };
+    let build = |c: Vec<CatalogId>| {
+        Fact::new(
+            Subject::Host,
+            Claim::Unrecognized {
+                candidates: c,
+                runs_as: container("mystery"),
+                version_label: None,
+                source_label: None,
+            },
+            source(SensorId::Fixture),
+            Timestamp(1),
+            vec![],
+        )
+    };
+    let ok = build(many(32)).unwrap();
+    assert!(serde_json::from_str::<Fact>(&json(&ok)).is_ok());
+    assert!(build(many(33)).is_err());
+    // 33 copies of one id are one candidate, in the builder and on load.
+    let same = build(vec![cat("lnd"); 33]).unwrap();
+    assert!(serde_json::from_str::<Fact>(&json(&same)).is_ok());
+    let mut doc: Json = serde_json::from_str(&json(&same)).unwrap();
+    doc["claim"]["Unrecognized"]["candidates"] = serde_json::json!(vec!["lnd"; 33]);
+    assert!(serde_json::from_value::<Fact>(doc.clone()).is_ok());
+    doc["claim"]["Unrecognized"]["candidates"] = serde_json::json!(
+        (0..33).map(|i| format!("product-{i}")).collect::<Vec<_>>()
+    );
+    assert!(serde_json::from_value::<Fact>(doc).is_err());
+}
+
+#[test]
+fn claim_source_and_run_shapes_refuse_unknown_keys() {
+    let f = fact(
+        Subject::Service(instance("lnd")),
+        Claim::Service {
+            state: Observed::Seen(ServiceState::Running),
+            version: Observed::Seen(version("1.0")),
+            runs_as: container("lnd"),
+            method: Method::Port,
+        },
+    );
+    let good: Json = serde_json::from_str(&json(&f)).unwrap();
+    assert!(serde_json::from_value::<Fact>(good.clone()).is_ok());
+    for path in [
+        "/claim/Service",
+        "/claim/Service/runs_as/Container",
+        "/source",
+        "/subject/Service",
+    ] {
+        let mut bad = good.clone();
+        bad.pointer_mut(path).unwrap()["extra"] = Json::Bool(true);
+        assert!(serde_json::from_value::<Fact>(bad).is_err(), "{path}");
+    }
 }
