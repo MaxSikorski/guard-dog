@@ -151,6 +151,7 @@
             display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;
             opacity: 0; transform: translateY(30px);
         }
+        .hero-cta-note { flex-basis: 100%; margin: -2px 0 6px; font-size: 0.85rem; opacity: 0.6; }
         .status {
             margin-top: 28px; font-size: 0.8rem; font-weight: 500; color: var(--text-muted);
             display: inline-flex; align-items: center; gap: 8px;
@@ -314,9 +315,10 @@
             <h1 class="hero-title">Guard Dog</h1>
             <p class="hero-subtitle">A self-hosted watchdog for your Bitcoin and Nostr stack. It knows what you run, notices the moment something turns dangerous, and tells you exactly what to do.</p>
             <div class="hero-cta">
-                <a href="https://github.com/MaxSikorski/guard-dog" class="btn primary-btn" target="_blank" rel="noopener">View on GitHub</a>
+                <a href="preview/" class="btn primary-btn">Try the live mock-up</a>
+                <p class="hero-cta-note">A clickable preview with made-up regtest data. Nothing to install.</p>
+                <a href="https://github.com/MaxSikorski/guard-dog" class="btn secondary-btn" target="_blank" rel="noopener">View on GitHub</a>
                 <a href="#how" class="btn secondary-btn">How it works</a>
-                <a href="preview/" class="btn secondary-btn">Try the mock-up</a>
             </div>
             <div class="status"><span class="dot base"></span>Pre-alpha · nothing to install yet</div>
         </div>
