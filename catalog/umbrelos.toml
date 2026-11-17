@@ -49,7 +49,7 @@ sources = [
 todo = [
   "licence: read the upstream LICENSE file; do not assume it matches the other entries",
   "summary: from the advisory (the login page, the Umbrel device, Settings); confirm the project's own one-liner",
-  "money: true because umbrelOS hosts the apps that hold the keys; its advisory is a login-link attack that can run commands on the device",
+  "money: true because umbrelOS hosts the apps that hold the keys. Its advisory is a login-link attack that can run commands on the device",
   "upstream.website, upstream.release_feed, upstream.security_policy: none recorded in the repo",
   "images: umbrelOS ships as an OS image, not an OCI image; confirm no pattern applies",
   "binaries: an operating system has no single executable Guard Dog can call",

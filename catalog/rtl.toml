@@ -46,7 +46,7 @@ sources = [
   "https://github.com/Ride-The-Lightning/RTL/security/advisories/GHSA-wj92-jhwh-85j5",
 ]
 todo = [
-  "licence: read the upstream LICENSE file",
+  "licence: read the upstream LICENSE file.",
   "summary: from the advisory; confirm the project's own one-liner and which node backends it supports",
   "money: set true because the advisory shows it can start payments from the node; confirm how a remote-control dashboard is classified",
   "upstream.website, upstream.release_feed, upstream.security_policy: none recorded in the repo",

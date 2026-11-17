@@ -15,12 +15,13 @@ workspace = true
 serde.workspace = true
 # Already locked; the ASCII-only JSON writer in `json.rs`.
 serde_json.workspace = true
+# The catalog loader reads catalog/*.toml and matches replies with regexes.
+toml.workspace = true
+regex.workspace = true
 
 [dev-dependencies]
 libc = "=0.2.191"
 proptest.workspace = true
 trybuild.workspace = true
 jsonschema.workspace = true
-toml.workspace = true
-regex.workspace = true
 yaml-rust2.workspace = true
