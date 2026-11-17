@@ -57,12 +57,18 @@ fn cmp_with<S: VersionScheme>(s: &S, a: &str, b: &str) -> Ordering {
 }
 
 fn lt<S: VersionScheme>(s: &S, a: &str, b: &str) {
-    assert_eq!(cmp_with(s, a, b), Ordering::Less, "{a} < {b}");
-    assert_eq!(cmp_with(s, b, a), Ordering::Greater, "{b} > {a}");
+    assert!(cmp_with(s, a, b) == Ordering::Less, "ordering a < b failed");
+    assert!(
+        cmp_with(s, b, a) == Ordering::Greater,
+        "ordering b > a failed"
+    );
 }
 
 fn eq<S: VersionScheme>(s: &S, a: &str, b: &str) {
-    assert_eq!(cmp_with(s, a, b), Ordering::Equal, "{a} = {b}");
+    assert!(
+        cmp_with(s, a, b) == Ordering::Equal,
+        "ordering a = b failed"
+    );
 }
 
 fn refused<S: VersionScheme>(s: &S, bad: &[&str]) {
@@ -173,8 +179,15 @@ fn semver_orders_the_published_precedence_chain() {
     assert_eq!(chain.len(), 8, "the spec's example chain has eight entries");
     for i in 0..chain.len() {
         for j in (i + 1)..chain.len() {
-            lt(&SemVer, chain[i], chain[j]);
-            lt(&GoTag, chain[i], chain[j]);
+            for (name, ord) in [
+                ("SemVer", cmp_with(&SemVer, chain[i], chain[j])),
+                ("Go tag", cmp_with(&GoTag, chain[i], chain[j])),
+            ] {
+                assert!(
+                    ord == Ordering::Less,
+                    "precedence order broken in {name}: entries #{i} and #{j}"
+                );
+            }
         }
     }
 }
@@ -972,23 +985,101 @@ fn toml_values(text: &str, key: &str) -> Vec<String> {
         .collect()
 }
 
+/// What a catalog file's `[version]` table says: its `scheme` (the first
+/// `scheme =` line directly under the `[version]` header, before the next
+/// header) and the `version` and `raw` of each `[[version.examples]]`. Lines
+/// inside a multiline string are skipped, so text there never counts.
+struct CatalogVersion {
+    scheme: Option<String>,
+    examples: Vec<(Option<String>, Option<String>)>,
+}
+
+fn catalog_version(text: &str) -> CatalogVersion {
+    let mut out = CatalogVersion {
+        scheme: None,
+        examples: Vec::new(),
+    };
+    let mut in_version = false;
+    let mut in_example = false;
+    let mut in_string = false;
+    for line in text.lines() {
+        let l = line.trim();
+        let was_in_string = in_string;
+        for quote in ["\"\"\"", "\'\'\'"] {
+            if l.matches(quote).count() % 2 == 1 {
+                in_string = !in_string;
+            }
+        }
+        if was_in_string {
+            continue;
+        }
+        if l.starts_with('[') {
+            in_version = l == "[version]";
+            in_example = l == "[[version.examples]]";
+            if in_example {
+                out.examples.push((None, None));
+            }
+        } else if in_version && out.scheme.is_none() {
+            out.scheme = toml_values(l, "scheme").into_iter().next();
+        } else if in_example && let Some(last) = out.examples.last_mut() {
+            if let Some(v) = toml_values(l, "version").into_iter().next() {
+                last.0 = Some(v);
+            }
+            if let Some(r) = toml_values(l, "raw").into_iter().next() {
+                last.1 = Some(r);
+            }
+        }
+    }
+    out
+}
+
 #[test]
 fn catalog_names_and_examples_parse_in_their_schemes() {
     let core_toml = fs::read_to_string(root().join("catalog/bitcoin-core.toml")).unwrap();
-    assert_eq!(toml_values(&core_toml, "scheme"), ["bitcoin-core"]);
-    let examples = toml_values(&core_toml, "version");
-    assert!(examples.contains(&"32.1".to_string()));
-    for (n, v) in examples.iter().enumerate() {
+    let core_cat = catalog_version(&core_toml);
+    assert!(
+        core_cat.scheme.as_deref() == Some("bitcoin-core"),
+        "Core catalog scheme"
+    );
+    assert!(
+        core_cat
+            .examples
+            .iter()
+            .any(|(v, _)| v.as_deref() == Some("32.1")),
+        "Core catalog lists the 32.1 example"
+    );
+    for (n, (v, _)) in core_cat.examples.iter().enumerate() {
+        let v = v.as_deref().unwrap_or("");
         assert!(core().parse(v).is_ok(), "Core example #{n}");
     }
     let lnd_toml = fs::read_to_string(root().join("catalog/lnd.toml")).unwrap();
-    assert_eq!(toml_values(&lnd_toml, "scheme"), ["semver-beta"]);
-    for (n, v) in toml_values(&lnd_toml, "version").iter().enumerate() {
+    let lnd_cat = catalog_version(&lnd_toml);
+    assert!(
+        lnd_cat.scheme.as_deref() == Some("semver-beta"),
+        "LND catalog scheme"
+    );
+    assert!(!lnd_cat.examples.is_empty(), "LND catalog has examples");
+    for (n, (v, raw)) in lnd_cat.examples.iter().enumerate() {
+        let v = v.as_deref().unwrap_or("");
         assert!(ChannelScheme::beta().parse(v).is_ok(), "LND example #{n}");
+        if let Some(raw) = raw {
+            assert!(ChannelScheme::beta().parse(raw).is_ok(), "LND raw #{n}");
+        }
     }
-    for (n, raw) in toml_values(&lnd_toml, "raw").iter().enumerate() {
-        assert!(ChannelScheme::beta().parse(raw).is_ok(), "LND raw #{n}");
-    }
+}
+
+#[test]
+fn a_scheme_line_inside_a_multiline_string_is_not_the_catalog_scheme() {
+    let text = "[upstream]\nnote = \'\'\'\nscheme = \"operator-private-marker\"\n\'\'\'\n\n[version]\nscheme = \"semver-beta\"\n\n[version.call]\nscheme = \"other\"\n";
+    assert!(
+        catalog_version(text).scheme.as_deref() == Some("semver-beta"),
+        "the real scheme"
+    );
+    let text = "[version]\ndoc = \"\"\"\nscheme = \"operator-private-marker\"\n\"\"\"\nscheme = \"semver-beta\"\n";
+    assert!(
+        catalog_version(text).scheme.as_deref() == Some("semver-beta"),
+        "the real scheme after a multiline doc"
+    );
 }
 
 struct Pair {
@@ -1080,6 +1171,11 @@ const PLATFORM_32: &str = "32-bit systems, or blocks stored on a FAT32 file syst
 /// platform note must be absent or exactly one of the two reviewed strings;
 /// anything else is `Err(entry index)`, never the text.
 fn applicable_entries_checked(adv: &Advisory, pkg: (&str, &str)) -> Result<Vec<usize>, usize> {
+    // A record whose gap list was cut cannot be trusted to show every
+    // unreadable note: the whole advisory is rejected.
+    if adv.gaps.iter().any(|g| g.kind == GapKind::GapsTruncated) {
+        return Err(0);
+    }
     let mut out = Vec::new();
     for (i, e) in adv.affected.iter().enumerate() {
         if !same_package(
@@ -1093,11 +1189,16 @@ fn applicable_entries_checked(adv: &Advisory, pkg: (&str, &str)) -> Result<Vec<u
         // `database_specific` field (a platform or model note of the wrong
         // type or size) cannot be trusted to mean "no note".
         let db_at = format!("affected[{i}].database_specific");
+        let entry_at = format!("affected[{i}]");
         if e.scope.model.is_some()
-            || adv
-                .gaps
-                .iter()
-                .any(|g| g.kind == GapKind::UnreadableField && g.at == db_at)
+            || adv.gaps.iter().any(|g| {
+                g.kind == GapKind::UnreadableField
+                    && (g.at == db_at
+                        || (g.at == entry_at
+                            && g.name
+                                .as_ref()
+                                .is_some_and(|n| n.expose_untrusted() == "database_specific")))
+            })
         {
             return Err(i);
         }
@@ -1141,6 +1242,26 @@ fn an_unreviewed_platform_note_on_a_core_entry_is_rejected() {
     let bytes = serde_json::to_vec(&long).unwrap();
     let adv = parse_advisory_from(&bytes, Source::GuardDogCorpus).unwrap();
     assert_eq!(applicable_entries_checked(&adv, CORE_PKG), Err(0));
+    // A `database_specific` that is not an object is unreadable, not "no note".
+    let mut text = raw.clone();
+    text["affected"][0]["database_specific"] = json!("64-bit systems only");
+    let bytes = serde_json::to_vec(&text).unwrap();
+    let adv = parse_advisory_from(&bytes, Source::GuardDogCorpus).unwrap();
+    assert_eq!(applicable_entries_checked(&adv, CORE_PKG), Err(0));
+    // 256 unknown top-level keys use up the gap list, so the unreadable
+    // platform on entry 1 is not recorded; the truncation mark rejects it all.
+    let mut many = raw.clone();
+    for k in 0..256 {
+        many[format!("x_extra_{k:03}")] = json!(k);
+    }
+    many["affected"][1]["database_specific"]["platform"] = json!("x".repeat(4097));
+    let bytes = serde_json::to_vec(&many).unwrap();
+    let adv = parse_advisory_from(&bytes, Source::GuardDogCorpus).unwrap();
+    assert!(
+        adv.gaps.iter().any(|g| g.kind == GapKind::GapsTruncated),
+        "the gap list was cut"
+    );
+    assert!(applicable_entries_checked(&adv, CORE_PKG).is_err());
     // A hardware model note, whatever its text, is never reviewed here.
     let mut model = raw.clone();
     model["affected"][0]["database_specific"]["model"] = json!("a hardware model");
@@ -1808,11 +1929,11 @@ struct Reach {
 fn round_trips(a: &str, b: &str, c: &str) -> Reach {
     let mut reach = Reach::default();
     if let Ok(v) = SemVer.parse(a) {
-        assert_eq!(
-            SemVer.parse(&v.identity()).unwrap().identity(),
-            v.identity()
+        assert!(
+            SemVer.parse(&v.identity()).unwrap().identity() == v.identity(),
+            "identity is not stable"
         );
-        assert_eq!(v.identity(), a);
+        assert!(v.identity() == a, "identity differs from the input");
         reach.semver += 1;
     }
     let _ = GoTag.parse(a);
