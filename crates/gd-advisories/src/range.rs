@@ -64,7 +64,12 @@ pub enum UnknownReason {
     UnparseableLimit,
     /// A range with a malformed shape: no events, no `introduced`, both `fixed`
     /// and `last_affected`, `"0"` on a non-`introduced` event, events that do
-    /// not alternate opening and closing, or a limit at or below an `introduced`.
+    /// not alternate opening and closing, or an `introduced` at or above every
+    /// limit of its own range.
+    ///
+    /// "A closing with nothing open" is deliberately stricter than OSV, which
+    /// ignores a redundant closing: here it is `MalformedRange`, because a
+    /// record that contradicts itself is a coverage gap, not a clearance.
     MalformedRange,
     /// Two different event kinds at the same coordinate that do not form a
     /// single-release range.
@@ -517,10 +522,13 @@ fn eval_range<S: VersionScheme + ?Sized>(
         i = j;
     }
 
-    // A range cannot reopen at or beyond one of its own limits.
+    // A range cannot reopen at or beyond every one of its own limits. Limits
+    // expand scope, so a limit above the reopening (or `*`) keeps it reachable.
     for g in &groups {
         if let (Coordinate::At(c), Op::Open | Op::Point) = (&g.coordinate, g.op)
-            && limits.iter().any(|l| l <= c)
+            && !unbounded
+            && !limits.is_empty()
+            && !limits.iter().any(|l| l > c)
         {
             keep_smallest(&mut problem, UnknownReason::MalformedRange, at(g.index));
         }
@@ -552,7 +560,24 @@ fn eval_range<S: VersionScheme + ?Sized>(
                     && matches!(&g.coordinate, Coordinate::At(c)
                         if c > low && high.as_ref().is_none_or(|h| c <= h))
             });
-            if open_low || opens_inside {
+            // Every version in [low, high) is in range when the range is open at
+            // low, nothing closes it from low up to high, and high is within a
+            // limit (or there is none).
+            let closes_inside = groups.iter().any(|g| {
+                matches!(g.op, Op::Close(_) | Op::Point)
+                    && matches!(&g.coordinate, Coordinate::At(c)
+                        if c >= low && high.as_ref().is_none_or(|h| c < h))
+            });
+            let within_a_limit = unbounded
+                || limits.is_empty()
+                || high.as_ref().is_some_and(|h| limits.iter().any(|l| h <= l));
+            if open_low && !closes_inside && within_a_limit {
+                let (_, decided_by) = state_at(&groups, low);
+                Outcome::In(Place::Range {
+                    range: range_index,
+                    event: decided_by,
+                })
+            } else if open_low || opens_inside {
                 Outcome::Unknown(UnknownReason::CandidateIsAnInterval, shape)
             } else {
                 Outcome::Out
