@@ -165,6 +165,22 @@ fn read(rel: &str) -> String {
     fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
 }
 
+/// Open for reading without following a symlink and without waiting on a FIFO.
+fn open_no_follow(path: &Path) -> std::io::Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::File::open(path)
+    }
+}
+
 /// Which file a `Metadata` is: (device, inode) on Unix.
 fn identity(m: &fs::Metadata) -> (u64, u64) {
     #[cfg(unix)]
@@ -185,11 +201,10 @@ fn identity(m: &fs::Metadata) -> (u64, u64) {
 ///
 /// The path is looked at first (`symlink_metadata`, so a FIFO is refused
 /// before an open that would wait for a writer, and a symlink is refused),
-/// then opened (no look-then-act on existence), then the opened file must be
-/// the very file that was looked at: same device and inode, still a regular
-/// file. A swap in between is refused. (Not `O_NOFOLLOW | O_NONBLOCK`:
-/// `libc` is not a dependency of this crate's tests, and the flag values are
-/// not portable to hardcode.)
+/// then opened with `O_NOFOLLOW | O_NONBLOCK` (a FIFO or symlink swapped in
+/// after the look neither blocks nor is followed), then the opened file must
+/// be the very file that was looked at: same device and inode, still a
+/// regular file.
 fn read_manifest_file(path: &Path) -> Result<Option<String>, String> {
     let rel = path.display();
     let looked = match fs::symlink_metadata(path) {
@@ -202,7 +217,7 @@ fn read_manifest_file(path: &Path) -> Result<Option<String>, String> {
             "{rel} is not a plain file (a symlink, folder or pipe)"
         ));
     }
-    let file = match fs::File::open(path) {
+    let file = match open_no_follow(path) {
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("cannot open {rel}: {e}")),
         Ok(f) => f,
@@ -587,9 +602,13 @@ fn compose_name_matches(name: &str, id: &str) -> bool {
 }
 
 /// The version `lab/up.sh` derives from a service's reported text, by the
-/// same rules (`# 9.` in `lab/up.sh`): Bitcoin Core's `/Satoshi:32.1.0/` is
-/// `32.1`, Core Lightning drops a leading `v`, Nutshell drops `Nutshell/`,
-/// (also bare, as `lab/up.sh` accepts it), LND and strfry are used as they are. `None` for an id with no rule.
+/// same rules (`# 9.` in `lab/up.sh`):
+/// - Bitcoin Core's `/Satoshi:32.1.0/` is `32.1`.
+/// - Core Lightning drops a leading `v`.
+/// - Nutshell drops `Nutshell/` (a bare version is accepted too).
+/// - LND and strfry are used as they are.
+///
+/// `None` for an id with no rule.
 fn version_from_reported(id: &str, reported: &str) -> Option<String> {
     match id {
         "bitcoin-core" => {

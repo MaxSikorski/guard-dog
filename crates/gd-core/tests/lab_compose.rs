@@ -4,7 +4,7 @@
 //! Deterministic by design: no Docker, no network, no clock, nothing random.
 //! `check()` reads `lab/compose.yml` the way Docker does (the file uses no YAML
 //! anchors) and returns every problem it finds, in a stable order. The checker
-//! is itself tested: `every_unsafe_change_is_caught` makes 54 named unsafe
+//! is itself tested: `every_unsafe_change_is_caught` makes 55 named unsafe
 //! edits and requires each one to be refused with its own problem code.
 
 // Test-only crate: its helper functions (not just `#[test]` ones) read files and
@@ -92,7 +92,8 @@ const ALLOWED_SERVICE_KEYS: [&str; 20] = [
     "pids_limit",
 ];
 /// Keys that have their own problem code, so they never also count as `unknown-key`.
-const SPECIFIC_KEYS: [&str; 12] = [
+const SPECIFIC_KEYS: [&str; 13] = [
+    "platform",
     "ports",
     "expose",
     "privileged",
@@ -626,6 +627,12 @@ fn check_service(
             add("host-namespace", format!("{k} is set"));
         }
     }
+    if has("platform") {
+        add(
+            "foreign-platform",
+            "platform is set: the lab must run the host's own architecture".into(),
+        );
+    }
     if has("devices") {
         add("host-device", "devices is set".into());
     }
@@ -905,7 +912,12 @@ fn describe(problems: &[Problem]) -> String {
 
 /// Unsafe edits to the real file: (text to find, text to put there, the
 /// problem code that must catch it). An empty `from` appends `to` to the end.
-const MUTATIONS: [(&str, &str, &str); 54] = [
+const MUTATIONS: [(&str, &str, &str); 55] = [
+    (
+        "    user: \"101:101\"\n",
+        "    user: \"101:101\"\n    platform: linux/386\n",
+        "foreign-platform",
+    ),
     (
         "bitcoin/bitcoin@sha256:d2454aaf2ff4ce1ebbc49f4aa05ed044c907b849a80a3f4c0ad23e488e50bbe0",
         "bitcoin/bitcoin:32.1",

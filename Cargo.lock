@@ -386,6 +386,7 @@ name = "gd-core"
 version = "0.0.1"
 dependencies = [
  "jsonschema",
+ "libc",
  "proptest",
  "serde_json",
  "toml",

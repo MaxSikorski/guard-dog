@@ -225,28 +225,36 @@ EXPOSED_JQ='[.[0]
     ((.NetworkSettings.Ports // {}) | to_entries[] | select((.value // []) | length > 0) | true),
     ((.HostConfig.NetworkMode // "") | (. == "host" or startswith("container:")))
   ] | map(select(.)) | length'
-# tmpfs needs a read-only root, at least one tmpfs, and no other kind of mount.
+# tmpfs needs a read-only root, at least one tmpfs (as a configured tmpfs or as
+# a mount of type tmpfs) and no other kind of mount.
 STORAGE_JQ='.[0] | if (.HostConfig.ReadonlyRootfs == true)
-  and ((.HostConfig.Tmpfs // {}) | length > 0)
+  and (((.HostConfig.Tmpfs // {}) | length > 0) or any((.Mounts // [])[]; .Type == "tmpfs"))
   and all((.Mounts // [])[]; .Type == "tmpfs") then "tmpfs" else "disk" end'
-# The image's architecture, and (Docker 25+ with the containerd store) the
-# architecture of the manifest that was actually pulled. If both are there and
-# differ, the answer is "mixed", never the host's guess; on an older Docker
-# only the first exists and is used.
+# The image's architecture (input: `docker image inspect`) against the
+# architecture of the manifest the container's image was actually pulled as
+# (--argjson c: `docker inspect` of the container, whose ImageManifestDescriptor
+# exists from Docker 28.1 / API 1.48 with the containerd image store). If both
+# are there and differ, the answer is "mixed", never the host's guess; on an
+# older Docker the container has no descriptor and the image value is used.
 # shellcheck disable=SC2016
-ARCH_JQ='.[0] | .Architecture as $a
-  | (.ImageManifestDescriptor.platform.architecture // $a) as $b
+ARCH_JQ='.[0].Architecture as $a
+  | ($c[0].ImageManifestDescriptor.platform.architecture // $a) as $b
   | if $a == $b then $a else "mixed" end'
 inspect_lab() {
-  local cids cid img a kind seen_arch="" storage=tmpfs exposure=none n want c
+  local cids cid img a kind seen_arch="" storage=tmpfs exposure=none want c ci imgj st n
   cids="$(dc ps -aq)" || fail "could not list the lab's containers"
   want="$(dc config --services | grep -c .)" || fail "could not list the compose services"
   c="$(printf '%s\n' "$cids" | grep -c .)" || c=0
   [ "$c" -eq "$want" ] && [ "$want" -gt 0 ] || fail "expected $want lab containers, found $c"
   while IFS= read -r cid; do
     [[ $cid =~ ^[0-9a-f]{12,64}$ ]] || fail "unexpected container id"
-    img="$(docker inspect -f '{{.Image}}' "$cid")" || fail "docker inspect failed"
-    a="$(plain "$(docker image inspect "$img" | jq -er "$ARCH_JQ")")" || fail "docker image inspect failed"
+    # Each docker answer is captured first: a failed inspection fails the run
+    # and is never read as "disk" or "mixed".
+    ci="$(docker inspect "$cid")" || fail "docker inspect failed"
+    img="$(printf '%s' "$ci" | jq -er '.[0].Image')" || fail "docker inspect gave no image"
+    imgj="$(docker image inspect "$img")" || fail "docker image inspect failed"
+    a="$(printf '%s' "$imgj" | jq -er --argjson c "$ci" "$ARCH_JQ")" || fail "docker image inspect gave no architecture"
+    a="$(plain "$a")"
     case $a in
       amd64 | arm64 | ppc64le | s390x | riscv64 | loong64 | mips64 | mips64le) kind=64-bit ;;
       386 | arm | mips | mipsle) kind=32-bit ;;
@@ -255,8 +263,9 @@ inspect_lab() {
     esac
     if [ -z "$seen_arch" ]; then seen_arch=$kind; elif [ "$seen_arch" != "$kind" ]; then seen_arch=mixed; fi
     [ "$kind" != mixed ] || seen_arch=mixed
-    [ "$(docker inspect "$cid" | jq -er "$STORAGE_JQ")" = tmpfs ] || storage=disk
-    n="$(docker inspect "$cid" | jq -er "$EXPOSED_JQ")" || fail "docker inspect failed"
+    st="$(printf '%s' "$ci" | jq -er "$STORAGE_JQ")" || fail "docker inspect gave no storage facts"
+    [ "$st" = tmpfs ] || storage=disk
+    n="$(printf '%s' "$ci" | jq -er "$EXPOSED_JQ")" || fail "docker inspect gave no network facts"
     [ "$n" = 0 ] || exposure=published
   done <<< "$cids"
   LAB_ARCH=$seen_arch LAB_STORAGE=$storage LAB_EXPOSURE=$exposure
