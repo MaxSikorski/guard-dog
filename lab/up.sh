@@ -193,6 +193,7 @@ step "least-privileged logins: bitcoind gdwatch, LND info:read, CLN getinfo rune
 # "32.1.0" is its release "32.1".
 label() { dc config --format json | jq -er --arg s "$1" --arg k "$2" '.services[$s].labels["org.guard-dog.lab." + $k]'; }
 image_of() { dc config --format json | jq -er --arg s "$1" '.services[$s].image'; }
+BTC_CHAIN="$(plain "$(bcli getblockchaininfo | jq -er .chain)")"
 BTC_RAW="$(plain "$(bcli getnetworkinfo | jq -er .subversion)")"
 BTC_VER="$(printf '%s' "$BTC_RAW" | sed -E 's#^/Satoshi:([0-9]+[.][0-9]+)[.]0/$#\1#; s#^/Satoshi:([0-9]+[.][0-9]+[.][0-9]+)/$#\1#')"
 LND_RAW="$(plain "$(lncli version | jq -er .lnd.version)")"
@@ -224,6 +225,7 @@ entry() { # compose-service reported-text how-it-was-read version
   printf '# Written by lab/up.sh. Every version was read from the running service itself,\n'
   printf '# never from an image tag.\n'
   printf 'format = 1\nplatform = "docker"\nsource = "lab"\nrecorder = "lab/up.sh format 1"\n'
+  printf 'chain = "%s"\n' "$BTC_CHAIN"
   printf 'description = "Guard Dog regtest lab (lab/compose.yml): bitcoind, LND, Core Lightning, strfry and a Nutshell mint."\n'
   entry bitcoind "$BTC_RAW" "bitcoin-cli getnetworkinfo .subversion" "$BTC_VER"
   entry cln "$CLN_RAW" "lightning-cli getinfo .version" "$CLN_VER"

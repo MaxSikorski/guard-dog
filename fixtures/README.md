@@ -35,4 +35,4 @@ Never loosen an expected result to make the matcher pass without a written reaso
 
 ## The lab as recorded (two back ends)
 
-`lab-recorded/manifest.toml` is the manifest a real `lab/up.sh` run wrote on 2026-11-16 (Mac, arm64), committed exactly as it came out: each service's id and the version the running service reported, plus comments naming the reply and the pinned image. No credentials. `crates/gd-core/tests/two_backends.rs` checks that Judge B sees the same setup through it as through the `lab-regtest` setup above. Re-record it whenever a lab image changes (`lab/README.md`, "Changing an image").
+`lab-recorded/manifest.toml` is the manifest a real `lab/up.sh` run wrote on 2026-11-16 (Mac, arm64), committed exactly as it came out: the chain, each service's id and the version the running service reported, plus comments naming the reply and the pinned image. No credentials. `crates/gd-core/tests/two_backends.rs` checks that Judge B sees the same facts through it as through the `lab-regtest` setup above, and that its `# image` lines are the images `lab/compose.yml` pins. Re-record it whenever a lab image changes (`lab/README.md`, "Changing an image").

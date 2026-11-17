@@ -3,28 +3,37 @@
 //! side thinks).
 //!
 //! A judge sees a setup through a back end. The same judge, run on two back
-//! ends that describe the same setup, must see the same thing; any difference
-//! fails and is printed field by field. Three back ends describe the regtest
+//! ends that describe the same setup, must see the same facts; any difference
+//! fails and is printed fact by fact. Three back ends describe the regtest
 //! lab today:
 //!
 //! - `fixture`: the `lab-regtest` setup in `fixtures/expected-matches.toml`,
 //!   Judge B's written-down view of the lab.
 //! - `lab-recorded`: `fixtures/lab-recorded/manifest.toml`, a manifest a real
-//!   `lab/up.sh` run wrote, committed as it came out. Re-record it when a lab
-//!   image changes. Compared on every `cargo test`.
-//! - `lab-live`: `lab/.data/manifest.toml`, which `lab/up.sh` writes from the
-//!   running services and `lab/down.sh` deletes. Compared only while a lab is
-//!   up; otherwise the test prints SKIPPED and passes, unless
-//!   `GD_LAB_REQUIRED=1` is set, when a missing lab fails.
+//!   `lab/up.sh` run wrote, committed as it came out. Its `# image` lines must
+//!   equal the images `lab/compose.yml` pins, so changing an image forces a
+//!   re-recording. Compared on every `cargo test`.
+//! - `lab-live`: `lab/.data/manifest.toml`, the last manifest `lab/up.sh`
+//!   wrote from the running services (`lab/down.sh` deletes it). Compared only
+//!   with `GD_LAB=1`, which fails if it is missing; without it the test says
+//!   SKIPPED, so the same commit gives the same result.
+//!
+//! Each back end says which fact families it records. A judge reads some
+//! families; one that a back end doesn't record is listed as "not compared",
+//! and that list is pinned (`LAB_NOT_COMPARED`), so a gap is never silent.
+//! Today the lab manifest records chain, platform, source and service
+//! versions; Judge B also reads arch, block storage, exposure and packages,
+//! which only the fixture has.
 //!
 //! The manifest carries text the services reported, so it is read strictly:
-//! exact keys, the exact format line, and ids and versions from a small
-//! character set (the same one `lab/up.sh`'s `plain()` enforces).
+//! at most 16 KiB, exact keys, the exact format line, ids from `[a-z0-9-]`,
+//! versions from `lab/up.sh`'s `plain()` characters, a printable-ASCII
+//! description. Nothing from it reaches an error message unless it is an id.
 //!
-//! Judges plug in through `JUDGES`: each projects a setup to the fields it
-//! reads. Judge B reads service ids and versions. Judge A (inventory) and
-//! Judge C (egress) add a row when they land. Judge D reads its corpus, not a
-//! setup, so it has no back end to compare.
+//! Adding Judge A or Judge C: a row in `JUDGES` naming the families it reads,
+//! and each back end filling those families (for the lab, a new allowlisted
+//! manifest key written by `lab/up.sh`), or an updated `LAB_NOT_COMPARED`.
+//! Judge D reads its corpus, not a setup, so it has no back end to compare.
 
 // Test-only crate: helper functions panic as failed checks. See expected_matches.rs.
 #![allow(
@@ -34,21 +43,23 @@
     clippy::panic
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
+use std::io::{ErrorKind, Read as _, Write as _};
+use std::path::{Path, PathBuf};
 
 use toml::{Table, Value};
+use yaml_rust2::YamlLoader;
 
 const FIXTURE_FILE: &str = "fixtures/expected-matches.toml";
 const FIXTURE_SETUP: &str = "lab-regtest";
 const RECORDED_FILE: &str = "fixtures/lab-recorded/manifest.toml";
 const LIVE_FILE: &str = "lab/.data/manifest.toml";
+const COMPOSE_FILE: &str = "lab/compose.yml";
 const UP_SH: &str = "lab/up.sh";
-/// The lab only ever runs on regtest: `lab/up.sh` removes itself otherwise.
-const LAB_CHAIN: &str = "regtest";
 
-const MANIFEST_KEYS: [&str; 6] = [
+const MANIFEST_KEYS: [&str; 7] = [
+    "chain",
     "description",
     "format",
     "platform",
@@ -59,32 +70,68 @@ const MANIFEST_KEYS: [&str; 6] = [
 const MANIFEST_SERVICE_KEYS: [&str; 2] = ["id", "version"];
 const MANIFEST_RECORDER: &str = "lab/up.sh format 1";
 const MAX_SERVICES: usize = 32;
+/// A real manifest is about 2 KB; anything over this is refused unread.
+const MAX_MANIFEST_BYTES: usize = 16 * 1024;
+const MAX_DESCRIPTION: usize = 200;
 
-/// What a back end says about a setup.
+/// What a back end says about a setup: the families of facts it records, and
+/// the facts themselves as sorted `key -> value` pairs. A key's family is its
+/// first word: `chain`, `platform`, `service lnd`, `package lnd xz-utils`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct View {
-    chain: String,
-    /// Service id to version, sorted.
-    services: BTreeMap<String, String>,
+    records: &'static [&'static str],
+    facts: BTreeMap<String, String>,
 }
 
-/// One judge: its name and the fields of a view it reads, as sorted
-/// `field -> value` pairs. Two back ends agree for a judge when these are equal.
-type Projection = fn(&View) -> BTreeMap<String, String>;
+/// The fact families each back end records.
+const FIXTURE_RECORDS: &[&str] = &[
+    "arch",
+    "block_storage",
+    "chain",
+    "exposure",
+    "package",
+    "platform",
+    "service",
+    "source",
+];
+const MANIFEST_RECORDS: &[&str] = &["chain", "platform", "service", "source"];
 
-/// Judge B matches advisories against the setup's products and versions on
-/// its chain.
-fn judge_b(view: &View) -> BTreeMap<String, String> {
-    let mut fields = BTreeMap::new();
-    fields.insert("chain".to_owned(), view.chain.clone());
-    for (id, version) in &view.services {
-        fields.insert(format!("service {id}"), version.clone());
-    }
-    fields
+/// One judge: its name and the fact families it reads. Judge B's matcher
+/// reads the products and versions, the packages inside them, the chain, and
+/// the platform facts that scope an advisory (`expected_matches.rs`).
+struct Judge {
+    name: &'static str,
+    reads: &'static [&'static str],
 }
 
-/// Every judge that reads a setup. Judge A and Judge C add a row here.
-const JUDGES: [(&str, Projection); 1] = [("Judge B", judge_b)];
+/// Every judge that reads a setup. Judge A and Judge C add a row here, and
+/// each back end records the families they read (or the gap is listed).
+const JUDGES: &[Judge] = &[Judge {
+    name: "Judge B",
+    reads: &[
+        "arch",
+        "block_storage",
+        "chain",
+        "exposure",
+        "package",
+        "platform",
+        "service",
+    ],
+}];
+
+/// What comparing two back ends found.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Comparison {
+    /// Facts both back ends record and give differently, sorted, in plain words.
+    disagreements: Vec<String>,
+    /// Families a judge reads that one back end doesn't record, so they were
+    /// not compared. Never silent: the tests pin this list.
+    not_compared: Vec<String>,
+}
+
+fn family(key: &str) -> &str {
+    key.split(' ').next().unwrap_or(key)
+}
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -92,6 +139,29 @@ fn root() -> PathBuf {
 
 fn read(rel: &str) -> String {
     fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
+}
+
+/// Read at most `MAX_MANIFEST_BYTES` + 1 bytes, so an oversized file is never
+/// loaded whole. `NotFound` is `Ok(None)`; every other error, and a symlink,
+/// is an error (never a skip).
+fn read_manifest_file(path: &Path) -> Result<Option<String>, String> {
+    let rel = path.display();
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot look at {rel}: {e}")),
+        Ok(m) if !m.file_type().is_file() => {
+            return Err(format!("{rel} is not a plain file (a symlink or a folder)"));
+        }
+        Ok(_) => {}
+    }
+    let file = fs::File::open(path).map_err(|e| format!("cannot open {rel}: {e}"))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_MANIFEST_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("cannot read {rel}: {e}"))?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| format!("{rel} is not UTF-8"))
 }
 
 /// The `fixture` back end: the named setup in expected-matches.toml.
@@ -109,18 +179,51 @@ fn fixture_view(text: &str, setup: &str) -> View {
         "exactly one setup {setup:?} in {FIXTURE_FILE}"
     );
     let s = found[0];
-    let mut services = BTreeMap::new();
-    for svc in s["service"].as_array().expect("[[setup.service]]") {
-        let id = svc["id"].as_str().expect("service id").to_owned();
-        let version = svc["version"].as_str().expect("service version").to_owned();
+    let mut facts = BTreeMap::new();
+    let mut put = |key: String, value: &str| {
         assert!(
-            services.insert(id.clone(), version).is_none(),
-            "{setup}: service {id} listed twice"
+            facts.insert(key.clone(), value.to_owned()).is_none(),
+            "{setup}: {key} listed twice"
+        );
+    };
+    for key in [
+        "arch",
+        "block_storage",
+        "chain",
+        "exposure",
+        "platform",
+        "source",
+    ] {
+        put(
+            key.to_owned(),
+            s[key].as_str().expect("setup field is text"),
+        );
+    }
+    for svc in s["service"].as_array().expect("[[setup.service]]") {
+        let id = svc["id"].as_str().expect("service id");
+        put(
+            format!("service {id}"),
+            svc["version"].as_str().expect("service version"),
+        );
+    }
+    for pkg in s
+        .get("package")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let (inside, product) = (
+            pkg["in"].as_str().unwrap(),
+            pkg["product"].as_str().unwrap(),
+        );
+        put(
+            format!("package {inside} {product}"),
+            pkg["version"].as_str().expect("package version"),
         );
     }
     View {
-        chain: s["chain"].as_str().expect("setup chain").to_owned(),
-        services,
+        records: FIXTURE_RECORDS,
+        facts,
     }
 }
 
@@ -151,8 +254,12 @@ fn named(what: &str, key: &str) -> String {
 }
 
 /// The `lab-recorded` and `lab-live` back ends: a manifest `lab/up.sh` wrote.
-/// Strict, because its versions are text the services reported.
+/// Strict, because its versions are text the services reported. Nothing from
+/// the file reaches an error message unless it passed `is_id`.
 fn parse_manifest(text: &str) -> Result<View, String> {
+    if text.len() > MAX_MANIFEST_BYTES {
+        return Err(format!("over {MAX_MANIFEST_BYTES} bytes"));
+    }
     let doc: Table = toml::from_str(text).map_err(|_| "not valid TOML".to_owned())?;
     for key in doc.keys() {
         if !MANIFEST_KEYS.contains(&key.as_str()) {
@@ -171,15 +278,29 @@ fn parse_manifest(text: &str) -> Result<View, String> {
     if field("recorder")? != MANIFEST_RECORDER {
         return Err("recorder is not lab/up.sh format 1".to_owned());
     }
-    if field("source")? != "lab" {
+    let mut facts = BTreeMap::new();
+    for key in ["chain", "platform", "source"] {
+        let value = field(key)?;
+        if !is_id(value) {
+            return Err(format!(
+                "{key} has characters outside [a-z0-9-] or the wrong length"
+            ));
+        }
+        facts.insert(key.to_owned(), value.to_owned());
+    }
+    if facts["source"] != "lab" {
         return Err("source is not lab".to_owned());
     }
-    if field("platform")? != "docker" {
-        return Err("platform is not docker".to_owned());
-    }
     let description = field("description")?;
-    if description.is_empty() || description.chars().any(char::is_control) {
-        return Err("description is empty or has a control character".to_owned());
+    if description.is_empty()
+        || description.len() > MAX_DESCRIPTION
+        || !description
+            .bytes()
+            .all(|b| b == b' ' || b.is_ascii_graphic())
+    {
+        return Err(format!(
+            "description is not 1 to {MAX_DESCRIPTION} printable ASCII characters"
+        ));
     }
     let list = doc
         .get("service")
@@ -192,7 +313,6 @@ fn parse_manifest(text: &str) -> Result<View, String> {
             list.len()
         ));
     }
-    let mut services = BTreeMap::new();
     let mut previous: Option<String> = None;
     for item in list {
         let svc = item.as_table().ok_or("a service is not a table")?;
@@ -225,34 +345,55 @@ fn parse_manifest(text: &str) -> Result<View, String> {
             ));
         }
         previous = Some(id.to_owned());
-        services.insert(id.to_owned(), version.to_owned());
+        facts.insert(format!("service {id}"), version.to_owned());
     }
     Ok(View {
-        chain: LAB_CHAIN.to_owned(),
-        services,
+        records: MANIFEST_RECORDS,
+        facts,
     })
 }
 
-/// Every field where two back ends disagree, for every judge, sorted, in
-/// plain words. Empty means they agree.
-fn disagreements(a_name: &str, a: &View, b_name: &str, b: &View) -> Vec<String> {
-    let mut out = Vec::new();
-    for (judge, project) in JUDGES {
-        let (fa, fb) = (project(a), project(b));
-        let mut fields: Vec<&String> = fa.keys().chain(fb.keys()).collect();
-        fields.sort();
-        fields.dedup();
-        for field in fields {
-            match (fa.get(field), fb.get(field)) {
+/// Compare two back ends for every judge. Within a family both record, a fact
+/// one side lacks is a disagreement. A family one side doesn't record goes in
+/// `not_compared`, by name, never silently.
+fn compare(a_name: &str, a: &View, b_name: &str, b: &View) -> Comparison {
+    let mut out = Comparison::default();
+    for judge in JUDGES {
+        let mut both = Vec::new();
+        for fam in judge.reads {
+            let missing: Vec<&str> = [(a_name, a), (b_name, b)]
+                .iter()
+                .filter(|(_, v)| !v.records.contains(fam))
+                .map(|(n, _)| *n)
+                .collect();
+            if missing.is_empty() {
+                both.push(*fam);
+            } else {
+                out.not_compared.push(format!(
+                    "{}: {fam} (not recorded by {})",
+                    judge.name,
+                    missing.join(" or ")
+                ));
+            }
+        }
+        let keys: BTreeSet<&String> = a
+            .facts
+            .keys()
+            .chain(b.facts.keys())
+            .filter(|k| both.contains(&family(k)))
+            .collect();
+        for key in keys {
+            let j = judge.name;
+            match (a.facts.get(key), b.facts.get(key)) {
                 (Some(x), Some(y)) if x == y => {}
-                (Some(x), Some(y)) => out.push(format!(
-                    "{judge}: {field}: {a_name} says {x}, {b_name} says {y}"
+                (Some(x), Some(y)) => out
+                    .disagreements
+                    .push(format!("{j}: {key}: {a_name} says {x}, {b_name} says {y}")),
+                (Some(x), None) => out.disagreements.push(format!(
+                    "{j}: {key}: {a_name} says {x}, {b_name} has nothing"
                 )),
-                (Some(x), None) => out.push(format!(
-                    "{judge}: {field}: {a_name} says {x}, {b_name} has nothing"
-                )),
-                (None, Some(y)) => out.push(format!(
-                    "{judge}: {field}: {a_name} has nothing, {b_name} says {y}"
+                (None, Some(y)) => out.disagreements.push(format!(
+                    "{j}: {key}: {a_name} has nothing, {b_name} says {y}"
                 )),
                 (None, None) => {}
             }
@@ -261,20 +402,92 @@ fn disagreements(a_name: &str, a: &View, b_name: &str, b: &View) -> Vec<String> 
     out
 }
 
-fn assert_agree(a_name: &str, a: &View, b_name: &str, b: &View) {
-    let diff = disagreements(a_name, a, b_name, b);
+/// What the lab manifest can't show Judge B yet, pinned so that recording
+/// more (or a judge reading more) has to update it on purpose.
+const LAB_NOT_COMPARED: [&str; 4] = [
+    "Judge B: arch (not recorded by {lab})",
+    "Judge B: block_storage (not recorded by {lab})",
+    "Judge B: exposure (not recorded by {lab})",
+    "Judge B: package (not recorded by {lab})",
+];
+
+/// Assert the fixture and a lab back end agree, and that exactly the known
+/// gaps were left out. Returns how many facts were compared.
+fn assert_agree(fixture: &View, lab_name: &str, lab: &View) -> usize {
+    let c = compare("fixture", fixture, lab_name, lab);
     assert!(
-        diff.is_empty(),
-        "the {a_name} and {b_name} back ends disagree on {} field(s):\n  {}",
-        diff.len(),
-        diff.join("\n  ")
+        c.disagreements.is_empty(),
+        "the fixture and {lab_name} back ends disagree on {} fact(s):\n  {}",
+        c.disagreements.len(),
+        c.disagreements.join("\n  ")
     );
+    let expected: Vec<String> = LAB_NOT_COMPARED
+        .iter()
+        .map(|s| s.replace("{lab}", lab_name))
+        .collect();
+    assert_eq!(c.not_compared, expected, "the families left out changed");
+    lab.facts.len()
 }
 
-fn view(chain: &str, services: &[(&str, &str)]) -> View {
+/// The `org.guard-dog.lab.id` label of each service in `lab/compose.yml`, with
+/// its pinned image.
+fn compose_images() -> BTreeMap<String, String> {
+    let docs = YamlLoader::load_from_str(&read(COMPOSE_FILE)).unwrap();
+    docs[0]["services"]
+        .as_hash()
+        .unwrap()
+        .values()
+        .map(|svc| {
+            (
+                svc["labels"]["org.guard-dog.lab.id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+                svc["image"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// The `# image <ref>` comment `lab/up.sh` writes above each `[[service]]`,
+/// paired with the id that follows it.
+fn manifest_images(text: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let mut image: Option<&str> = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("# image ") {
+            image = Some(rest);
+        } else if let Some(rest) = line.strip_prefix("id = \"") {
+            let id = rest.trim_end_matches('"').to_owned();
+            let img = image
+                .take()
+                .unwrap_or_else(|| panic!("no # image line above {id}"));
+            out.insert(id, img.to_owned());
+        }
+    }
+    out
+}
+
+/// `GD_LAB`: unset, empty or `0` means no lab is expected; `1` means one is up
+/// and must be compared. Anything else is a mistake, not a quiet skip.
+fn lab_expected() -> bool {
+    match std::env::var("GD_LAB").as_deref() {
+        Err(_) | Ok("" | "0") => false,
+        Ok("1") => true,
+        Ok(_) => panic!("GD_LAB must be unset, 0 or 1"),
+    }
+}
+
+/// Written straight to stderr, so it shows in a plain `cargo test` run too
+/// (libtest hides `eprintln!` from passing tests).
+fn notice(text: &str) {
+    let _ = writeln!(std::io::stderr(), "{text}");
+}
+
+fn view(records: &'static [&'static str], facts: &[(&str, &str)]) -> View {
     View {
-        chain: chain.to_owned(),
-        services: services
+        records,
+        facts: facts
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect(),
@@ -287,13 +500,16 @@ format = 1
 platform = "docker"
 source = "lab"
 recorder = "lab/up.sh format 1"
+chain = "regtest"
 description = "Guard Dog regtest lab."
 
 # bitcoind reported "/Satoshi:32.1.0/" (bitcoin-cli getnetworkinfo .subversion)
+# image bitcoin/bitcoin@sha256:00
 [[service]]
 id = "bitcoin-core"
 version = "32.1"
 
+# image lightninglabs/lnd@sha256:11
 [[service]]
 id = "lnd"
 version = "0.21.6-beta"
@@ -302,71 +518,99 @@ version = "0.21.6-beta"
 #[test]
 fn the_recorded_lab_agrees_with_the_fixtures() {
     let fixture = fixture_view(&read(FIXTURE_FILE), FIXTURE_SETUP);
-    let recorded = parse_manifest(&read(RECORDED_FILE))
-        .unwrap_or_else(|e| panic!("{RECORDED_FILE} is refused: {e}"));
+    let text = read_manifest_file(&root().join(RECORDED_FILE))
+        .unwrap_or_else(|e| panic!("{e}"))
+        .unwrap_or_else(|| panic!("{RECORDED_FILE} is missing"));
+    let recorded =
+        parse_manifest(&text).unwrap_or_else(|e| panic!("{RECORDED_FILE} is refused: {e}"));
     assert_eq!(
-        fixture.chain, LAB_CHAIN,
+        fixture.facts["chain"], "regtest",
         "{FIXTURE_SETUP} is a regtest setup"
     );
-    assert_eq!(fixture.services.len(), 5, "the lab runs five services");
-    assert_agree("fixture", &fixture, "lab-recorded", &recorded);
+    // The recording is of today's lab: every pinned service, each under the
+    // image `lab/compose.yml` pins now. Re-record after changing an image.
+    assert_eq!(
+        manifest_images(&text),
+        compose_images(),
+        "{RECORDED_FILE} was not recorded from the images {COMPOSE_FILE} pins; re-record it (lab/README.md)"
+    );
+    let compared = assert_agree(&fixture, "lab-recorded", &recorded);
+    assert_eq!(
+        compared,
+        3 + compose_images().len(),
+        "chain, platform, source and every service"
+    );
 }
 
 #[test]
 fn the_live_lab_agrees_with_the_fixtures() {
-    let required = std::env::var("GD_LAB_REQUIRED").is_ok_and(|v| v == "1");
-    let path = root().join(LIVE_FILE);
-    if !path.exists() {
-        assert!(
-            !required,
-            "GD_LAB_REQUIRED=1 but {LIVE_FILE} is missing: start the lab with lab/up.sh first"
-        );
-        eprintln!(
-            "SKIPPED the_live_lab_agrees_with_the_fixtures: no lab is up ({LIVE_FILE} is missing)"
+    if !lab_expected() {
+        notice(
+            "SKIPPED the_live_lab_agrees_with_the_fixtures: set GD_LAB=1 while a lab is up (lab/up.sh)",
         );
         return;
     }
+    let text = read_manifest_file(&root().join(LIVE_FILE))
+        .unwrap_or_else(|e| panic!("{e}"))
+        .unwrap_or_else(|| {
+            panic!("GD_LAB=1 but {LIVE_FILE} is missing: start the lab with lab/up.sh first")
+        });
+    let live = parse_manifest(&text).unwrap_or_else(|e| panic!("{LIVE_FILE} is refused: {e}"));
     let fixture = fixture_view(&read(FIXTURE_FILE), FIXTURE_SETUP);
-    let live =
-        parse_manifest(&read(LIVE_FILE)).unwrap_or_else(|e| panic!("{LIVE_FILE} is refused: {e}"));
-    assert_agree("fixture", &fixture, "lab-live", &live);
-    eprintln!(
-        "two back ends: fixture and lab-live agree on {} service(s) for {} judge(s)",
-        live.services.len(),
-        JUDGES.len()
-    );
+    let compared = assert_agree(&fixture, "lab-live", &live);
+    notice(&format!(
+        "two back ends: the fixture and the last lab/up.sh manifest agree on {compared} fact(s) for {} judge(s); not compared: {}",
+        JUDGES.len(),
+        LAB_NOT_COMPARED.len()
+    ));
 }
 
 #[test]
 fn disagreements_are_named_field_by_field() {
+    let all = FIXTURE_RECORDS;
     let base = view(
-        "regtest",
-        &[("bitcoin-core", "32.1"), ("lnd", "0.21.6-beta")],
+        all,
+        &[
+            ("chain", "regtest"),
+            ("service bitcoin-core", "32.1"),
+            ("service lnd", "0.21.6-beta"),
+        ],
     );
-    assert!(disagreements("fixture", &base, "lab", &base.clone()).is_empty());
+    assert_eq!(
+        compare("fixture", &base, "lab", &base.clone()),
+        Comparison::default()
+    );
 
-    let cases: [(&str, View, &[&str]); 5] = [
+    let cases: [(&str, View, &[&str]); 6] = [
         (
             "a version differs",
             view(
-                "regtest",
-                &[("bitcoin-core", "32.0"), ("lnd", "0.21.6-beta")],
+                all,
+                &[
+                    ("chain", "regtest"),
+                    ("service bitcoin-core", "32.0"),
+                    ("service lnd", "0.21.6-beta"),
+                ],
             ),
             &["Judge B: service bitcoin-core: fixture says 32.1, lab says 32.0"],
         ),
         (
             "a service is missing",
-            view("regtest", &[("bitcoin-core", "32.1")]),
+            view(
+                all,
+                &[("chain", "regtest"), ("service bitcoin-core", "32.1")],
+            ),
             &["Judge B: service lnd: fixture says 0.21.6-beta, lab has nothing"],
         ),
         (
             "an extra service",
             view(
-                "regtest",
+                all,
                 &[
-                    ("bitcoin-core", "32.1"),
-                    ("lnd", "0.21.6-beta"),
-                    ("strfry", "1.1.2"),
+                    ("chain", "regtest"),
+                    ("service bitcoin-core", "32.1"),
+                    ("service lnd", "0.21.6-beta"),
+                    ("service strfry", "1.1.2"),
                 ],
             ),
             &["Judge B: service strfry: fixture has nothing, lab says 1.1.2"],
@@ -374,16 +618,37 @@ fn disagreements_are_named_field_by_field() {
         (
             "the chain differs",
             view(
-                "signet",
-                &[("bitcoin-core", "32.1"), ("lnd", "0.21.6-beta")],
+                all,
+                &[
+                    ("chain", "signet"),
+                    ("service bitcoin-core", "32.1"),
+                    ("service lnd", "0.21.6-beta"),
+                ],
             ),
             &["Judge B: chain: fixture says regtest, lab says signet"],
         ),
         (
-            "two fields differ, reported in sorted order",
+            "a package only one side has (both record packages)",
             view(
-                "regtest",
-                &[("bitcoin-core", "32.1.0"), ("lnd", "v0.21.6-beta")],
+                all,
+                &[
+                    ("chain", "regtest"),
+                    ("package lnd xz-utils", "5.6.0"),
+                    ("service bitcoin-core", "32.1"),
+                    ("service lnd", "0.21.6-beta"),
+                ],
+            ),
+            &["Judge B: package lnd xz-utils: fixture has nothing, lab says 5.6.0"],
+        ),
+        (
+            "two facts differ, reported in sorted order",
+            view(
+                all,
+                &[
+                    ("chain", "regtest"),
+                    ("service bitcoin-core", "32.1.0"),
+                    ("service lnd", "v0.21.6-beta"),
+                ],
             ),
             &[
                 "Judge B: service bitcoin-core: fixture says 32.1, lab says 32.1.0",
@@ -392,12 +657,42 @@ fn disagreements_are_named_field_by_field() {
         ),
     ];
     for (what, other, expected) in cases {
+        let c = compare("fixture", &base, "lab", &other);
         assert_eq!(
-            disagreements("fixture", &base, "lab", &other),
+            c.disagreements,
             expected.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
             "{what}"
         );
+        assert!(c.not_compared.is_empty(), "{what}");
     }
+
+    // A family one side doesn't record is listed, never silently passed.
+    let lab = view(
+        MANIFEST_RECORDS,
+        &[
+            ("chain", "regtest"),
+            ("service bitcoin-core", "32.1"),
+            ("service lnd", "0.21.6-beta"),
+        ],
+    );
+    let with_package = view(
+        all,
+        &[
+            ("chain", "regtest"),
+            ("package lnd xz-utils", "5.6.0"),
+            ("service bitcoin-core", "32.1"),
+            ("service lnd", "0.21.6-beta"),
+        ],
+    );
+    let c = compare("fixture", &with_package, "lab", &lab);
+    assert!(c.disagreements.is_empty());
+    assert_eq!(
+        c.not_compared,
+        LAB_NOT_COMPARED
+            .iter()
+            .map(|s| s.replace("{lab}", "lab"))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -405,21 +700,81 @@ fn a_good_manifest_is_read_exactly() {
     assert_eq!(
         parse_manifest(GOOD_MANIFEST),
         Ok(view(
-            "regtest",
-            &[("bitcoin-core", "32.1"), ("lnd", "0.21.6-beta")]
+            MANIFEST_RECORDS,
+            &[
+                ("chain", "regtest"),
+                ("platform", "docker"),
+                ("service bitcoin-core", "32.1"),
+                ("service lnd", "0.21.6-beta"),
+                ("source", "lab"),
+            ]
         ))
+    );
+    assert_eq!(
+        manifest_images(GOOD_MANIFEST),
+        BTreeMap::from([
+            (
+                "bitcoin-core".to_owned(),
+                "bitcoin/bitcoin@sha256:00".to_owned()
+            ),
+            ("lnd".to_owned(), "lightninglabs/lnd@sha256:11".to_owned()),
+        ])
+    );
+}
+
+#[test]
+fn an_oversized_or_odd_file_is_never_read_whole() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("two-backends");
+    fs::create_dir_all(&dir).unwrap();
+    let big = dir.join("big.toml");
+    fs::write(&big, "#".repeat(MAX_MANIFEST_BYTES * 4)).unwrap();
+    let text = read_manifest_file(&big).unwrap().unwrap();
+    assert_eq!(
+        text.len(),
+        MAX_MANIFEST_BYTES + 1,
+        "only one byte past the limit is read"
+    );
+    assert_eq!(
+        parse_manifest(&text).map(|_| ()),
+        Err(format!("over {MAX_MANIFEST_BYTES} bytes"))
+    );
+    assert_eq!(read_manifest_file(&dir.join("none.toml")), Ok(None));
+    assert!(
+        read_manifest_file(&dir)
+            .unwrap_err()
+            .contains("not a plain file")
     );
 }
 
 #[test]
 fn every_broken_manifest_is_refused() {
     let lnd = "[[service]]\nid = \"lnd\"\nversion = \"0.21.6-beta\"\n";
-    let cases: [(&str, String, &str); 22] = [
+    let cases: [(&str, String, &str); 26] = [
         ("not TOML", "format = = 1".to_owned(), "not valid TOML"),
         (
             "an unknown top-level key",
-            format!("chain = \"regtest\"\n{GOOD_MANIFEST}"),
-            "unknown key \"chain\"",
+            format!("network = \"regtest\"\n{GOOD_MANIFEST}"),
+            "unknown key \"network\"",
+        ),
+        (
+            "no chain",
+            GOOD_MANIFEST.replace("chain = \"regtest\"\n", ""),
+            "missing chain",
+        ),
+        (
+            "a chain with odd characters",
+            GOOD_MANIFEST.replace("chain = \"regtest\"", "chain = \"reg test\""),
+            "chain has characters outside [a-z0-9-] or the wrong length",
+        ),
+        (
+            "a bidi override in the description",
+            GOOD_MANIFEST.replace("regtest lab.", "regtest \\u202elab."),
+            "description is not 1 to 200 printable ASCII characters",
+        ),
+        (
+            "a description over 200 characters",
+            GOOD_MANIFEST.replace("regtest lab.", &"x".repeat(201)),
+            "description is not 1 to 200 printable ASCII characters",
         ),
         (
             "format 2",
@@ -437,14 +792,14 @@ fn every_broken_manifest_is_refused() {
             "recorder is not lab/up.sh format 1",
         ),
         (
+            "a source with odd characters",
+            GOOD_MANIFEST.replace("source = \"lab\"", "source = \"Lab Recording\""),
+            "source has characters outside [a-z0-9-] or the wrong length",
+        ),
+        (
             "a recording, not the lab",
             GOOD_MANIFEST.replace("source = \"lab\"", "source = \"recording\""),
             "source is not lab",
-        ),
-        (
-            "another platform",
-            GOOD_MANIFEST.replace("platform = \"docker\"", "platform = \"umbrel\""),
-            "platform is not docker",
         ),
         (
             "no description",
@@ -454,7 +809,7 @@ fn every_broken_manifest_is_refused() {
         (
             "a control character in the description",
             GOOD_MANIFEST.replace("regtest lab.", "regtest lab.\\u001b[2J"),
-            "description is empty or has a control character",
+            "description is not 1 to 200 printable ASCII characters",
         ),
         (
             "no services",
@@ -555,16 +910,26 @@ fn every_broken_manifest_is_refused() {
 fn up_sh_still_writes_this_format() {
     let up = read(UP_SH);
     for line in [
+        r#"printf 'chain = "%s"\n' "$BTC_CHAIN""#,
         r#"printf 'format = 1\nplatform = "docker"\nsource = "lab"\nrecorder = "lab/up.sh format 1"\n'"#,
         r#"[[service]]\nid = "%s"\nversion = "%s"\n"#,
         r#"> "$DATA/manifest.toml""#,
     ] {
         assert!(up.contains(line), "lab/up.sh no longer writes: {line}");
     }
-    assert!(
-        up.contains("BTC_RAW=\"$(plain ") && up.contains("NUT_RAW=\"$(plain "),
-        "lab/up.sh still checks reported text with plain()"
-    );
+    for svc in [
+        "BTC_CHAIN",
+        "BTC_RAW",
+        "LND_RAW",
+        "CLN_RAW",
+        "STRFRY_RAW",
+        "NUT_RAW",
+    ] {
+        assert!(
+            up.contains(&format!("{svc}=\"$(plain ")),
+            "lab/up.sh still checks {svc}, text a service reported, with plain()"
+        );
+    }
     let gitignore = read(".gitignore");
     assert!(
         gitignore

@@ -4,6 +4,7 @@ format = 1
 platform = "docker"
 source = "lab"
 recorder = "lab/up.sh format 1"
+chain = "regtest"
 description = "Guard Dog regtest lab (lab/compose.yml): bitcoind, LND, Core Lightning, strfry and a Nutshell mint."
 
 # bitcoind reported "/Satoshi:32.1.0/" (bitcoin-cli getnetworkinfo .subversion)
