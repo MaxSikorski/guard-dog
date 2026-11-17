@@ -6,6 +6,7 @@
     clippy::indexing_slicing,
     clippy::panic
 )]
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 
 mod common;
 
@@ -41,6 +42,7 @@ fn mode(p: &Path) -> u32 {
     fs::metadata(p).unwrap().permissions().mode() & 0o7777
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn first_use_creates_a_0600_key_and_later_use_reads_it() {
     let dir = Dir::new("create");
@@ -54,6 +56,7 @@ fn first_use_creates_a_0600_key_and_later_use_reads_it() {
     assert_eq!(first.public_hex().unwrap(), second.public_hex().unwrap());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_symlinked_key_file_is_refused() {
     let dir = Dir::new("symlink");
@@ -64,6 +67,7 @@ fn a_symlinked_key_file_is_refused() {
     assert!(load_or_create(dir.path(), &mut SeqEntropy(1)).is_err());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_key_file_that_is_not_a_regular_file_is_refused() {
     let dir = Dir::new("notregular");
@@ -71,6 +75,7 @@ fn a_key_file_that_is_not_a_regular_file_is_refused() {
     assert!(load_or_create(dir.path(), &mut SeqEntropy(1)).is_err());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_key_file_with_group_or_other_bits_is_refused() {
     for bad in [
@@ -87,6 +92,7 @@ fn a_key_file_with_group_or_other_bits_is_refused() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_key_file_with_garbage_in_it_is_refused() {
     for content in [
@@ -107,6 +113,7 @@ fn a_key_file_with_garbage_in_it_is_refused() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_state_dir_that_is_not_0700_is_refused() {
     for bad in [0o755, 0o750, 0o770, 0o701, 0o777, 0o500] {
@@ -118,6 +125,7 @@ fn a_state_dir_that_is_not_0700_is_refused() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_missing_or_symlinked_state_dir_is_refused() {
     let dir = Dir::new("missing");
@@ -149,4 +157,15 @@ fn zero_and_out_of_range_secrets_are_refused() {
     assert!(Keys::from_secret_hex(&"00".repeat(32)).is_err());
     assert!(Keys::from_secret_hex(&"ff".repeat(32)).is_err());
     assert!(Keys::from_secret_hex("abcd").is_err());
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn the_key_store_refuses_off_linux() {
+    let dir = Dir::new("off-linux");
+    let err = load_or_create(dir.path(), &mut SeqEntropy(1)).unwrap_err();
+    assert_eq!(err, gd_notify::NotifyError::UnsupportedPlatform);
+    assert!(err.to_string().contains("runs only on Linux"), "{err}");
+    // Nothing was created: not a key, not a probe, not a temporary.
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
 }

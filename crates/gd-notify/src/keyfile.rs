@@ -14,12 +14,18 @@
 //! purpose, a state folder whose parents were made under umask 002 (mode
 //! 0775, group-writable) is refused: another group member could swap it.
 //!
-//! Extended access lists. On macOS the mode bits do not show an ACL entry such
-//! as `everyone allow search`, so the state folder and the key file are also
-//! listed with `/bin/ls -lde` and refused if either shows an ACL (a `+` after
-//! the permission bits, or an entry line). On Linux no such check is needed:
-//! POSIX ACL entries are bounded by the group-class mask shown in the mode
-//! bits, so the 0700 and 0600 checks already exclude extended grants.
+//! Linux only. The entry points ([`load_or_create`]) refuse on every other
+//! system with [`NotifyError::UnsupportedPlatform`], before touching the
+//! filesystem. The reason is extended access lists. On Linux, POSIX ACL
+//! entries are bounded by the group-class mask shown in the mode bits, so the
+//! exact 0700 and 0600 checks leave no hidden grant, and that includes the
+//! folders above the state folder, which are judged by owner and mode bits:
+//! the mask covers them too. macOS and the BSDs have NFSv4-style extended ACLs
+//! that the mode bits do not show (for example `everyone allow search`), and
+//! Guard Dog cannot prove their absence without parsing another tool's
+//! output, so those systems are refused. The helpers below (path text checks,
+//! the walk, shape checks) still compile on every unix target, so their unit
+//! tests run on a Mac too.
 
 use crate::encoding::{hex_encode, hex32_secret};
 use crate::{Entropy, Keys, NotifyError};
@@ -86,64 +92,6 @@ fn check_state_dir(dir: &Path, euid: u32) -> Result<fs::Metadata, NotifyError> {
         ));
     }
     Ok(meta)
-}
-
-#[cfg(target_os = "macos")]
-const ACL_PRESENT: &str = "the state folder or the key file has an access control list";
-#[cfg(target_os = "macos")]
-const ACL_UNKNOWN: &str = "cannot check the state folder and key file for access control lists";
-
-/// Reads `ls -lde` output: `Some(true)` when any entry shows an ACL (a `+`
-/// right after the ten mode characters, or an entry line such as ` 0: ...`),
-/// `Some(false)` when entries were listed and none does, `None` when nothing
-/// was listed at all.
-#[cfg(any(target_os = "macos", test))]
-fn listing_shows_acl(listing: &str) -> Option<bool> {
-    let mut seen = 0usize;
-    for line in listing.lines() {
-        let trimmed = line.trim_start();
-        let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
-        if line.starts_with(' ') && digits > 0 && trimmed.as_bytes().get(digits) == Some(&b':') {
-            return Some(true);
-        }
-        let mode = line.split_whitespace().next().unwrap_or("");
-        if mode.len() >= 10 && matches!(mode.as_bytes().first(), Some(b'-' | b'd' | b'l')) {
-            seen += 1;
-            if mode.as_bytes().get(10) == Some(&b'+') {
-                return Some(true);
-            }
-        }
-    }
-    if seen == 0 { None } else { Some(false) }
-}
-
-/// macOS only: refuses a state folder or key file that carries an ACL. Runs
-/// `/bin/ls -lde -- <paths>` by absolute path, with fixed flags and no shell;
-/// the paths are the operator's configured state folder, not outside text.
-#[cfg(target_os = "macos")]
-fn check_no_acl(paths: &[&Path]) -> Result<(), NotifyError> {
-    let out = std::process::Command::new("/bin/ls")
-        .args(["-lde", "--"])
-        .args(paths)
-        .env_clear()
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|_| refuse(ACL_UNKNOWN))?;
-    if !out.status.success() {
-        return Err(refuse(ACL_UNKNOWN));
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    match listing_shows_acl(&text) {
-        Some(false) => Ok(()),
-        Some(true) => Err(refuse(ACL_PRESENT)),
-        None => Err(refuse(ACL_UNKNOWN)),
-    }
-}
-
-/// Linux and others: nothing to add (see the module doc).
-#[cfg(not(target_os = "macos"))]
-fn check_no_acl(_paths: &[&Path]) -> Result<(), NotifyError> {
-    Ok(())
 }
 
 const ABOVE_UNREADABLE: &str = "cannot look at a folder above the state folder";
@@ -347,6 +295,10 @@ fn read_key(path: &Path, euid: u32) -> Result<Keys, NotifyError> {
 /// exist with mode 0700 and belong to the user running Guard Dog, and must be
 /// an absolute path whose folders above it are not open to other users.
 pub fn load_or_create(state_dir: &Path, entropy: &mut dyn Entropy) -> Result<Keys, NotifyError> {
+    // Linux only (see the module doc); nothing is touched before this.
+    if cfg!(not(target_os = "linux")) {
+        return Err(NotifyError::UnsupportedPlatform);
+    }
     // The raw text first: `link/` and `link/.` would make `symlink_metadata`
     // follow a symlink and report a folder.
     check_path_text(state_dir)?;
@@ -365,6 +317,9 @@ fn load_or_create_as(
     entropy: &mut dyn Entropy,
     euid: u32,
 ) -> Result<Keys, NotifyError> {
+    if cfg!(not(target_os = "linux")) {
+        return Err(NotifyError::UnsupportedPlatform);
+    }
     let meta = check_state_dir(state_dir, euid)?;
     let dir_id = (meta.dev(), meta.ino());
     check_ancestors(state_dir, euid)?;
@@ -383,12 +338,6 @@ fn load_or_create_as(
         Err(e) if e.kind() == ErrorKind::NotFound => false,
         Err(_) => return Err(refuse("cannot look at the key file")),
     };
-    // Before the key is read or written: no ACL on the folder or the key.
-    if key_exists {
-        check_no_acl(&[state_dir, &path])?;
-    } else {
-        check_no_acl(&[state_dir])?;
-    }
     remove_stale_temporaries(state_dir);
     if key_exists {
         return read_existing(&path, euid, state_dir, dir_id);
@@ -400,7 +349,7 @@ fn load_or_create_as(
     let mut line = Zeroizing::new(String::with_capacity(65));
     line.push_str(&keys.secret_hex());
     line.push('\n');
-    let mut suffix = [0u8; 8];
+    let mut suffix = [0u8; TEMP_SUFFIX_BYTES];
     // The key is written and synced in a private temporary file first, then
     // installed under its real name with a hard link, which fails if a key is
     // already there. So `notify.key` is never seen empty or half written, and
@@ -458,6 +407,22 @@ const TEMP_PREFIX: &str = ".notify-key-tmp-";
 /// wrong key. If the clock jumps back, cleanup just waits. Both fail safe.
 const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Bytes of randomness in a temporary's name (shown as twice as many hex
+/// characters).
+const TEMP_SUFFIX_BYTES: usize = 8;
+
+/// True only for the exact shape Guard Dog makes: the prefix, then
+/// `TEMP_SUFFIX_BYTES * 2` lowercase hex characters and nothing else. A file
+/// such as `.notify-key-tmp-backup` is somebody else's and is never removed.
+fn is_temp_name(name: &OsStr) -> bool {
+    name.as_bytes()
+        .strip_prefix(TEMP_PREFIX.as_bytes())
+        .is_some_and(|s| {
+            s.len() == TEMP_SUFFIX_BYTES * 2
+                && s.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+}
+
 /// Removes temporaries left by a killed run, on every run. A temporary from a
 /// run killed between link and unlink is a second name for the key file, and
 /// removing it removes that name. It is never read as the key (only
@@ -468,7 +433,7 @@ fn remove_stale_temporaries(dir: &Path) {
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        if !name.to_string_lossy().starts_with(TEMP_PREFIX) {
+        if !is_temp_name(&name) {
             continue;
         }
         let old = entry
@@ -493,8 +458,6 @@ fn create_temporary(
     for _ in 0..4 {
         let path = dir.join(next_name()?);
         match write_new(&path, |file| {
-            // The new file is checked before the secret goes into it.
-            check_no_acl(&[dir, &path]).map_err(|_| std::io::Error::other("acl"))?;
             file.write_all(contents)?;
             file.sync_all()
         }) {
@@ -547,70 +510,7 @@ mod tests {
         p
     }
 
-    #[test]
-    fn an_ls_listing_with_an_acl_is_recognised() {
-        let plain = "drwx------  2 u  g  64 Nov 17 10:00 /x\n-rw-------  1 u  g  65 Nov 17 10:00 /x/notify.key\n";
-        assert_eq!(listing_shows_acl(plain), Some(false));
-        let plus = "drwx------+ 2 u  g  64 Nov 17 10:00 /x\n";
-        assert_eq!(listing_shows_acl(plus), Some(true));
-        let xattr = "drwx------@ 2 u  g  64 Nov 17 10:00 /x\n";
-        assert_eq!(listing_shows_acl(xattr), Some(false));
-        let entry = "drwx------  2 u  g  64 Nov 17 10:00 /x\n 0: group:everyone allow search\n";
-        assert_eq!(listing_shows_acl(entry), Some(true));
-        assert_eq!(listing_shows_acl(""), None);
-        assert_eq!(listing_shows_acl("ls: /x: No such file\n"), None);
-    }
-
-    /// Adds an ACL entry with `/bin/chmod +a`; false when that is not possible
-    /// here (no ACL support on the filesystem), so the test passes without it.
-    #[cfg(target_os = "macos")]
-    fn add_acl(path: &Path) -> bool {
-        std::process::Command::new("/bin/chmod")
-            .args(["+a", "everyone allow search", "--"])
-            .arg(path)
-            .status()
-            .is_ok_and(|s| s.success())
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn an_acl_on_the_state_folder_is_refused() {
-        let base = temp_dir("acl-dir");
-        if !add_acl(&base) {
-            fs::remove_dir_all(&base).unwrap();
-            return;
-        }
-        let err = load_or_create(&base, &mut crate::OsEntropy).unwrap_err();
-        assert!(
-            matches!(err, NotifyError::KeyFile(m) if m.contains("access control list")),
-            "{err}"
-        );
-        assert!(!base.join(KEY_FILE_NAME).exists());
-        let _ = std::process::Command::new("/bin/chmod")
-            .args(["-N", "--"])
-            .arg(&base)
-            .status();
-        fs::remove_dir_all(&base).unwrap();
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn an_acl_on_the_key_file_is_refused() {
-        let base = temp_dir("acl-key");
-        load_or_create(&base, &mut crate::OsEntropy).unwrap();
-        let key = base.join(KEY_FILE_NAME);
-        if !add_acl(&key) {
-            fs::remove_dir_all(&base).unwrap();
-            return;
-        }
-        let err = load_or_create(&base, &mut crate::OsEntropy).unwrap_err();
-        assert!(
-            matches!(err, NotifyError::KeyFile(m) if m.contains("access control list")),
-            "{err}"
-        );
-        fs::remove_dir_all(&base).unwrap();
-    }
-
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_failed_write_leaves_no_key_file_behind() {
         let dir = temp_dir("partial");
@@ -649,6 +549,7 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_symlinked_state_folder_is_refused_before_anything_is_written_in_its_target() {
         use std::os::unix::fs::symlink;
@@ -677,6 +578,7 @@ mod tests {
         fs::remove_dir_all(&base).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn two_first_uses_at_once_end_with_the_same_key_and_no_empty_file() {
         for round in 0..20 {
@@ -713,10 +615,11 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_stale_temporary_from_a_killed_run_is_removed_and_never_read_as_the_key() {
         let dir = temp_dir("stale");
-        let stale = dir.join(format!("{TEMP_PREFIX}99999-0"));
+        let stale = dir.join(format!("{TEMP_PREFIX}0123456789abcdef"));
         // A complete, valid-looking key in a temporary: it must not become the key.
         fs::write(&stale, format!("{}\n", "1f".repeat(32))).unwrap();
         fs::set_permissions(&stale, fs::Permissions::from_mode(0o600)).unwrap();
@@ -738,7 +641,7 @@ mod tests {
         assert!(!stale.exists(), "the stale temporary was left");
         assert!(dir.join(KEY_FILE_NAME).exists());
         // A fresh temporary (a live run's) is left alone.
-        let fresh = dir.join(format!("{TEMP_PREFIX}99998-0"));
+        let fresh = dir.join(format!("{TEMP_PREFIX}fedcba9876543210"));
         fs::write(&fresh, b"x").unwrap();
         remove_stale_temporaries(&dir);
         assert!(fresh.exists());
@@ -769,6 +672,7 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_key_file_or_folder_of_another_user_is_refused_on_the_read_path() {
         let dir = temp_dir("owner");
@@ -798,25 +702,85 @@ mod tests {
         (m.dev(), m.ino())
     }
 
-    #[test]
-    fn a_folder_above_that_others_can_write_is_refused() {
-        let base = temp_dir("anc");
+    /// A 0777 folder (not sticky) above the state folder, reached through a
+    /// symlink, so the walk has to follow the link by hand to find it.
+    fn open_folder_behind_a_link(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        use std::os::unix::fs::symlink;
+        let base = temp_dir(name);
         let open = base.join("open");
         fs::create_dir(&open).unwrap();
         fs::set_permissions(&open, fs::Permissions::from_mode(0o777)).unwrap();
         let state = open.join("state");
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
-        let err = load_or_create(&state, &mut crate::OsEntropy).unwrap_err();
+        let link = base.join("link");
+        symlink(&open, &link).unwrap();
+        (base, open, link.join("state"))
+    }
+
+    #[test]
+    fn the_walk_refuses_a_folder_above_that_others_can_write_even_behind_a_link() {
+        let (base, open, through) = open_folder_behind_a_link("anc0");
+        let euid = effective_uid(&base).unwrap();
+        let err = check_ancestors(&through, euid).unwrap_err();
+        assert!(
+            matches!(err, NotifyError::KeyFile(m) if m.contains("can be changed by other users")),
+            "{err}"
+        );
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o1777)).unwrap();
+        assert!(check_ancestors(&through, euid).is_ok());
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_folder_above_that_others_can_write_is_refused() {
+        let (base, open, through) = open_folder_behind_a_link("anc");
+        let state = open.join("state");
+        let err = load_or_create(&through, &mut crate::OsEntropy).unwrap_err();
         assert!(
             matches!(err, NotifyError::KeyFile(m) if m.contains("can be changed by other users")),
             "{err}"
         );
         assert_eq!(fs::read_dir(&state).unwrap().count(), 0);
         fs::set_permissions(&open, fs::Permissions::from_mode(0o1777)).unwrap();
-        assert!(load_or_create(&state, &mut crate::OsEntropy).is_ok());
+        assert!(load_or_create(&through, &mut crate::OsEntropy).is_ok());
         fs::set_permissions(&open, fs::Permissions::from_mode(0o700)).unwrap();
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn only_guard_dogs_exact_temporary_name_is_ever_cleaned_up() {
+        let dir = temp_dir("tempname");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let make = |name: String| {
+            let p = dir.join(name);
+            fs::write(&p, b"x").unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+            p
+        };
+        let mine = make(format!("{TEMP_PREFIX}0123456789abcdef"));
+        let others = [
+            make(format!("{TEMP_PREFIX}backup")),
+            make(format!("{TEMP_PREFIX}0123456789abcde")),
+            make(format!("{TEMP_PREFIX}0123456789abcdef0")),
+            make(format!("{TEMP_PREFIX}ABCDEF0123456789")),
+            make(format!("{TEMP_PREFIX}0123456789abcdeg")),
+            make(TEMP_PREFIX.to_owned()),
+            make(format!("x{TEMP_PREFIX}0123456789abcdef")),
+        ];
+        remove_stale_temporaries(&dir);
+        assert!(!mine.exists(), "Guard Dog's own old temporary was left");
+        for p in &others {
+            assert!(p.exists(), "removed a file that is not ours: {p:?}");
+        }
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -868,6 +832,7 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_symlink_that_looks_like_a_folder_by_its_spelling_is_refused() {
         use std::os::unix::fs::symlink;
@@ -898,6 +863,7 @@ mod tests {
         fs::remove_dir_all(&base).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_symlink_inside_a_folder_others_can_write_is_refused() {
         use std::os::unix::fs::symlink;
@@ -959,8 +925,11 @@ mod tests {
         // Through the public entry point it is refused too, and nothing is
         // written. On Linux the kernel's own 40-link limit fails first, in the
         // shape check (`symlink_metadata` on the whole path).
-        assert!(load_or_create(&long, &mut crate::OsEntropy).is_err());
-        assert_eq!(fs::read_dir(&state).unwrap().count(), 0);
+        #[cfg(target_os = "linux")]
+        {
+            assert!(load_or_create(&long, &mut crate::OsEntropy).is_err());
+            assert_eq!(fs::read_dir(&state).unwrap().count(), 0);
+        }
         // A long chain under the limit is still followed (not 40: the temp
         // folder's own path may hold a link or two, as /var does on macOS).
         let thirty = chain("f", 30);
@@ -975,7 +944,7 @@ mod tests {
         let err = same_dir(&a, id_of(&b), DIR_CHANGED_INSTALL).unwrap_err();
         assert!(matches!(err, NotifyError::KeyFile(m) if m.contains("changed")));
         assert!(same_dir(&a, id_of(&a), DIR_CHANGED_INSTALL).is_ok());
-        load_or_create(&a, &mut crate::OsEntropy).unwrap();
+        fs::write(a.join(KEY_FILE_NAME), b"x").unwrap();
         let key_id = id_of(&a.join(KEY_FILE_NAME));
         assert!(verify_installed(&a, id_of(&a), (0, 0)).is_err());
         assert!(verify_installed(&a, id_of(&b), key_id).is_err());
@@ -984,6 +953,7 @@ mod tests {
         fs::remove_dir_all(&b).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_stale_hard_link_to_an_installed_key_is_removed_on_the_read_path() {
         let dir = temp_dir("hardlink");
@@ -991,7 +961,7 @@ mod tests {
             .unwrap()
             .public_hex()
             .unwrap();
-        let crashed = dir.join(format!("{TEMP_PREFIX}crashed"));
+        let crashed = dir.join(format!("{TEMP_PREFIX}00ff00ff00ff00ff"));
         fs::hard_link(dir.join(KEY_FILE_NAME), &crashed).unwrap();
         let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
         fs::File::options()

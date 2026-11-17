@@ -83,18 +83,25 @@ pub fn message_keys(
     })
 }
 
-/// The padded length for a message of `unpadded` bytes (1 or more).
+/// The padded length for a message of `unpadded` bytes (1 or more). Checked
+/// arithmetic: a length so large that the padded size would not fit in a
+/// `usize` gives `usize::MAX` (no real message is anywhere near that; both
+/// callers first limit the length to 65,535).
 pub fn calc_padded_len(unpadded: usize) -> usize {
     if unpadded <= 32 {
         return 32;
     }
-    let next_power = 1usize << (usize::BITS - (unpadded - 1).leading_zeros());
+    let below = unpadded - 1;
+    let bits = usize::BITS - below.leading_zeros();
+    let Some(next_power) = 1usize.checked_shl(bits) else {
+        return usize::MAX;
+    };
     let chunk = if next_power <= 256 {
         32
     } else {
         next_power / 8
     };
-    chunk * ((unpadded - 1) / chunk + 1)
+    (below / chunk + 1).saturating_mul(chunk)
 }
 
 fn mac_of(
@@ -176,7 +183,7 @@ pub fn decrypt(conversation_key: &[u8; 32], payload: &str) -> Result<String, Not
     let mut cipher = ChaCha20::new((&keys.chacha_key).into(), (&keys.chacha_nonce).into());
     cipher.apply_keystream(buf.as_mut_slice());
     let len = usize::from(u16::from_be_bytes(take(buf.get(0..2)).map_err(|_| bad)?));
-    if len < MIN_PLAINTEXT || buf.len() != 2 + calc_padded_len(len) {
+    if len < MIN_PLAINTEXT || buf.len() != calc_padded_len(len).saturating_add(2) {
         return Err(bad);
     }
     let text = buf.get(2..2 + len).ok_or(bad)?;

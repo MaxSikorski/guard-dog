@@ -16,6 +16,8 @@ pub enum NotifyError {
     Refused(&'static str),
     /// The operating system could not give random bytes.
     Entropy,
+    /// The key store is not available on this operating system.
+    UnsupportedPlatform,
 }
 
 impl fmt::Display for NotifyError {
@@ -27,6 +29,9 @@ impl fmt::Display for NotifyError {
             Self::Relay(m) => write!(f, "relay: {m}"),
             Self::Refused(m) => write!(f, "refused: {m}"),
             Self::Entropy => f.write_str("the operating system gave no random bytes"),
+            Self::UnsupportedPlatform => f.write_str(
+                "The notifier's key store runs only on Linux, where Guard Dog can prove no other account can read the key. On this system it cannot, so no key is created or read.",
+            ),
         }
     }
 }

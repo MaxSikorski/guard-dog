@@ -4,7 +4,7 @@
 //! Deterministic by design: no Docker, no network, no clock, nothing random.
 //! `check()` reads `lab/compose.yml` the way Docker does (the file uses no YAML
 //! anchors) and returns every problem it finds, in a stable order. The checker
-//! is itself tested: `every_unsafe_change_is_caught` makes 69 named unsafe
+//! is itself tested: `every_unsafe_change_is_caught` makes 71 named unsafe
 //! edits and requires each one to be refused with its own problem code.
 
 // Test-only crate: its helper functions (not just `#[test]` ones) read files and
@@ -779,7 +779,12 @@ fn check_service(
                         .is_some_and(|a| {
                             // Digits only: `parse` alone would take "+5".
                             a.strip_prefix("172.29.208.")
-                                .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                                .filter(|n| {
+                                    !n.is_empty()
+                                        && n.bytes().all(|b| b.is_ascii_digit())
+                                        // No leading zero: `010` is not `10`.
+                                        && (n.len() == 1 || !n.starts_with('0'))
+                                })
                                 .and_then(|n| n.parse::<u8>().ok())
                                 .is_some_and(|n| (2..=254).contains(&n))
                         })
@@ -1098,7 +1103,7 @@ fn describe(problems: &[Problem]) -> String {
 
 /// Unsafe edits to the real file: (text to find, text to put there, the
 /// problem code that must catch it). An empty `from` appends `to` to the end.
-const MUTATIONS: [(&str, &str, &str); 70] = [
+const MUTATIONS: [(&str, &str, &str); 71] = [
     (
         "    user: \"101:101\"\n",
         "    user: \"101:101\"\n    platform: linux/386\n",
@@ -1328,6 +1333,11 @@ const MUTATIONS: [(&str, &str, &str); 70] = [
     (
         "        ipv4_address: 172.29.208.10\n",
         "        ipv4_address: 10.0.0.10\n",
+        "wrong-network",
+    ),
+    (
+        "        ipv4_address: 172.29.208.10\n",
+        "        ipv4_address: 172.29.208.010\n",
         "wrong-network",
     ),
     (

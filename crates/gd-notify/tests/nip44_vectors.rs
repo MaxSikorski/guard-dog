@@ -194,3 +194,13 @@ fn nip44_random_round_trip_and_tampering() {
     // hex round trip helper sanity.
     assert_eq!(hex_decode("00ff").unwrap(), vec![0, 255]);
 }
+
+#[test]
+fn nip44_padding_length_does_not_panic_on_huge_input() {
+    // Checked arithmetic: a length whose padded size cannot fit saturates.
+    assert_eq!(nip44::calc_padded_len(usize::MAX), usize::MAX);
+    assert_eq!(nip44::calc_padded_len(usize::MAX / 2 + 2), usize::MAX);
+    // The largest sizes that still fit are exact (no overflow, no saturation).
+    assert_eq!(nip44::calc_padded_len(1 << 62), 1 << 62);
+    assert_eq!(nip44::calc_padded_len(0), 32);
+}

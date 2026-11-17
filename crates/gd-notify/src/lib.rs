@@ -8,7 +8,9 @@
 //!
 //! Time and randomness come only through [`Clock`] and [`Entropy`], so tests
 //! are deterministic. Guard Dog's own key pair is never the user's `nsec`; it
-//! lives in `<state_dir>/notify.key`. No key and no message text ever reaches
+//! lives in `<state_dir>/notify.key`. That key store runs only on Linux (extended
+//! ACLs on macOS and the BSDs are not visible in the mode bits); elsewhere it
+//! returns `NotifyError::UnsupportedPlatform`. No key and no message text ever reaches
 //! a log or `Debug` output.
 //!
 //! # Logging
