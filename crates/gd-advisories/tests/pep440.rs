@@ -627,13 +627,17 @@ fn cashu_boundaries_follow_pep440() {
         "0.18.0",
         "0.18.0.0",
         "0.18.0.post1",
-        "0.18.0+local",
         "0.18.1",
         "1!0.1",
         "0.21.0",
     ] {
         assert_eq!(at(v), "out-of-range", "{v}");
     }
+    // A local build of the fixed release may or may not carry the fix.
+    assert_eq!(
+        reason(&evaluate_entry(&Pep440, &adv, 0, Some("0.18.0+local"))),
+        UnknownReason::CandidateIsAnInterval
+    );
     // A version the scheme cannot read is unknown, never out of range.
     let adv_read = |v: &str| evaluate_entry(&Pep440, &adv, 0, Some(v));
     assert_eq!(
@@ -668,8 +672,16 @@ fn pep_ranges_lists_and_scheme_gates() {
     // `a_local_label_on_a_boundary_is_unreadable`); on the installed version it
     // is fine.
     let r = r#"[{"introduced":"1.0"},{"fixed":"2.0"}]"#;
-    assert_eq!(kind(&ev(r, "1.0+abd")), "in-range");
-    assert_eq!(kind(&ev(r, "2.0+abd")), "out-of-range");
+    assert_eq!(kind(&ev(r, "1.5+abd")), "in-range");
+    assert_eq!(kind(&ev(r, "2.1+abd")), "out-of-range");
+    assert_eq!(
+        reason(&ev(r, "1.0+abd")),
+        UnknownReason::CandidateIsAnInterval
+    );
+    assert_eq!(
+        reason(&ev(r, "2.0+abd")),
+        UnknownReason::CandidateIsAnInterval
+    );
 
     // A list identity: the same release spelled another way is a hit; equal by
     // order but written differently is not a hit and not a miss.
@@ -1128,11 +1140,11 @@ fn a_local_build_of_a_listed_public_version_is_never_a_miss() {
         evaluate_entry(&Pep440, &adv, 0, Some("0.16.0+umbrel1")),
         VersionEvidence::InRange(_)
     ));
-    // A listed label that differs from the installed one is a miss (both are
-    // local builds of one release, but not the same build).
+    // A listed label that differs from the installed one is another build of
+    // the same release: not the same build, but never a clean miss either.
     assert_eq!(
-        evaluate_entry(&Pep440, &adv, 0, Some("0.16.0+umbrel2")),
-        VersionEvidence::OutOfRange
+        reason(&evaluate_entry(&Pep440, &adv, 0, Some("0.16.0+umbrel2"))),
+        UnknownReason::CandidateIsAnInterval
     );
     // The hook itself.
     let v = p("0.16.0+umbrel1");
@@ -1194,4 +1206,65 @@ fn unicode_whitespace_and_case_folding_tricks_are_refused() {
     }
     // Plain ASCII whitespace is still trimmed.
     assert!(Pep440.parse(" \t1.0\r\n").is_ok());
+}
+
+#[test]
+fn a_local_build_is_an_interval_above_its_public_release() {
+    // Installed `1.0+x` is a build of `1.0`: a boundary at its public release can
+    // go either way, so it is never a clean miss.
+    let at_public = |events: &str| ev(events, "1.0+x");
+    for events in [
+        r#"[{"introduced":"0"},{"last_affected":"1.0"}]"#,
+        r#"[{"introduced":"0"},{"fixed":"1.0"}]"#,
+        r#"[{"introduced":"1.0"},{"fixed":"2.0"}]"#,
+    ] {
+        assert_eq!(
+            reason(&at_public(events)),
+            UnknownReason::CandidateIsAnInterval,
+            "{events}"
+        );
+    }
+    // An interval wholly inside a range is a hit; wholly outside is a miss.
+    assert_eq!(
+        kind(&at_public(r#"[{"introduced":"0.9"},{"fixed":"2.0"}]"#)),
+        "in-range"
+    );
+    assert_eq!(
+        kind(&at_public(r#"[{"introduced":"1.1"},{"fixed":"2.0"}]"#)),
+        "out-of-range"
+    );
+    assert_eq!(
+        kind(&at_public(r#"[{"introduced":"0"},{"fixed":"0.9"}]"#)),
+        "out-of-range"
+    );
+    // Post, dev and pre builds sit in their own intervals.
+    let r = r#"[{"introduced":"0"},{"last_affected":"1.0.post1"}]"#;
+    assert_eq!(
+        reason(&ev(r, "1.0.post1+x")),
+        UnknownReason::CandidateIsAnInterval
+    );
+    assert_eq!(kind(&ev(r, "1.0.post2+x")), "out-of-range");
+    let r = r#"[{"introduced":"0"},{"last_affected":"1.0rc1"}]"#;
+    assert_eq!(
+        reason(&ev(r, "1.0rc1+x")),
+        UnknownReason::CandidateIsAnInterval
+    );
+    assert_eq!(kind(&ev(r, "1.0rc2+x")), "out-of-range");
+    // The list case is unchanged.
+    let adv = pypi_advisory(json!([]), json!(["0.16.0"]));
+    assert_eq!(
+        reason(&evaluate_entry(&Pep440, &adv, 0, Some("0.16.0+umbrel1"))),
+        UnknownReason::SameVersionDifferentSpelling
+    );
+    // The question names the build.
+    assert!(
+        Pep440
+            .interval_question()
+            .contains("Which public release is this local build (+label) based on")
+    );
+    // A public installed version is still exact.
+    assert!(matches!(
+        Pep440.candidate("1.0").unwrap(),
+        Candidate::Exact(_)
+    ));
 }

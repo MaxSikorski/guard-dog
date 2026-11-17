@@ -117,6 +117,16 @@ pub trait VersionScheme {
         self.parse(listed).ok().map(|l| l == *installed)
     }
 
+    /// For an installed value that is only an interval: whether a listed
+    /// version string is that very build. `Some(true)` is the same build (a
+    /// hit), `Some(false)` the same release spelled or built differently (not a
+    /// hit and not a miss), `None` no opinion, so the interval rule applies. A
+    /// described build never answers here; only a scheme whose interval comes
+    /// from a local build does.
+    fn interval_list_match(&self, _installed: &str, _listed: &str) -> Option<bool> {
+        None
+    }
+
     /// The question to ask when the installed value is only known to lie in an
     /// interval (`Candidate::Between`) that the ranges do not settle. Plain text,
     /// never advisory text. A scheme that returns intervals words it for its own

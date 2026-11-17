@@ -20,7 +20,7 @@ use std::fmt;
 
 use super::num::{MAX_COMPONENTS, Num};
 use super::semver::check_length;
-use super::{VersionError, VersionScheme};
+use super::{Candidate, VersionError, VersionScheme};
 
 /// The kind of a pre-release, in order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -417,6 +417,55 @@ impl VersionScheme for Pep440 {
         let a = parse_version(a).ok()?;
         let b = parse_version(b).ok()?;
         Some(a.to_string() == b.to_string())
+    }
+
+    /// A public version is exact. A local build (`1.0+x`) is a build of its
+    /// public release, which can sit on either side of a boundary written at that
+    /// release, so it is an interval: from the public release (floored at its
+    /// `.dev0`, inclusive) up to the next public version above it (exclusive).
+    /// Any boundary at the public part then reads as an interval, never a miss.
+    fn candidate(&self, raw: &str) -> Result<Candidate<Pep440Version>, VersionError> {
+        let v = parse_version(raw)?;
+        if v.local.is_none() {
+            return Ok(Candidate::Exact(v));
+        }
+        let mut low = v.clone();
+        low.local = None;
+        low.dev = Some(Num::zero());
+        let mut high = v.clone();
+        high.local = None;
+        if let Some(d) = &v.dev {
+            high.dev = Some(d.plus_one());
+        } else if let Some(p) = &v.post {
+            high.post = Some(p.plus_one());
+            high.dev = Some(Num::zero());
+        } else {
+            high.post = Some(Num::zero());
+            high.dev = Some(Num::zero());
+        }
+        Ok(Candidate::Between {
+            low,
+            high: Some(high),
+        })
+    }
+
+    /// A local build against a listed version of the same public release: the
+    /// same text is the same build; the same release with another label, or none,
+    /// is a spelling question.
+    fn interval_list_match(&self, installed: &str, listed: &str) -> Option<bool> {
+        let i = parse_version(installed).ok()?;
+        let l = parse_version(listed).ok()?;
+        if i.to_string() == l.to_string() {
+            return Some(true);
+        }
+        if i.local.is_some() && l.local.is_none() && self.same_version(&i, listed) == Some(true) {
+            return Some(false);
+        }
+        None
+    }
+
+    fn interval_question(&self) -> &'static str {
+        "Which public release is this local build (+label) based on, and does it carry the fix?"
     }
 
     /// A boundary cannot carry a local label: `1.0+abc` as `introduced` would

@@ -264,6 +264,19 @@ fn evaluate_inner<S: VersionScheme + ?Sized>(
         let listed = item.expose_untrusted().trim_ascii();
         let place = Place::Listed { index };
         match &candidate {
+            Some(Candidate::Between { .. })
+                if scheme.interval_list_match(raw, listed).is_some() =>
+            {
+                if scheme.interval_list_match(raw, listed) == Some(true) {
+                    positive.get_or_insert(place);
+                } else {
+                    keep_smallest(
+                        &mut first_unknown,
+                        UnknownReason::SameVersionDifferentSpelling,
+                        place,
+                    );
+                }
+            }
             Some(Candidate::Between { low, high }) => match scheme.parse(listed) {
                 Ok(l) if l >= *low && high.as_ref().is_none_or(|h| l < *h) => {
                     keep_smallest(
