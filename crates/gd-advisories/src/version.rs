@@ -8,11 +8,17 @@
 use std::fmt;
 
 mod bitcoin;
+mod calver;
 mod channel;
+mod describe;
+mod pep440;
 mod semver;
 
 pub use bitcoin::{BitcoinCore, CoreVersion, RcEvidence};
+pub use calver::{Calver, ClnVersion};
 pub use channel::{Channel, ChannelScheme, ChannelVersion, evaluate_channel_entry};
+pub use describe::{Commit, Described, GitDescribe, TagVersion};
+pub use pep440::{Pep440, Pep440Version};
 pub use semver::{GoTag, SemVer, SemVerVersion};
 
 /// Why a scheme could not read a version string.

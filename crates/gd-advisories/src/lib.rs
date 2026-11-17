@@ -20,6 +20,7 @@ pub use osv::{
 pub use package::{Ecosystem, MAX_PACKAGE_NAME, PackageError, PackageKey, canonical_package};
 pub use range::{Location, Place, UnknownReason, VersionEvidence, evaluate_entry};
 pub use version::{
-    BitcoinCore, Candidate, Channel, ChannelScheme, ChannelVersion, CoreVersion, GoTag, RcEvidence,
-    SemVer, SemVerVersion, VersionError, VersionScheme, evaluate_channel_entry,
+    BitcoinCore, Calver, Candidate, Channel, ChannelScheme, ChannelVersion, ClnVersion, Commit,
+    CoreVersion, Described, GitDescribe, GoTag, Pep440, Pep440Version, RcEvidence, SemVer,
+    SemVerVersion, TagVersion, VersionError, VersionScheme, evaluate_channel_entry,
 };
