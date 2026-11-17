@@ -1,0 +1,41 @@
+== /usr/local/bin/tool0
+Bitcoin Core daemon version v29.1.0
+lnd version 0.19.2-beta commit=v0.19.2-beta
+Tor version 0.4.8.16.
+== /usr/local/bin/tool1
+Tor is running on Linux with Libevent 2.1.12-stable.
+manifest umbrel-app.yml
+Backup address bcrt1qcanarycanarycanarycanary and 1CanaryCanaryCanaryCanary9x
+== /usr/local/bin/tool2
+invoice lnbcrt1canaryinvoicecanaryinvoicecanaryinvoicecanaryinvoicecanaryinvoicecanaryinvoicecanar
+xpub6CanaryXpubCanaryCanaryCanaryCanaryCanaryCanaryCanaryCanaryCanaryCanaryCanaryCanaryCanaryCanaryCanaryCanary
+xprv9CanaryXprvCanaryCanaryCanaryCanaryCanaryCanaryCanaryCanaryCanaryCanaryCanaryCanaryCanaryCanaryCanaryCanary
+== /usr/local/bin/tool3
+npub1canarycanarycanarycanarycanarycanarycanarycanarycanarycana
+nsec1canarycanarycanarycanarycanarycanarycanarycanarycanarycana
+KCanaryCanaryCanaryCanaryCanaryCanaryCanaryCanaryCan
+== /usr/local/bin/tool4
+nprofile1canarycanarycanarycanarycanarycanarycanarycanarycanarycanaryc
+canary	zorble	plinth	quorra	mavrik	tenzo	brivel	colmar	yeston	fandro	glimmer	huxley
+Authorization: Bearer CanaryBearer9TokenValue0123456789abcdefABC
+== /usr/local/bin/tool5
+Authorization: Basic YWJjOmRlZmdoaWpr
+rune CanaryTokenCanary1234567890abcdefXYZ
+--rpcpassword=CanaryRpcPass9981xyz
+== /usr/local/bin/tool6
+bitcoind --rpcpassword CanaryJsonPass4455abc -printtoconsole
+connect redis://canaryuser2:canarypw99@192.168.150.150:6379
+node 02c0ffee11c0ffee11c0ffee11c0ffee11c0ffee11c0ffee11c0ffee11c0ffee11 at 45.150.150.150
+== /usr/local/bin/tool7
+key b01dfaceb01dfaceb01dfaceb01dfaceb01dfaceb01dfaceb01dfaceb01dface
+mail canaryowner@canarymail.com mac ca:fe:ba:be:00:01
+onion canary23456722345672234567223456722345672234567223456722.onion canary2345672234.onion
+== /usr/local/bin/tool8
+cfg /home/canaryhomer/x canarynode.canarydomain.com
+host canaryhost-7q user canaryuser
+v6 2a01:0db8:ca11:ab1e:0000:0000:0000:0001 fe80::ca11:ab1e:c0ff:ee01 fd12:3456:789a::1
+== /usr/local/bin/tool9
+ip 45.151.151.151 10.150.150.151
+== /usr/local/bin/long
+Long ca11ab1eca11ab1eca11ab1eca11ab1eca11ab1eca11ab1eca11ab1eca11ab1eca11ab1eca11ab1eca11ab1eca11ab1eca11ab1eca11ab1eca11ab1eca11ab1e
+0201036c6e64cafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00d
