@@ -46,7 +46,7 @@ The mint uses Nutshell's `FakeWallet` backend: it has no real Lightning connecti
 - **Every container:** a read-only root filesystem, all Linux capabilities dropped, `no-new-privileges`, a non-root user, and limits on memory, swap, CPU and processes.
 - **Memory:** limits add up to 1,920 MiB, under the 4 GiB budget for running the lab next to a Rust build. In practice the lab peaks at about 450 MiB.
 
-`crates/gd-core/tests/lab_compose.rs` checks all of this in every `cargo test`, and proves its checks catch 53 kinds of unsafe change.
+`crates/gd-core/tests/lab_compose.rs` checks all of this in every `cargo test`, and proves its checks catch 54 kinds of unsafe change.
 
 ## Changing an image
 

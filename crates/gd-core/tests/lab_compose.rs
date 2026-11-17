@@ -4,7 +4,7 @@
 //! Deterministic by design: no Docker, no network, no clock, nothing random.
 //! `check()` reads `lab/compose.yml` the way Docker does (the file uses no YAML
 //! anchors) and returns every problem it finds, in a stable order. The checker
-//! is itself tested: `every_unsafe_change_is_caught` makes 53 named unsafe
+//! is itself tested: `every_unsafe_change_is_caught` makes 54 named unsafe
 //! edits and requires each one to be refused with its own problem code.
 
 // Test-only crate: its helper functions (not just `#[test]` ones) read files and
@@ -345,6 +345,18 @@ fn is_pinned(image: &str) -> bool {
 /// order is stable: top level, then services in `EXPECTED` order, then totals.
 fn check(text: &str) -> Vec<Problem> {
     let mut out = Vec::new();
+    // A bare CR is a line break to YAML but not to `lines()`, so it could hide a
+    // tag or a key from the checks below. Only newline and tab may be control characters.
+    if let Some(c) = text
+        .chars()
+        .find(|c| c.is_control() && *c != '\n' && *c != '\t')
+    {
+        out.push(problem(
+            "control-char",
+            format!("control character {c:?} is not allowed in the compose file"),
+        ));
+        return out;
+    }
     // A YAML tag (`!reset`, `!override`, any `!`) can make Compose read something
     // other than what this checker reads, so none is allowed on any line that is
     // not a whole-line comment.
@@ -893,7 +905,7 @@ fn describe(problems: &[Problem]) -> String {
 
 /// Unsafe edits to the real file: (text to find, text to put there, the
 /// problem code that must catch it). An empty `from` appends `to` to the end.
-const MUTATIONS: [(&str, &str, &str); 53] = [
+const MUTATIONS: [(&str, &str, &str); 54] = [
     (
         "bitcoin/bitcoin@sha256:d2454aaf2ff4ce1ebbc49f4aa05ed044c907b849a80a3f4c0ad23e488e50bbe0",
         "bitcoin/bitcoin:32.1",
@@ -1134,6 +1146,11 @@ const MUTATIONS: [(&str, &str, &str); 53] = [
         "      - /tmp:size=16m\n",
         "      - /tmp:size=16m,nr_inodes=0\n",
         "tmpfs-unbounded",
+    ),
+    (
+        "    cap_drop: [ALL]\n",
+        "# comment\r    cap_drop: !reset [ALL]\n",
+        "control-char",
     ),
 ];
 
