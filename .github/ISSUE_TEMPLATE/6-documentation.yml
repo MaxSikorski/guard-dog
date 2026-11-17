@@ -1,0 +1,42 @@
+name: Documentation
+description: Something in the README, a guide, the website or the install steps is wrong, missing or unclear.
+title: "Docs: "
+labels: ["type: docs", "status: needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! Clear docs matter a lot here: many people running their own stack aren't professional developers, and neither am I.
+  - type: input
+    id: where
+    attributes:
+      label: Where
+      description: A file in the repository or a link to the website section.
+      placeholder: "e.g. README.md, CONTRIBUTING.md#add-my-project, the website's Support section"
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What's wrong
+      options:
+        - It's incorrect or out of date
+        - It's missing something
+        - It's confusing
+        - A broken link or typo
+        - A translation
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: What it says now, and what it should say.
+    validations:
+      required: true
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Helping out
+      options:
+        - label: I'd like to open the pull request myself.

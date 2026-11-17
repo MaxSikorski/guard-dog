@@ -1,0 +1,32 @@
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ask anything about running, building or contributing to Guard Dog. When someone answers, please mark the answer so the next person finds it.
+
+        This is public. Leave out seeds, nsecs, xpubs, macaroons, passwords, IP addresses and onion addresses. Security problems in Guard Dog go to [SECURITY.md](https://github.com/MaxSikorski/guard-dog/blob/main/SECURITY.md), never here.
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you've tried or read so far
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Where you run it (if it matters)
+      options:
+        - umbrelOS
+        - StartOS
+        - RaspiBlitz
+        - myNode
+        - nix-bitcoin
+        - Plain Docker or Docker Compose
+        - Plain Linux
+        - Building from source
+        - Doesn't matter

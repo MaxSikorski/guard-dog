@@ -1,0 +1,38 @@
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For people who run, build or package a node platform: Umbrel, StartOS, RaspiBlitz, myNode, nix-bitcoin and the rest. How do we read what's installed, with the least access possible? What breaks across updates? Roadmap open questions 1 and 2 live here.
+
+        Guard Dog only ever reads, under its own user, and never takes a platform's admin key.
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - umbrelOS
+        - StartOS
+        - RaspiBlitz
+        - myNode
+        - nix-bitcoin
+        - Another platform
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Platform version
+      placeholder: "e.g. StartOS 0.4"
+  - type: textarea
+    id: topic
+    attributes:
+      label: What you'd like to discuss
+      description: A question, how your platform exposes installed apps and versions, a read-only command that works, or a gotcha after an update.
+    validations:
+      required: true
+  - type: checkboxes
+    id: role
+    attributes:
+      label: About you
+      options:
+        - label: I build or maintain this platform.
