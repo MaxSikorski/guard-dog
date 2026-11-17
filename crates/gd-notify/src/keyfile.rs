@@ -26,6 +26,14 @@
 //! output, so those systems are refused. The helpers below (path text checks,
 //! the walk, shape checks) still compile on every unix target, so their unit
 //! tests run on a Mac too.
+//!
+//! The key store also needs a local filesystem. On a network or userspace
+//! filesystem (NFS, SMB, FUSE, 9p, ZFS and the like) the server or driver
+//! decides who may read a file, and the mode bits this module checks can be
+//! only a local picture of that, so they prove nothing. Before anything is
+//! written or read, the mount holding the state folder is found in
+//! `/proc/self/mountinfo` and refused with [`NotifyError::NotLocalFilesystem`]
+//! unless its type is ext2, ext3, ext4, xfs, btrfs, f2fs, tmpfs or overlay.
 
 use crate::encoding::{hex_encode, hex32_secret};
 use crate::{Entropy, Keys, NotifyError};
@@ -40,6 +48,96 @@ use zeroize::Zeroizing;
 
 /// The key file's name inside the state folder.
 pub const KEY_FILE_NAME: &str = "notify.key";
+
+/// Filesystems where the kernel itself enforces the mode bits on this machine.
+const LOCAL_FILESYSTEMS: [&[u8]; 8] = [
+    b"ext2", b"ext3", b"ext4", b"xfs", b"btrfs", b"f2fs", b"tmpfs", b"overlay",
+];
+
+/// Undoes the octal escapes (`\040` for a space and so on) of a mountinfo field.
+fn unescape_mount_field(field: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(field.len());
+    let mut i = 0;
+    while let Some(&b) = field.get(i) {
+        if b == b'\\'
+            && let Some(digits) = field.get(i + 1..i + 4)
+            && digits.iter().all(|d| (b'0'..=b'7').contains(d))
+        {
+            let value = digits
+                .iter()
+                .fold(0u32, |acc, d| acc * 8 + u32::from(d - b'0'));
+            if let Ok(byte) = u8::try_from(value) {
+                out.push(byte);
+                i += 4;
+                continue;
+            }
+        }
+        out.push(b);
+        i += 1;
+    }
+    out
+}
+
+/// Whether `mount` is `path` itself or a folder above it (whole names only).
+fn mount_covers(mount: &[u8], path: &[u8]) -> bool {
+    if mount == b"/" {
+        return true;
+    }
+    path.starts_with(mount) && (path.len() == mount.len() || path.get(mount.len()) == Some(&b'/'))
+}
+
+/// From the text of `/proc/self/mountinfo` and an absolute, canonical path,
+/// the filesystem type of the mount holding it: the mount whose mount point is
+/// the longest whole-name prefix of the path (a later line wins a tie, as an
+/// over-mount does). Any malformed line makes the whole text an error, so a
+/// damaged file is never half trusted. Pure, so it is tested on every target.
+fn filesystem_type_of(mountinfo: &[u8], path: &Path) -> Result<Vec<u8>, NotifyError> {
+    let path = path.as_os_str().as_bytes();
+    let mut best: Option<(usize, Vec<u8>)> = None;
+    for line in mountinfo.split(|b| *b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<&[u8]> = line.split(|b| *b == b' ').collect();
+        // id, parent, major:minor, root, mount point, options, [optional..], "-", type, source, super options
+        let sep = fields
+            .iter()
+            .enumerate()
+            .skip(6)
+            .find(|(_, f)| **f == b"-")
+            .map(|(i, _)| i)
+            .ok_or(NotifyError::NotLocalFilesystem)?;
+        let mount_field = fields.get(4).ok_or(NotifyError::NotLocalFilesystem)?;
+        let fstype = fields
+            .get(sep + 1)
+            .filter(|t| !t.is_empty())
+            .ok_or(NotifyError::NotLocalFilesystem)?;
+        let mount = unescape_mount_field(mount_field);
+        if mount.first() != Some(&b'/') {
+            return Err(NotifyError::NotLocalFilesystem);
+        }
+        if mount_covers(&mount, path) && best.as_ref().is_none_or(|(len, _)| mount.len() >= *len) {
+            best = Some((mount.len(), fstype.to_vec()));
+        }
+    }
+    best.map(|(_, t)| t).ok_or(NotifyError::NotLocalFilesystem)
+}
+
+/// Refuses unless the folder is on one of the local filesystems in
+/// [`LOCAL_FILESYSTEMS`]. Linux only: elsewhere it refuses outright.
+fn check_local_filesystem(state_dir: &Path) -> Result<(), NotifyError> {
+    if cfg!(not(target_os = "linux")) {
+        return Err(NotifyError::UnsupportedPlatform);
+    }
+    let real = fs::canonicalize(state_dir).map_err(|_| NotifyError::NotLocalFilesystem)?;
+    let text = fs::read("/proc/self/mountinfo").map_err(|_| NotifyError::NotLocalFilesystem)?;
+    let fstype = filesystem_type_of(&text, &real)?;
+    if LOCAL_FILESYSTEMS.contains(&fstype.as_slice()) {
+        Ok(())
+    } else {
+        Err(NotifyError::NotLocalFilesystem)
+    }
+}
 
 fn refuse(message: &'static str) -> NotifyError {
     NotifyError::KeyFile(message)
@@ -305,6 +403,8 @@ pub fn load_or_create(state_dir: &Path, entropy: &mut dyn Entropy) -> Result<Key
     // Nothing is written until the folder is known to be a real 0700 folder, so
     // a symlink or a loose folder is refused without touching its target.
     check_state_dir_shape(state_dir)?;
+    // A network or userspace filesystem is refused before the probe writes.
+    check_local_filesystem(state_dir)?;
     // The ancestor check needs the user id, so the probe writes first: it is
     // created `create_new` with mode 0600 and removed straight away.
     let euid = effective_uid(state_dir)?;
@@ -332,6 +432,8 @@ fn load_or_create_as(
             "the state folder changed while it was being checked",
         ));
     }
+    // Again after the walk, on the folder the walk ended at.
+    check_local_filesystem(state_dir)?;
     let path = state_dir.join(KEY_FILE_NAME);
     let key_exists = match fs::symlink_metadata(&path) {
         Ok(_) => true,
@@ -501,6 +603,74 @@ mod tests {
     use super::*;
     use std::io;
     use std::os::unix::fs::PermissionsExt;
+
+    const MOUNTINFO: &str = "\
+22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw
+30 22 0:27 / /srv/nfs rw,relatime shared:5 - nfs4 host:/export rw,vers=4.2
+31 30 0:28 / /srv/nfs/local rw,relatime - xfs /dev/sdb1 rw
+32 22 0:29 / /mnt/share rw,relatime - cifs //host/share rw
+33 22 0:30 / /mnt/my\\040disk rw,relatime - btrfs /dev/sdc1 rw
+";
+
+    fn fstype(text: &str, path: &str) -> Result<String, NotifyError> {
+        filesystem_type_of(text.as_bytes(), Path::new(path)).map(|t| String::from_utf8(t).unwrap())
+    }
+
+    #[test]
+    fn mountinfo_gives_the_type_of_a_plain_ext4_root() {
+        assert_eq!(fstype(MOUNTINFO, "/var/state").unwrap(), "ext4");
+    }
+
+    #[test]
+    fn mountinfo_gives_nfs4_and_cifs_which_are_not_allowed() {
+        assert_eq!(fstype(MOUNTINFO, "/srv/nfs/state").unwrap(), "nfs4");
+        assert_eq!(fstype(MOUNTINFO, "/mnt/share").unwrap(), "cifs");
+        assert!(!LOCAL_FILESYSTEMS.contains(&b"nfs4".as_slice()));
+        assert!(!LOCAL_FILESYSTEMS.contains(&b"cifs".as_slice()));
+        assert!(!LOCAL_FILESYSTEMS.contains(&b"fuse.sshfs".as_slice()));
+        assert!(LOCAL_FILESYSTEMS.contains(&b"overlay".as_slice()));
+    }
+
+    #[test]
+    fn the_longest_mount_point_wins_for_nested_mounts() {
+        assert_eq!(fstype(MOUNTINFO, "/srv/nfs/local/x").unwrap(), "xfs");
+        assert_eq!(fstype(MOUNTINFO, "/srv/nfs/local").unwrap(), "xfs");
+        // A name that only shares leading letters is not inside the mount.
+        assert_eq!(fstype(MOUNTINFO, "/srv/nfs-other").unwrap(), "ext4");
+    }
+
+    #[test]
+    fn an_escaped_space_in_a_mount_point_is_understood() {
+        assert_eq!(fstype(MOUNTINFO, "/mnt/my disk/state").unwrap(), "btrfs");
+    }
+
+    #[test]
+    fn malformed_mountinfo_is_an_error() {
+        for text in [
+            "",
+            "garbage",
+            "22 1 8:1 / / rw - ",
+            "22 1 8:1 / / rw,relatime shared:1 ext4 /dev/sda1 rw",
+            "22 1 8:1 / relative rw - ext4 /dev/sda1 rw",
+        ] {
+            assert_eq!(
+                fstype(text, "/var/state"),
+                Err(NotifyError::NotLocalFilesystem),
+                "{text:?}"
+            );
+        }
+        // No mount covers the path.
+        assert_eq!(
+            fstype("22 1 8:1 / /data rw - ext4 /dev/sda1 rw\n", "/var/state"),
+            Err(NotifyError::NotLocalFilesystem)
+        );
+    }
+
+    #[test]
+    fn the_refusal_message_names_no_path() {
+        let m = NotifyError::NotLocalFilesystem.to_string();
+        assert!(m.contains("local disk") && !m.contains('/'));
+    }
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("gd-notify-kf-{}-{name}", std::process::id()));

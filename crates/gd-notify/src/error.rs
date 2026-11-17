@@ -18,6 +18,8 @@ pub enum NotifyError {
     Entropy,
     /// The key store is not available on this operating system.
     UnsupportedPlatform,
+    /// The state folder is not on a local filesystem Guard Dog can trust.
+    NotLocalFilesystem,
 }
 
 impl fmt::Display for NotifyError {
@@ -31,6 +33,9 @@ impl fmt::Display for NotifyError {
             Self::Entropy => f.write_str("the operating system gave no random bytes"),
             Self::UnsupportedPlatform => f.write_str(
                 "The notifier's key store runs only on Linux, where Guard Dog can prove no other account can read the key. On this system it cannot, so no key is created or read.",
+            ),
+            Self::NotLocalFilesystem => f.write_str(
+                "The notifier's key must live on a local disk (ext4, xfs, btrfs, f2fs, tmpfs or overlay). This state folder is on another kind of filesystem, where Linux permissions may not show who can read the key, so no key is created or read.",
             ),
         }
     }
