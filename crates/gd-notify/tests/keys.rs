@@ -51,7 +51,7 @@ fn first_use_creates_a_0600_key_and_later_use_reads_it() {
     assert_eq!(text.trim().len(), 64);
     // A second call with different entropy must read, not regenerate.
     let second = load_or_create(dir.path(), &mut SeqEntropy(2)).unwrap();
-    assert_eq!(first.public_hex(), second.public_hex());
+    assert_eq!(first.public_hex().unwrap(), second.public_hex().unwrap());
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn nothing_secret_reaches_debug_or_error_text() {
     let shown = format!("{keys:?} {keys:#?}");
     assert!(shown.contains("<redacted>"));
     assert!(!shown.contains(&secret));
-    assert!(!shown.contains(&keys.public_hex()));
+    assert!(!shown.contains(&keys.public_hex().unwrap()));
     // Error values for a bad key never echo the text they were given.
     let err = Keys::from_secret_hex(&"zz".repeat(32)).unwrap_err();
     let text = format!("{err} {err:?}");
@@ -149,9 +149,4 @@ fn zero_and_out_of_range_secrets_are_refused() {
     assert!(Keys::from_secret_hex(&"00".repeat(32)).is_err());
     assert!(Keys::from_secret_hex(&"ff".repeat(32)).is_err());
     assert!(Keys::from_secret_hex("abcd").is_err());
-}
-
-#[test]
-fn zero_and_out_of_range_secrets_are_still_refused() {
-    assert!(Keys::from_secret_hex(&"00".repeat(32)).is_err());
 }

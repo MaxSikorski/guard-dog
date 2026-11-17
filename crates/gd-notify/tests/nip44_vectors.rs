@@ -28,6 +28,7 @@ fn secret_to_pub_x(secret_hex: &str) -> [u8; 32] {
     gd_notify::Keys::from_secret_hex(secret_hex)
         .unwrap()
         .public_x()
+        .unwrap()
 }
 
 #[test]

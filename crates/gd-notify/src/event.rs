@@ -76,7 +76,7 @@ impl Event {
         keys: &Keys,
         entropy: &mut dyn Entropy,
     ) -> Result<Event, NotifyError> {
-        if unsigned.pubkey != keys.public_hex() {
+        if unsigned.pubkey != keys.public_hex()? {
             return Err(NotifyError::Crypto("event author is not the signing key"));
         }
         let id = unsigned.id();
@@ -189,7 +189,7 @@ fn randomised_past(clock: &dyn Clock, entropy: &mut dyn Entropy) -> Result<u64, 
     let mut bytes = [0u8; 8];
     entropy.fill(&mut bytes)?;
     let back = u64::from_be_bytes(bytes) % (TIMESTAMP_WINDOW_SECS + 1);
-    Ok(clock.now_unix().saturating_sub(back))
+    Ok(clock.now_unix()?.saturating_sub(back))
 }
 
 /// Builds the private message for `recipient`: a kind-14 rumor with a `p`
@@ -206,8 +206,8 @@ pub fn gift_wrap_dm(
     let p_tag = vec![vec!["p".to_owned(), recipient_hex]];
 
     let rumor = UnsignedEvent {
-        pubkey: sender.public_hex(),
-        created_at: clock.now_unix(),
+        pubkey: sender.public_hex()?,
+        created_at: clock.now_unix()?,
         kind: 14,
         tags: p_tag.clone(),
         content: message.to_owned(),
@@ -225,7 +225,7 @@ pub fn gift_wrap_dm(
     let seal_key = nip44::conversation_key_for(sender.signing_key(), recipient)?;
     let seal = Event::sign(
         UnsignedEvent {
-            pubkey: sender.public_hex(),
+            pubkey: sender.public_hex()?,
             created_at: randomised_past(clock, entropy)?,
             kind: 13,
             tags: Vec::new(),
@@ -239,7 +239,7 @@ pub fn gift_wrap_dm(
     let wrap_key = nip44::conversation_key_for(wrap_keys.signing_key(), recipient)?;
     Event::sign(
         UnsignedEvent {
-            pubkey: wrap_keys.public_hex(),
+            pubkey: wrap_keys.public_hex()?,
             created_at: randomised_past(clock, entropy)?,
             kind: 1059,
             tags: p_tag,

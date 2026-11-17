@@ -3,9 +3,11 @@
 //! Created on first use from the OS random generator, as hex, with
 //! `create_new` and mode 0600. Reading refuses a symlink, anything that is not
 //! a regular file, a file another user could read or write, and a state folder
-//! that is not exactly 0700.
+//! that is not exactly 0700. The folder and the file must both belong to the
+//! user running Guard Dog, so a key planted by anyone else (root included) is
+//! refused.
 
-use crate::encoding::hex32;
+use crate::encoding::hex32_secret;
 use crate::{Entropy, Keys, NotifyError};
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
@@ -20,8 +22,32 @@ fn refuse(message: &'static str) -> NotifyError {
     NotifyError::KeyFile(message)
 }
 
-/// Returns the folder's owner.
-fn check_state_dir(dir: &Path) -> Result<u32, NotifyError> {
+/// The user id this process runs as, read from a file we just made in the
+/// folder (a new file belongs to the effective user), then removed. No extra
+/// crate and no `unsafe`.
+fn effective_uid(dir: &Path) -> Result<u32, NotifyError> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let name = format!(
+        ".notify-uid-probe-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let path = dir.join(name);
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|_| refuse("cannot write in the state folder"))?;
+    let uid = file.metadata().map(|m| m.uid());
+    drop(file);
+    let _ = fs::remove_file(&path);
+    uid.map_err(|_| refuse("cannot tell which user is running Guard Dog"))
+}
+
+/// The folder must be a real 0700 folder owned by `euid`.
+fn check_state_dir(dir: &Path, euid: u32) -> Result<(), NotifyError> {
     let meta = fs::symlink_metadata(dir).map_err(|_| refuse("the state folder does not exist"))?;
     if !meta.file_type().is_dir() {
         return Err(refuse("the state folder is not a real folder (a symlink?)"));
@@ -29,15 +55,20 @@ fn check_state_dir(dir: &Path) -> Result<u32, NotifyError> {
     if meta.permissions().mode() & 0o7777 != 0o700 {
         return Err(refuse("the state folder must have mode 0700"));
     }
-    Ok(meta.uid())
+    if meta.uid() != euid {
+        return Err(refuse(
+            "the state folder does not belong to the user running Guard Dog",
+        ));
+    }
+    Ok(())
 }
 
-/// The key file must belong to whoever owns the state folder.
-fn owners_match(file_uid: u32, dir_uid: u32) -> bool {
-    file_uid == dir_uid
+/// The key file must belong to the user running Guard Dog.
+fn owners_match(file_uid: u32, euid: u32) -> bool {
+    file_uid == euid
 }
 
-fn read_key(path: &Path, dir_uid: u32) -> Result<Keys, NotifyError> {
+fn read_key(path: &Path, euid: u32) -> Result<Keys, NotifyError> {
     let before = fs::symlink_metadata(path).map_err(|_| refuse("cannot look at the key file"))?;
     if !before.file_type().is_file() {
         return Err(refuse("the key file is a symlink or not a regular file"));
@@ -58,9 +89,9 @@ fn read_key(path: &Path, dir_uid: u32) -> Result<Keys, NotifyError> {
     if after.dev() != before.dev() || after.ino() != before.ino() || !after.file_type().is_file() {
         return Err(refuse("the key file changed while it was being opened"));
     }
-    if !owners_match(after.uid(), dir_uid) {
+    if !owners_match(after.uid(), euid) {
         return Err(refuse(
-            "the key file does not belong to the state folder's owner",
+            "the key file does not belong to the user running Guard Dog",
         ));
     }
     if after.permissions().mode() & 0o7177 != 0 {
@@ -74,18 +105,29 @@ fn read_key(path: &Path, dir_uid: u32) -> Result<Keys, NotifyError> {
         .read_to_string(&mut text)
         .map_err(|_| refuse("the key file is not text"))?;
     let trimmed = text.strip_suffix('\n').unwrap_or(&text);
-    // Re-checked as hex and as a valid key; the text is never echoed.
-    hex32(trimmed).map_err(|_| refuse("the key file does not hold a key"))?;
+    // Checked as hex (into a wiped buffer) and as a valid key; the text is
+    // never echoed.
+    hex32_secret(trimmed).map_err(|_| refuse("the key file does not hold a key"))?;
     Keys::from_secret_hex(trimmed).map_err(|_| refuse("the key file does not hold a valid key"))
 }
 
 /// Reads Guard Dog's key, creating it on first use. `state_dir` must already
-/// exist with mode 0700.
+/// exist with mode 0700 and belong to the user running Guard Dog.
 pub fn load_or_create(state_dir: &Path, entropy: &mut dyn Entropy) -> Result<Keys, NotifyError> {
-    let dir_uid = check_state_dir(state_dir)?;
+    let euid = effective_uid(state_dir)?;
+    load_or_create_as(state_dir, entropy, euid)
+}
+
+/// [`load_or_create`] with the expected owner given (tests pass a wrong one).
+fn load_or_create_as(
+    state_dir: &Path,
+    entropy: &mut dyn Entropy,
+    euid: u32,
+) -> Result<Keys, NotifyError> {
+    check_state_dir(state_dir, euid)?;
     let path = state_dir.join(KEY_FILE_NAME);
     match fs::symlink_metadata(&path) {
-        Ok(_) => return read_key(&path, dir_uid),
+        Ok(_) => return read_key(&path, euid),
         Err(e) if e.kind() == ErrorKind::NotFound => {}
         Err(_) => return Err(refuse("cannot look at the key file")),
     }
@@ -96,9 +138,15 @@ pub fn load_or_create(state_dir: &Path, entropy: &mut dyn Entropy) -> Result<Key
         file.write_all(line.as_bytes())?;
         file.sync_all()
     }) {
-        Ok(()) => Ok(keys),
+        Ok(()) => {
+            // Make the new directory entry durable too.
+            fs::File::open(state_dir)
+                .and_then(|d| d.sync_all())
+                .map_err(|_| refuse("cannot save the key file's folder entry"))?;
+            Ok(keys)
+        }
         // Someone else created it a moment ago: use theirs, after the same checks.
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => read_key(&path, dir_uid),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => read_key(&path, euid),
         Err(_) => Err(refuse("cannot create the key file")),
     }
 }
@@ -156,7 +204,7 @@ mod tests {
         assert!(!path.exists(), "a partial key file was left");
         // And the next run can create one normally.
         let keys = load_or_create(&dir, &mut crate::OsEntropy).unwrap();
-        assert_eq!(keys.public_hex().len(), 64);
+        assert_eq!(keys.public_hex().unwrap().len(), 64);
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -170,16 +218,39 @@ mod tests {
     }
 
     #[test]
-    fn the_key_file_must_belong_to_the_same_user_as_the_folder() {
-        assert!(owners_match(501, 501));
-        assert!(!owners_match(0, 501));
-        assert!(!owners_match(501, 0));
-        // The real files we make belong to the folder's owner.
+    fn the_running_user_is_found_without_leaving_a_trace() {
+        let dir = temp_dir("euid");
+        let euid = effective_uid(&dir).unwrap();
+        // A file we make ourselves belongs to the same user.
+        let mine = dir.join("mine");
+        fs::write(&mine, b"x").unwrap();
+        assert_eq!(fs::metadata(&mine).unwrap().uid(), euid);
+        fs::remove_file(&mine).unwrap();
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "a probe was left");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_key_file_or_folder_of_another_user_is_refused_on_the_read_path() {
         let dir = temp_dir("owner");
+        let euid = effective_uid(&dir).unwrap();
         load_or_create(&dir, &mut crate::OsEntropy).unwrap();
-        let d = fs::metadata(&dir).unwrap().uid();
-        let f = fs::metadata(dir.join(KEY_FILE_NAME)).unwrap().uid();
-        assert!(owners_match(f, d));
+        let path = dir.join(KEY_FILE_NAME);
+        // Same user: read back fine, through the real read path.
+        assert!(read_key(&path, euid).is_ok());
+        assert!(load_or_create_as(&dir, &mut crate::OsEntropy, euid).is_ok());
+        // Someone else is "the user": the existing key file is refused ...
+        let other = euid.wrapping_add(1);
+        assert!(matches!(
+            read_key(&path, other),
+            Err(NotifyError::KeyFile(m)) if m.contains("does not belong")
+        ));
+        // ... and so is the whole load, because the folder is not theirs either.
+        assert!(matches!(
+            load_or_create_as(&dir, &mut crate::OsEntropy, other),
+            Err(NotifyError::KeyFile(_))
+        ));
+        assert!(owners_match(euid, euid) && !owners_match(0, 501));
         fs::remove_dir_all(&dir).unwrap();
     }
 }

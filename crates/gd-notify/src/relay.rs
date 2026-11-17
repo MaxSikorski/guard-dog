@@ -2,13 +2,16 @@
 //!
 //! In this version the relay must be `ws://<host>:7777` with `<host>` one of
 //! the regtest lab's own service names. No TLS, no redirects (a non-101 answer
-//! is an error), messages capped at 64 KiB, 5 seconds to connect and 10 in all.
+//! is an error), messages capped at 64 KiB, 5 seconds to connect and 10 in all (a relay that
+//! sends a byte at a time still runs out the same 10 seconds). The name must
+//! resolve only to the lab's own subnet, 172.29.208.0/24.
 
 use crate::NotifyError;
 use crate::event::Event;
 use gd_core::Untrusted;
 use serde_json::Value;
-use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::io::{Read, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use tungstenite::protocol::WebSocketConfig;
@@ -88,32 +91,70 @@ impl RelayUrl {
     }
 }
 
-/// True for the private ranges a lab or home network uses: 10.0.0.0/8,
-/// 172.16.0.0/12, 192.168.0.0/16 and IPv6 unique-local fc00::/7 (the lab is
-/// 172.29.208.0/24). An IPv4 address written as IPv6 is judged as IPv4.
-fn is_private(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => v4.is_private(),
+/// True only for the regtest lab's own subnet, 172.29.208.0/24. An IPv4
+/// address written as IPv6 is judged as IPv4.
+fn is_lab_address(ip: IpAddr) -> bool {
+    let v4 = match ip {
+        IpAddr::V4(v4) => v4,
         IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => v4.is_private(),
-            None => v6.segments().first().is_some_and(|s| s & 0xfe00 == 0xfc00),
+            Some(v4) => v4,
+            None => return false,
         },
-    }
+    };
+    let lab = Ipv4Addr::new(172, 29, 208, 0);
+    v4.octets().get(..3) == lab.octets().get(..3)
 }
 
 /// Picks the address to connect to from what the name resolved to. Every
-/// address must be private (loopback too, but only when `allow_loopback`, which
-/// only tests can set); one public address refuses the name, so a lookup that
-/// has been tampered with cannot send a message out to the internet.
+/// address must be in the lab subnet (loopback too, but only when
+/// `allow_loopback`, which only tests can set); one other address refuses the
+/// name, so a tampered lookup, a search domain or mDNS cannot send a message
+/// anywhere but the lab.
 fn addresses_ok(addrs: &[SocketAddr], allow_loopback: bool) -> Result<SocketAddr, NotifyError> {
-    let all_private = addrs
+    let all_lab = addrs
         .iter()
-        .all(|a| is_private(a.ip()) || (allow_loopback && a.ip().is_loopback()));
+        .all(|a| is_lab_address(a.ip()) || (allow_loopback && a.ip().is_loopback()));
     match addrs.first() {
-        Some(first) if all_private => Ok(*first),
+        Some(first) if all_lab => Ok(*first),
         _ => Err(NotifyError::Refused(
-            "the relay name does not resolve to a private address",
+            "the relay name does not resolve to the lab subnet (172.29.208.0/24)",
         )),
+    }
+}
+
+/// A TCP stream that stops at a fixed deadline: before every read and write
+/// it sets the socket timeout to the time left, and past the deadline it
+/// fails with `TimedOut`. So the 10 seconds cover the whole conversation,
+/// however slowly the relay sends.
+struct DeadlineStream {
+    inner: TcpStream,
+    deadline: Instant,
+}
+
+impl DeadlineStream {
+    fn left(&self) -> std::io::Result<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero())
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::TimedOut))
+    }
+}
+
+impl Read for DeadlineStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.set_read_timeout(Some(self.left()?))?;
+        self.inner.read(buf)
+    }
+}
+
+impl Write for DeadlineStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.set_write_timeout(Some(self.left()?))?;
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
     }
 }
 
@@ -200,14 +241,10 @@ where
     let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT.min(remaining(start)?))
         .map_err(|_| NotifyError::Relay("cannot connect to the relay"))?;
     let _ = stream.set_nodelay(true);
-    let set_timeouts = |stream: &TcpStream| -> Result<(), NotifyError> {
-        let left = remaining(start)?;
-        stream
-            .set_read_timeout(Some(left))
-            .and_then(|()| stream.set_write_timeout(Some(left)))
-            .map_err(|_| NotifyError::Relay("cannot set timeouts"))
+    let stream = DeadlineStream {
+        inner: stream,
+        deadline: start + total,
     };
-    set_timeouts(&stream)?;
     let config = WebSocketConfig::default()
         .max_message_size(Some(MAX_MESSAGE_BYTES))
         .max_frame_size(Some(MAX_MESSAGE_BYTES));
@@ -229,14 +266,12 @@ where
                 "event is larger than the 64 KiB message limit",
             ));
         }
-        set_timeouts(socket.get_ref())?;
         socket.send(Message::text(text)).map_err(|e| ws_error(&e))?;
     }
 
     let mut outcomes: Vec<Option<PublishOutcome>> = vec![None; events.len()];
     let mut skipped = 0usize;
     while outcomes.iter().any(Option::is_none) {
-        set_timeouts(socket.get_ref())?;
         let message = socket.read().map_err(|e| ws_error(&e))?;
         let Message::Text(text) = message else {
             if matches!(message, Message::Close(_)) {
@@ -315,8 +350,8 @@ mod tests {
     }
     struct Fixed(u64);
     impl Clock for Fixed {
-        fn now_unix(&self) -> u64 {
-            self.0
+        fn now_unix(&self) -> Result<u64, NotifyError> {
+            Ok(self.0)
         }
     }
 
@@ -382,7 +417,7 @@ mod tests {
             .map(|i| {
                 gift_wrap_dm(
                     &sender,
-                    &recipient.public_x(),
+                    &recipient.public_x().unwrap(),
                     &format!("message {i}"),
                     &Fixed(1_795_000_000),
                     &mut entropy,
@@ -533,21 +568,28 @@ mod tests {
         let out = crate::send_alerts(
             &RelayUrl::loopback_for_test(port),
             &sender,
-            &recipient.public_x(),
+            &recipient.public_x().unwrap(),
             &alerts,
             &[Chain::Regtest, Chain::Signet],
             &Fixed(1_795_000_000),
             &mut Seq(9),
         )
         .unwrap();
-        assert_eq!(out.len(), 1);
+        // The high one, then one summary for the low one that was held back.
+        assert_eq!(out.len(), 2);
         handle.join().unwrap();
         let got = seen.lock().unwrap().clone();
-        assert_eq!(got.len(), 1);
-        let v: Value = serde_json::from_str(&got[0]).unwrap();
-        let event = Event::from_json(&v[1].to_string()).unwrap();
-        let text = unwrap_dm(&recipient, &event).unwrap().rumor.content;
-        assert!(text.contains("sent-one") && !text.contains("held-back"));
+        assert_eq!(got.len(), 2);
+        let open = |raw: &str| {
+            let v: Value = serde_json::from_str(raw).unwrap();
+            let event = Event::from_json(&v[1].to_string()).unwrap();
+            unwrap_dm(&recipient, &event).unwrap().rumor.content
+        };
+        let first = open(&got[0]);
+        assert!(first.contains("sent-one") && !first.contains("held-back"));
+        let summary = open(&got[1]);
+        assert!(summary.contains("1 medium or low finding not sent as direct messages"));
+        assert!(!summary.contains("held-back"));
     }
 
     fn sock(ip: &str) -> SocketAddr {
@@ -555,23 +597,26 @@ mod tests {
     }
 
     #[test]
-    fn only_private_addresses_are_accepted() {
+    fn only_lab_subnet_addresses_are_accepted() {
         for ok in [
-            "10.1.2.3",
-            "172.16.0.1",
+            "172.29.208.0",
             "172.29.208.5",
-            "172.31.255.255",
-            "192.168.1.1",
-            "fd12:3456::1",
-            "fc00::1",
+            "172.29.208.254",
+            "::ffff:172.29.208.9",
         ] {
             assert!(addresses_ok(&[sock(ok)], false).is_ok(), "{ok}");
         }
         for bad in [
+            // Other private ranges are not the lab.
+            "10.1.2.3",
+            "172.16.0.1",
+            "172.29.207.255",
+            "172.29.209.1",
+            "172.28.208.5",
+            "192.168.1.1",
+            "fd12:3456::1",
+            "fc00::1",
             "8.8.8.8",
-            "172.15.0.1",
-            "172.32.0.1",
-            "192.169.0.1",
             "127.0.0.1",
             "169.254.1.1",
             "0.0.0.0",
@@ -580,20 +625,34 @@ mod tests {
             "fe80::1",
             "2001:db8::1",
             "::ffff:8.8.8.8",
+            "::ffff:10.0.0.1",
             "::",
-            "fe00::1",
         ] {
             assert!(addresses_ok(&[sock(bad)], false).is_err(), "{bad}");
         }
-        // One public address among private ones is enough to refuse the name.
-        assert!(addresses_ok(&[sock("10.0.0.1"), sock("8.8.8.8")], false).is_err());
+        // One address outside the lab among lab ones refuses the name.
+        assert!(addresses_ok(&[sock("172.29.208.1"), sock("10.0.0.1")], false).is_err());
+        assert!(addresses_ok(&[sock("172.29.208.1"), sock("8.8.8.8")], false).is_err());
         assert!(addresses_ok(&[], false).is_err());
         // Loopback only when the test hook says so.
         assert!(addresses_ok(&[sock("127.0.0.1")], true).is_ok());
+        assert!(addresses_ok(&[sock("10.0.0.1")], true).is_err());
         assert_eq!(
-            addresses_ok(&[sock("10.0.0.1"), sock("10.0.0.2")], false).unwrap(),
-            sock("10.0.0.1")
+            addresses_ok(&[sock("172.29.208.1"), sock("172.29.208.2")], false).unwrap(),
+            sock("172.29.208.1")
         );
+    }
+
+    #[test]
+    fn a_name_that_resolves_to_another_private_address_is_refused_before_connecting() {
+        let (_, events) = wraps(1);
+        // Not the loopback test relay: a real relay value is judged by the subnet.
+        let relay = RelayUrl::parse("ws://strfry:7777").unwrap();
+        let resolver = |_: &str, _: u16| -> std::io::Result<Vec<SocketAddr>> {
+            Ok(vec![sock("192.168.1.20")])
+        };
+        let err = publish_with(&relay, &events, TOTAL_TIMEOUT, &resolver).unwrap_err();
+        assert!(matches!(err, NotifyError::Refused(_)), "{err}");
     }
 
     #[test]
@@ -642,14 +701,14 @@ mod tests {
     }
 
     #[test]
-    fn an_alert_on_a_chain_that_is_not_allowed_is_refused() {
+    fn an_alert_on_a_chain_that_is_not_allowed_is_dropped_and_counted() {
         use crate::alert::{Alert, AlertParts, Chain, MatchResult, Severity};
-        let make = |chain| {
+        let make = |chain, id: &str| {
             Alert::new(AlertParts {
                 product: "LND",
                 version: "0.18.4-beta".to_owned(),
                 chain,
-                advisory_id: "a-1".to_owned(),
+                advisory_id: id.to_owned(),
                 result: MatchResult::Affected,
                 severity: Severity::High,
                 fixed_in: None,
@@ -661,21 +720,118 @@ mod tests {
             })
             .unwrap()
         };
+        let (recipient, _) = wraps(0);
         let sender = Keys::generate(&mut Seq(1)).unwrap();
-        let relay = RelayUrl::loopback_for_test(1);
         for chain in [Chain::Mainnet, Chain::Testnet, Chain::Unknown] {
-            // The node set is fine, but this one alert is on another chain.
-            let err = crate::send_alerts(
-                &relay,
+            let (port, seen, handle) = fake_relay(Mode::Accept);
+            // The node set is fine, but this one alert is on another chain: it is
+            // never sent, the good one still is, and the summary counts it.
+            let out = crate::send_alerts(
+                &RelayUrl::loopback_for_test(port),
                 &sender,
-                &[7u8; 32],
-                &[make(Chain::Regtest), make(chain)],
+                &recipient.public_x().unwrap(),
+                &[make(Chain::Regtest, "good-one"), make(chain, "bad-chain")],
                 &[Chain::Regtest],
                 &Fixed(1),
                 &mut Seq(3),
             )
+            .unwrap();
+            assert_eq!(out.len(), 2, "{chain:?}");
+            handle.join().unwrap();
+            let got = seen.lock().unwrap().clone();
+            let texts: Vec<String> = got
+                .iter()
+                .map(|raw| {
+                    let v: Value = serde_json::from_str(raw).unwrap();
+                    let event = Event::from_json(&v[1].to_string()).unwrap();
+                    unwrap_dm(&recipient, &event).unwrap().rumor.content
+                })
+                .collect();
+            assert!(texts[0].contains("good-one"), "{chain:?}");
+            assert!(!texts.iter().any(|t| t.contains("bad-chain")), "{chain:?}");
+            assert!(
+                texts[1].contains("1 finding not sent because they are about a chain other than"),
+                "{chain:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_node_that_is_not_on_regtest_or_signet_still_refuses_the_whole_run() {
+        use crate::alert::Chain;
+        let sender = Keys::generate(&mut Seq(1)).unwrap();
+        let relay = RelayUrl::loopback_for_test(1);
+        for chains in [vec![Chain::Mainnet], vec![Chain::Unknown], vec![]] {
+            let err = crate::send_alerts(
+                &relay,
+                &sender,
+                &[7u8; 32],
+                &[],
+                &chains,
+                &Fixed(1),
+                &mut Seq(3),
+            )
             .unwrap_err();
-            assert!(matches!(err, NotifyError::Refused(_)), "{chain:?}: {err}");
+            assert!(matches!(err, NotifyError::Refused(_)), "{chains:?}");
+        }
+    }
+
+    /// A relay that never finishes a sentence: it sends one byte every 300 ms.
+    /// `after_handshake` makes it a proper websocket first, then drip its OK.
+    fn drip_relay(after_handshake: bool) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let bytes: Vec<u8> = if after_handshake {
+                let mut ws = tungstenite::accept(stream.try_clone().unwrap()).unwrap();
+                let Ok(Message::Text(text)) = ws.read() else {
+                    return;
+                };
+                let v: Value = serde_json::from_str(text.as_str()).unwrap();
+                let reply = serde_json::json!(["OK", v[1]["id"], true, ""]).to_string();
+                let mut frame = vec![0x81, u8::try_from(reply.len()).unwrap()];
+                frame.extend_from_slice(reply.as_bytes());
+                frame
+            } else {
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n".to_vec()
+            };
+            for byte in bytes {
+                if stream.write_all(&[byte]).is_err() {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(300));
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn a_relay_that_drips_one_byte_at_a_time_cannot_outlast_the_deadline() {
+        for after_handshake in [false, true] {
+            let (_, events) = wraps(1);
+            let port = drip_relay(after_handshake);
+            let total = Duration::from_millis(1500);
+            let start = Instant::now();
+            let err = publish_with(
+                &RelayUrl::loopback_for_test(port),
+                &events,
+                total,
+                &loopback_resolver,
+            )
+            .unwrap_err();
+            let took = start.elapsed();
+            assert!(
+                matches!(err, NotifyError::Relay(m) if m.contains("timed out")),
+                "{after_handshake}: {err}"
+            );
+            assert!(
+                took < total + Duration::from_secs(1),
+                "{after_handshake}: {took:?}"
+            );
         }
     }
 }

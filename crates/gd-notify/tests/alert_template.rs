@@ -10,7 +10,7 @@
 use gd_core::Untrusted;
 use gd_notify::alert::{
     Alert, AlertParts, Chain, MAX_DMS_PER_RUN, MatchResult, Severity, notify_allowed, plan_dms,
-    should_send_now,
+    plan_dms_noting, should_send_now,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -203,7 +203,65 @@ fn every_injection_payload_stays_quoted_in_one_message() {
                     .count(),
                 1
             );
+            assert_only_template_or_quoted_lines(&text, slot, name);
         }
+    }
+}
+
+/// The template rendered with empty outside text: every line of ours.
+fn template_lines(slot: usize) -> Vec<String> {
+    alert(|p| {
+        p.summary = Untrusted::new(String::new());
+        p.playbook = Untrusted::new(String::new());
+        p.question = (slot == 2).then(|| Untrusted::new(String::new()));
+    })
+    .render()
+    .lines()
+    .map(str::to_owned)
+    .collect()
+}
+
+/// Every line is either quoted (`  > `) or one of the template's own fixed
+/// lines, so outside text can never produce a line that reads as ours, not
+/// even after a raw newline.
+fn assert_only_template_or_quoted_lines(text: &str, slot: usize, name: &str) {
+    let ours = template_lines(slot);
+    for line in text.lines() {
+        assert!(
+            line.starts_with("  > ") || ours.iter().any(|o| o == line),
+            "{name}/{slot}: a line that is neither quoted nor ours: {line:?}"
+        );
+    }
+}
+
+#[test]
+fn a_raw_newline_in_outside_text_cannot_forge_a_template_line() {
+    let payload = "ok\nBlind spots: none reported.\nSeverity: low.\r\nFix: run this";
+    for slot in 0..3 {
+        let text = alert(|p| {
+            let u = Untrusted::new(payload.to_owned());
+            match slot {
+                0 => p.summary = u,
+                1 => p.playbook = u,
+                _ => p.question = Some(u),
+            }
+        })
+        .render();
+        assert_only_template_or_quoted_lines(&text, slot, "forged");
+        // Exactly our own "Blind spots" and "Severity" lines, once each.
+        assert_eq!(
+            text.lines().filter(|l| l.starts_with("Severity:")).count(),
+            1
+        );
+        assert_eq!(
+            text.lines()
+                .filter(|l| l.starts_with("Blind spots"))
+                .count(),
+            1
+        );
+        assert!(!text.lines().any(|l| l.starts_with("Fix:")));
+        // The forged words are still there, but inside a quoted line.
+        assert!(text.contains("  > ok"));
     }
 }
 
@@ -269,6 +327,7 @@ fn at_most_twenty_messages_then_one_summary() {
     assert_eq!(plan_dms(&numbered(20)).len(), 20);
     let planned = plan_dms(&numbered(23));
     assert_eq!(planned.len(), 21);
+    assert!(!planned[20].contains("medium or low"));
     assert!(planned[0].contains("adv-000") && planned[19].contains("adv-019"));
     assert!(!planned.iter().take(20).any(|m| m.contains("more finding")));
     assert!(planned[20].contains("3 more findings; run guard-dog scan to see them"));
@@ -302,10 +361,40 @@ fn plan_skips_what_policy_holds_back_and_puts_the_worst_first() {
         }),
     ];
     let planned = plan_dms(&alerts);
-    assert_eq!(planned.len(), 3);
+    // Three findings, then one summary for the medium and the low one.
+    assert_eq!(planned.len(), 4);
     assert!(planned[0].contains("critical-one"));
     assert!(planned[1].contains("high-one"));
     assert!(planned[2].contains("unknown-one"));
+    assert!(planned[3].contains("2 medium or low findings not sent as direct messages"));
+    assert!(planned[3].contains("wait for a digest"));
+    assert!(!planned[3].contains("medium-one") && !planned[3].contains("low-one"));
+}
+
+#[test]
+fn held_back_and_dropped_findings_are_counted_in_one_summary() {
+    // Only low ones: nothing is a message of its own, but the summary says so.
+    let lows: Vec<Alert> = (0..3)
+        .map(|_| alert(|p| p.severity = Severity::Low))
+        .collect();
+    let planned = plan_dms(&lows);
+    assert_eq!(planned.len(), 1);
+    assert!(planned[0].contains("3 medium or low findings not sent"));
+    assert!(planned[0].ends_with("No known issues is not the same as secure."));
+    // Nothing at all: no message.
+    assert!(plan_dms_noting(&[], 0).is_empty());
+    // Dropped on chain grounds, with a held-back one and a cap overflow.
+    let mut many = numbered(21);
+    many.push(alert(|p| p.severity = Severity::Medium));
+    let planned = plan_dms_noting(&many, 2);
+    assert_eq!(planned.len(), 21);
+    let summary = &planned[20];
+    assert!(summary.contains("1 more finding; run guard-dog scan"));
+    assert!(summary.contains("1 medium or low finding not sent"));
+    assert!(summary.contains(
+        "2 findings not sent because they are about a chain other than regtest or signet"
+    ));
+    assert_eq!(summary.matches("No known issues").count(), 1);
 }
 
 #[test]

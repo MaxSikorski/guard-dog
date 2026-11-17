@@ -290,8 +290,16 @@ pub fn should_send_now(alert: &Alert) -> bool {
 
 /// The messages for one run: the alerts that should be sent now, worst first
 /// (input order within a severity), at most [`MAX_DMS_PER_RUN`] of them, then
-/// one summary message if more were held back by the cap.
+/// one summary message if anything was not sent as its own message (held back
+/// by the cap, or medium and low ones that wait for a digest).
 pub fn plan_dms(alerts: &[Alert]) -> Vec<String> {
+    plan_dms_noting(alerts, 0)
+}
+
+/// [`plan_dms`], where `dropped_chain` more findings were already left out
+/// because they are about a chain that notifications are not allowed for; the
+/// summary says how many, and why.
+pub fn plan_dms_noting(alerts: &[Alert], dropped_chain: usize) -> Vec<String> {
     let mut due: Vec<&Alert> = alerts.iter().filter(|a| should_send_now(a)).collect();
     due.sort_by_key(|a| a.severity.rank());
     let mut out: Vec<String> = due
@@ -300,11 +308,32 @@ pub fn plan_dms(alerts: &[Alert]) -> Vec<String> {
         .map(|a| a.render())
         .collect();
     let more = due.len().saturating_sub(MAX_DMS_PER_RUN);
+    let held = alerts.len().saturating_sub(due.len());
+    let mut lines = Vec::new();
     if more > 0 {
         let noun = if more == 1 { "finding" } else { "findings" };
-        out.push(format!(
-            "{more} more {noun}; run guard-dog scan to see them.\n\n{FOOTER}"
+        lines.push(format!(
+            "{more} more {noun}; run guard-dog scan to see them."
         ));
+    }
+    if held > 0 {
+        let noun = if held == 1 { "finding" } else { "findings" };
+        lines.push(format!(
+            "{held} medium or low {noun} not sent as direct messages (they wait for a digest); run guard-dog scan to see them."
+        ));
+    }
+    if dropped_chain > 0 {
+        let noun = if dropped_chain == 1 {
+            "finding"
+        } else {
+            "findings"
+        };
+        lines.push(format!(
+            "{dropped_chain} {noun} not sent because they are about a chain other than regtest or signet, or an unknown one; run guard-dog scan to see them."
+        ));
+    }
+    if !lines.is_empty() {
+        out.push(format!("{}\n\n{FOOTER}", lines.join("\n")));
     }
     out
 }

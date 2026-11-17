@@ -10,8 +10,9 @@ pub trait Entropy {
 
 /// Where the time comes from.
 pub trait Clock {
-    /// Seconds since 1970-01-01 UTC.
-    fn now_unix(&self) -> u64;
+    /// Seconds since 1970-01-01 UTC, or an error when the clock cannot say
+    /// (nothing is sent then; a wrong time is never guessed).
+    fn now_unix(&self) -> Result<u64, NotifyError>;
 }
 
 /// The operating system's random number generator.
@@ -29,9 +30,10 @@ impl Entropy for OsEntropy {
 pub struct SystemClock;
 
 impl Clock for SystemClock {
-    fn now_unix(&self) -> u64 {
+    fn now_unix(&self) -> Result<u64, NotifyError> {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs())
+            .map(|d| d.as_secs())
+            .map_err(|_| NotifyError::Refused("the system clock is before 1970; not sending"))
     }
 }

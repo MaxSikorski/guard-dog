@@ -1,6 +1,7 @@
 //! Hex, base64 and npub (bech32), each small and strict.
 
 use crate::NotifyError;
+use zeroize::Zeroizing;
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
@@ -46,6 +47,25 @@ pub fn hex32(text: &str) -> Result<[u8; 32], NotifyError> {
     hex_decode(text)?
         .try_into()
         .map_err(|_| NotifyError::Invalid("expected 64 hex characters"))
+}
+
+/// Like [`hex32`], for a secret: decodes straight into a buffer that is wiped
+/// when dropped, with no plain intermediate copy (best effort, see the README).
+pub fn hex32_secret(text: &str) -> Result<Zeroizing<[u8; 32]>, NotifyError> {
+    let bad = NotifyError::Invalid("expected 64 hex characters");
+    let bytes = text.as_bytes();
+    if bytes.len() != 64 {
+        return Err(bad);
+    }
+    let mut out = Zeroizing::new([0u8; 32]);
+    for (slot, pair) in out.iter_mut().zip(bytes.as_chunks::<2>().0) {
+        let [hi, lo] = *pair;
+        match (hex_val(hi), hex_val(lo)) {
+            (Some(h), Some(l)) => *slot = (h << 4) | l,
+            _ => return Err(NotifyError::Invalid("hex must be lowercase 0-9a-f")),
+        }
+    }
+    Ok(out)
 }
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -255,13 +275,15 @@ pub fn npub_encode(key: &[u8; 32]) -> String {
     out
 }
 
-/// A recipient given as an `npub1...` or as 64 lowercase hex characters.
-/// Anything else (an `nsec`, a profile, a name) is refused.
+/// A recipient given as an `npub1...`. Anything else is refused: an `nsec`, a
+/// profile, a name, and 64 hex characters too (a pasted hex secret key looks
+/// exactly like a hex public key, so hex is never taken as a recipient).
 pub fn parse_recipient(text: &str) -> Result<[u8; 32], NotifyError> {
     if text.starts_with("npub1") {
         npub_decode(text)
     } else {
-        hex32(text)
-            .map_err(|_| NotifyError::Invalid("recipient must be an npub or 64 hex characters"))
+        Err(NotifyError::Invalid(
+            "recipient must be an npub (hex keys are not accepted; use the npub form)",
+        ))
     }
 }

@@ -31,8 +31,8 @@ impl Entropy for SeqEntropy {
 pub struct FixedClock(pub u64);
 
 impl Clock for FixedClock {
-    fn now_unix(&self) -> u64 {
-        self.0
+    fn now_unix(&self) -> Result<u64, gd_notify::NotifyError> {
+        Ok(self.0)
     }
 }
 

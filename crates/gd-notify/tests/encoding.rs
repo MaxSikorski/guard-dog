@@ -8,8 +8,8 @@
 )]
 
 use gd_notify::encoding::{
-    base64_decode, base64_encode, hex_decode, hex_encode, hex32, npub_decode, npub_encode,
-    parse_recipient,
+    base64_decode, base64_encode, hex_decode, hex_encode, hex32, hex32_secret, npub_decode,
+    npub_encode, parse_recipient,
 };
 
 // Public-key example from NIP-19 (a published test pair, not a real account).
@@ -17,10 +17,12 @@ const NPUB: &str = "npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvj
 const HEX: &str = "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e";
 
 #[test]
-fn npub_and_hex_name_the_same_key() {
+fn an_npub_is_the_recipient_form_and_hex_is_refused() {
     let from_npub = parse_recipient(NPUB).unwrap();
-    let from_hex = parse_recipient(HEX).unwrap();
-    assert_eq!(from_npub, from_hex);
+    // A pasted 64-hex string could be a secret key, so it is never taken.
+    let err = parse_recipient(HEX).unwrap_err();
+    assert!(err.to_string().contains("npub"), "{err}");
+    assert!(!err.to_string().contains(HEX));
     assert_eq!(hex_encode(&from_npub), HEX);
     assert_eq!(npub_encode(&from_npub), NPUB);
     assert_eq!(npub_decode(NPUB).unwrap(), from_npub);
@@ -114,6 +116,15 @@ fn hex_is_strict() {
     assert!(hex_decode("0g").is_err());
     assert!(hex_decode("abc").is_err());
     assert_eq!(hex_decode("").unwrap(), Vec::<u8>::new());
+    // The secret variant decodes the same way and is just as strict.
+    assert_eq!(
+        hex32_secret(HEX).unwrap().as_slice(),
+        hex32(HEX).unwrap().as_slice()
+    );
+    assert!(hex32_secret(&HEX.to_uppercase()).is_err());
+    assert!(hex32_secret(&HEX[..62]).is_err());
+    assert!(hex32_secret(&format!("{HEX}00")).is_err());
+    assert!(hex32_secret(&"zz".repeat(32)).is_err());
 }
 
 #[test]

@@ -26,7 +26,7 @@ fn wrap_unwrap_round_trip() {
     let mut entropy = SeqEntropy(1000);
     let wrap = gift_wrap_dm(
         &sender,
-        &recipient.public_x(),
+        &recipient.public_x().unwrap(),
         "line one\nline two with a dog: 🐕",
         &FixedClock(NOW),
         &mut entropy,
@@ -38,19 +38,19 @@ fn wrap_unwrap_round_trip() {
     assert_eq!(wrap.kind, 1059);
     assert_eq!(
         wrap.tags,
-        vec![vec!["p".to_owned(), recipient.public_hex()]]
+        vec![vec!["p".to_owned(), recipient.public_hex().unwrap()]]
     );
-    assert_ne!(wrap.pubkey, sender.public_hex());
-    assert_ne!(wrap.pubkey, recipient.public_hex());
+    assert_ne!(wrap.pubkey, sender.public_hex().unwrap());
+    assert_ne!(wrap.pubkey, recipient.public_hex().unwrap());
     wrap.verify().unwrap();
     assert!(wrap.created_at <= NOW && wrap.created_at >= NOW - TWO_DAYS);
 
     let opened = unwrap_dm(&recipient, &wrap).unwrap();
     // The seal inside was signed by Guard Dog's key.
-    assert_eq!(opened.sender, sender.public_hex());
+    assert_eq!(opened.sender, sender.public_hex().unwrap());
     assert_eq!(opened.seal.kind, 13);
     assert!(opened.seal.tags.is_empty());
-    assert_eq!(opened.seal.pubkey, sender.public_hex());
+    assert_eq!(opened.seal.pubkey, sender.public_hex().unwrap());
     opened.seal.verify().unwrap();
     assert!(opened.seal.created_at <= NOW && opened.seal.created_at >= NOW - TWO_DAYS);
     // The rumor: kind 14, unsigned, one p tag, the message, written by the sender.
@@ -58,9 +58,9 @@ fn wrap_unwrap_round_trip() {
     assert_eq!(opened.rumor.content, "line one\nline two with a dog: 🐕");
     assert_eq!(
         opened.rumor.tags,
-        vec![vec!["p".to_owned(), recipient.public_hex()]]
+        vec![vec!["p".to_owned(), recipient.public_hex().unwrap()]]
     );
-    assert_eq!(opened.rumor.pubkey, sender.public_hex());
+    assert_eq!(opened.rumor.pubkey, sender.public_hex().unwrap());
     assert_eq!(opened.rumor.id(), opened.rumor_id);
 }
 
@@ -71,7 +71,7 @@ fn only_the_recipient_can_open_it() {
     let stranger = keys(3);
     let wrap = gift_wrap_dm(
         &sender,
-        &recipient.public_x(),
+        &recipient.public_x().unwrap(),
         "hello",
         &FixedClock(NOW),
         &mut SeqEntropy(50),
@@ -91,7 +91,7 @@ fn created_at_is_randomised_inside_the_window() {
     for _ in 0..40 {
         let wrap = gift_wrap_dm(
             &sender,
-            &recipient.public_x(),
+            &recipient.public_x().unwrap(),
             "x",
             &FixedClock(NOW),
             &mut entropy,
@@ -112,7 +112,7 @@ fn the_same_inputs_give_the_same_wrap() {
     let make = || {
         gift_wrap_dm(
             &sender,
-            &recipient.public_x(),
+            &recipient.public_x().unwrap(),
             "x",
             &FixedClock(NOW),
             &mut SeqEntropy(9),
@@ -130,7 +130,7 @@ fn event_id_is_the_sha256_of_the_canonical_array() {
     let recipient = keys(2);
     let wrap = gift_wrap_dm(
         &sender,
-        &recipient.public_x(),
+        &recipient.public_x().unwrap(),
         "x",
         &FixedClock(NOW),
         &mut SeqEntropy(3),
@@ -158,7 +158,7 @@ fn a_tampered_event_fails_verification() {
     let recipient = keys(2);
     let wrap = gift_wrap_dm(
         &sender,
-        &recipient.public_x(),
+        &recipient.public_x().unwrap(),
         "x",
         &FixedClock(NOW),
         &mut SeqEntropy(3),
@@ -182,7 +182,7 @@ fn json_form_is_a_plain_nostr_event() {
     let recipient = keys(2);
     let wrap = gift_wrap_dm(
         &sender,
-        &recipient.public_x(),
+        &recipient.public_x().unwrap(),
         "x",
         &FixedClock(NOW),
         &mut SeqEntropy(3),
@@ -219,7 +219,7 @@ fn oversized_messages_are_refused() {
     assert!(
         gift_wrap_dm(
             &sender,
-            &recipient.public_x(),
+            &recipient.public_x().unwrap(),
             &huge,
             &FixedClock(NOW),
             &mut SeqEntropy(3)

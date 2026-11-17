@@ -62,6 +62,7 @@ pub(crate) fn conversation_key_for(
     // points shares that x (the key's parity) does not matter.
     let shared = k256::ecdh::diffie_hellman(signing.as_nonzero_scalar(), peer.as_affine());
     let (prk, _) = Hkdf::<Sha256>::extract(Some(b"nip44-v2"), shared.raw_secret_bytes().as_slice());
+    let prk = Zeroizing::new(prk);
     Ok(Zeroizing::new(take(Some(prk.as_slice()))?))
 }
 
@@ -129,7 +130,7 @@ pub fn encrypt_with_nonce(
     buf.extend_from_slice(&prefix.to_be_bytes());
     buf.extend_from_slice(bytes);
     buf.resize(2 + padded, 0);
-    let mut cipher = ChaCha20::new(&keys.chacha_key.into(), &keys.chacha_nonce.into());
+    let mut cipher = ChaCha20::new((&keys.chacha_key).into(), (&keys.chacha_nonce).into());
     cipher.apply_keystream(buf.as_mut_slice());
     let tag = mac_of(&keys.hmac_key, nonce, &buf)?.finalize().into_bytes();
     let mut out = Vec::with_capacity(1 + 32 + buf.len() + 32);
@@ -172,7 +173,7 @@ pub fn decrypt(conversation_key: &[u8; 32], payload: &str) -> Result<String, Not
         .verify_slice(tag)
         .map_err(|_| bad)?;
     let mut buf = Zeroizing::new(ciphertext.to_vec());
-    let mut cipher = ChaCha20::new(&keys.chacha_key.into(), &keys.chacha_nonce.into());
+    let mut cipher = ChaCha20::new((&keys.chacha_key).into(), (&keys.chacha_nonce).into());
     cipher.apply_keystream(buf.as_mut_slice());
     let len = usize::from(u16::from_be_bytes(take(buf.get(0..2)).map_err(|_| bad)?));
     if len < MIN_PLAINTEXT || buf.len() != 2 + calc_padded_len(len) {

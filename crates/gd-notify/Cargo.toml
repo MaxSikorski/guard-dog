@@ -17,9 +17,9 @@ serde_json.workspace = true
 # Cryptography comes from RustCrypto primitives only; we compose them, never reimplement them.
 # The `nostr` crate is not used: it depends on libsecp256k1 (CC0), which deny.toml refuses.
 k256 = { version = "=0.14.0", default-features = false, features = ["arithmetic", "ecdh", "schnorr", "std"] }
-chacha20 = { version = "=0.10.2", default-features = false, features = ["cipher"] }
+chacha20 = { version = "=0.10.2", default-features = false, features = ["cipher", "zeroize"] }
 hkdf = "=0.13.0"
-hmac = "=0.13.0"
+hmac = { version = "=0.13.0", features = ["zeroize"] }
 sha2 = "=0.11.1"
 getrandom = "=0.4.3"
 # Wipes secret keys and key-derived values from memory when dropped. Already in the tree via k256.

@@ -26,14 +26,15 @@ pub use error::NotifyError;
 pub use keys::Keys;
 pub use sources::{Clock, Entropy, OsEntropy, SystemClock};
 
-use alert::{Alert, Chain, notify_allowed, plan_dms};
+use alert::{Alert, Chain, notify_allowed, plan_dms_noting};
 use relay::{PublishOutcome, RelayUrl};
 
 /// Plans the direct messages for `alerts` (policy, cap and summary included),
 /// wraps each for `recipient`, and publishes them to the lab relay.
 ///
 /// Refuses, before touching the network, unless [`notify_allowed`] says the
-/// chains are regtest or signet only.
+/// node's chains are regtest or signet only. An alert about any other chain
+/// (or an unknown one) is dropped, never sent, and counted in the summary.
 pub fn send_alerts(
     relay: &RelayUrl,
     sender: &Keys,
@@ -49,16 +50,15 @@ pub fn send_alerts(
         ));
     }
     // Each alert's own chain must be one the node set reported and one we may
-    // notify about, so a mixed run cannot carry a mainnet finding.
-    for alert in alerts {
-        if !notify_allowed(&[alert.chain()]) || !chains.contains(&alert.chain()) {
-            return Err(NotifyError::Refused(
-                "an alert is about a chain that notifications are not allowed for",
-            ));
-        }
-    }
+    // notify about. An alert that is not is dropped (never sent) and counted
+    // in the summary, so one odd finding cannot silence the rest; a mixed run
+    // cannot carry a mainnet finding.
+    let (allowed, dropped): (Vec<&Alert>, Vec<&Alert>) = alerts
+        .iter()
+        .partition(|a| notify_allowed(&[a.chain()]) && chains.contains(&a.chain()));
+    let allowed: Vec<Alert> = allowed.into_iter().cloned().collect();
     let mut wraps = Vec::new();
-    for message in plan_dms(alerts) {
+    for message in plan_dms_noting(&allowed, dropped.len()) {
         wraps.push(event::gift_wrap_dm(
             sender, recipient, &message, clock, entropy,
         )?);
