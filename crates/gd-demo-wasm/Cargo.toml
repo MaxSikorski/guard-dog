@@ -1,0 +1,37 @@
+[package]
+name = "gd-demo-wasm"
+description = "The browser build's two exports for the watch-it-catch-a-leak demo. WebAssembly only; never shipped."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "gd_demo_wasm"
+path = "src/lib.rs"
+# docs/demo/build.sh adds `--crate-type cdylib` for the wasm build.
+crate-type = ["rlib"]
+
+[dependencies]
+gd-demo = { path = "../gd-demo" }
+
+# The workspace lints, copied, with one change: `unsafe_code` is `deny`
+# instead of `forbid`, because a WebAssembly export needs
+# `#[unsafe(no_mangle)]` and `forbid` can't be lifted for one function. Each of
+# the two exports carries its own `#[allow(unsafe_code)]`; there are no
+# `unsafe` blocks. This is the only crate that relaxes the rule, and it holds
+# nothing else. Cargo can't combine `workspace = true` with a change, so keep
+# this table in step with the workspace's.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"

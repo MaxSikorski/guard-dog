@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Guard Dog: watch it catch a leak</title>
+    <meta name="description" content="Planted attacks. Watch the real Guard Dog checks catch each one, in your browser, with no network.">
+    <meta name="theme-color" content="#000000">
+    <link rel="icon" id="favicon" type="image/svg+xml" href="../favicon-dark.svg">
+    <!-- No network at all: connect-src 'none' blocks every fetch, so the engine ships as a script (watchdog.wasm.js). 'wasm-unsafe-eval' lets the browser compile it. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none'">
+    <script src="theme.js"></script>
+    <style>
+        /* Sikorski Design System. Colour is used only for meaning: urgency (red, green) here. */
+        @font-face { font-family: 'Inter'; font-weight: 400; font-style: normal; font-display: swap; src: url('../vendor/fonts/inter-latin-400-normal.woff2') format('woff2'); }
+        @font-face { font-family: 'Inter'; font-weight: 500; font-style: normal; font-display: swap; src: url('../vendor/fonts/inter-latin-500-normal.woff2') format('woff2'); }
+        @font-face { font-family: 'Inter'; font-weight: 600; font-style: normal; font-display: swap; src: url('../vendor/fonts/inter-latin-600-normal.woff2') format('woff2'); }
+        @font-face { font-family: 'Inter'; font-weight: 700; font-style: normal; font-display: swap; src: url('../vendor/fonts/inter-latin-700-normal.woff2') format('woff2'); }
+
+        :root {
+            --theme-black: #000000;
+            --theme-dark-gray: #1c1c1e;
+            --theme-light-gray: #f5f5f7;
+            --theme-white: #ffffff;
+
+            --bg-color: var(--theme-black);
+            --text-color: var(--theme-white);
+            --card-bg: rgba(28, 28, 30, 0.7);
+            --card-border: rgba(255, 255, 255, 0.1);
+            --btn-bg: var(--theme-white);
+            --btn-text: var(--theme-black);
+            --btn-hover: #e0e0e0;
+            --btn-sec-bg: transparent;
+            --btn-sec-border: var(--theme-white);
+            --btn-sec-text: var(--theme-white);
+            --btn-sec-hover: rgba(255, 255, 255, 0.1);
+            --divider: rgba(255, 255, 255, 0.08);
+            --text-muted: rgba(255, 255, 255, 0.5);
+            --glass-bg: rgba(0, 0, 0, 0.72);
+
+            /* meaning only */
+            --critical: #ff453a; --ok: #30d158;
+        }
+
+        [data-theme="light"] {
+            --bg-color: var(--theme-light-gray);
+            --text-color: var(--theme-black);
+            --card-bg: rgba(255, 255, 255, 0.7);
+            --card-border: rgba(0, 0, 0, 0.1);
+            --btn-bg: var(--theme-black);
+            --btn-text: var(--theme-white);
+            --btn-hover: #333333;
+            --btn-sec-border: var(--theme-black);
+            --btn-sec-text: var(--theme-black);
+            --btn-sec-hover: rgba(0, 0, 0, 0.05);
+            --divider: rgba(0, 0, 0, 0.08);
+            --text-muted: rgba(0, 0, 0, 0.5);
+            --glass-bg: rgba(245, 245, 247, 0.78);
+
+            --critical: #d70015; --ok: #248a3d;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html { scroll-behavior: smooth; }
+        @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            transition: background-color 0.5s ease, color 0.5s ease;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+        h1, h2, h3 { letter-spacing: -0.04em; font-weight: 700; }
+        p { line-height: 1.6; color: inherit; opacity: 0.85; }
+        a { color: inherit; }
+
+        .header-nav {
+            position: fixed; top: 0; left: 0; width: 100%;
+            padding: 30px 50px;
+            display: flex; justify-content: space-between; align-items: center;
+            z-index: 100;
+            background: var(--glass-bg);
+            backdrop-filter: blur(14px);
+            -webkit-backdrop-filter: blur(14px);
+            border-bottom: 1px solid var(--divider);
+        }
+        .logo {
+            color: var(--text-color); text-decoration: none;
+            font-size: 1rem; font-weight: 600; letter-spacing: -0.02em;
+            display: inline-flex; align-items: center; gap: 10px; white-space: nowrap;
+        }
+        .logo svg { width: 24px; height: 24px; flex-shrink: 0; }
+        .theme-toggle {
+            background: none; border: none; color: var(--text-color); cursor: pointer;
+            width: 28px; height: 28px; padding: 0;
+            display: flex; align-items: center; justify-content: center;
+            position: relative;
+        }
+        .theme-toggle::after { content: ""; position: absolute; inset: -8px; } /* 44px touch target */
+        .theme-toggle svg { width: 22px; height: 22px; }
+        @media (max-width: 768px) { .header-nav { padding: 20px; } }
+
+        .content-section { max-width: 800px; width: 100%; margin: 0 auto; padding: 0 28px 80px; }
+        @media (max-width: 768px) { .content-section { padding: 0 20px 60px; } }
+
+        .page-header { padding-top: 140px; margin-bottom: 48px; }
+        .hero-title { font-size: clamp(2.5rem, 5vw, 4rem); line-height: 1.1; margin-bottom: 16px; }
+        .hero-subtitle { font-size: clamp(1rem, 2vw, 1.25rem); max-width: 560px; margin: 0 0 32px; }
+        .hero-cta { display: flex; gap: 12px; flex-wrap: wrap; }
+        @media (max-width: 380px) { .hero-title { font-size: 2rem; } }
+
+        .btn {
+            padding: 14px 28px; border-radius: 30px;
+            font-family: inherit; font-weight: 500; font-size: 1rem;
+            cursor: pointer; transition: all 0.3s ease; text-decoration: none; display: inline-block;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .primary-btn { background-color: var(--btn-bg); color: var(--btn-text); border: none; }
+        .primary-btn:hover { background-color: var(--btn-hover); }
+        .primary-btn:active { transform: scale(0.97); }
+        .secondary-btn { background-color: var(--btn-sec-bg); color: var(--btn-sec-text); border: 1px solid var(--btn-sec-border); }
+        .secondary-btn:hover { background-color: var(--btn-sec-hover); }
+        .secondary-btn:active { transform: scale(0.97); }
+        .btn:disabled { opacity: 0.4; cursor: default; transform: none; }
+        .btn:focus-visible, .theme-toggle:focus-visible, a:focus-visible { outline: 2px solid var(--text-color); outline-offset: 3px; }
+
+        .card {
+            padding: 18px 20px;
+            background: var(--card-bg);
+            backdrop-filter: blur(30px);
+            -webkit-backdrop-filter: blur(30px);
+            border: 1px solid var(--card-border);
+            border-radius: 20px;
+            transition: all 0.3s ease;
+        }
+        .card-title { font-size: 0.95rem; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 6px; }
+        .card-desc { font-size: 0.85rem; opacity: 0.6; line-height: 1.5; }
+        .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 14px; }
+        .scene-card { min-height: 112px; display: flex; flex-direction: column; opacity: 0.45; }
+        .scene-card .state { margin-top: auto; padding-top: 10px; font-size: 0.85rem; font-weight: 500; }
+        .scene-card.live { opacity: 1; }
+        /* Caught: the card inverts. Monochrome. */
+        .scene-card.caught { opacity: 1; background: var(--text-color); color: var(--bg-color); border-color: var(--text-color); }
+        .scene-card.caught .card-desc { opacity: 0.75; }
+        .scene-card.missed { opacity: 1; border-color: var(--critical); }
+        .scene-card.missed .state { color: var(--critical); }
+        .scene-card.todo { opacity: 0.55; border-style: dashed; }
+
+        .section-label {
+            font-size: 0.75rem; font-weight: 500; color: var(--text-muted);
+            text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 20px;
+        }
+        .divider { width: 100%; height: 1px; background: var(--divider); margin: 48px 0 32px; }
+        .scene-title { font-size: clamp(1.4rem, 3vw, 2rem); line-height: 1.15; margin-bottom: 10px; }
+        .scene-story { margin-bottom: 28px; max-width: 640px; }
+
+        .code-block {
+            background: var(--card-bg);
+            backdrop-filter: blur(30px);
+            -webkit-backdrop-filter: blur(30px);
+            border: 1px solid var(--card-border);
+            border-radius: 12px; padding: 20px;
+            font-family: "SF Mono", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+            font-size: 0.85rem; line-height: 1.6; color: var(--text-muted);
+            margin-bottom: 16px;
+        }
+        [data-theme="light"] .code-block { background: rgba(20, 20, 20, 0.95); color: #a1a1a6; border-color: rgba(255, 255, 255, 0.1); }
+        .log { white-space: pre-wrap; overflow-wrap: anywhere; min-height: 140px; }
+        .log .line { padding-left: 2ch; text-indent: -2ch; }
+        .log .head { color: #f5f5f7; font-weight: 600; margin-top: 10px; }
+        .log .head:first-child { margin-top: 0; }
+        .log .quote { padding-left: 4ch; text-indent: -2ch; color: #d1d1d6; }
+        .log .caught { color: var(--ok); font-weight: 600; }
+        .log .missed { color: var(--critical); font-weight: 700; }
+        .log .todo { opacity: 0.7; }
+
+        .result-title.fail { color: var(--critical); }
+        .result-title { font-size: clamp(1.75rem, 4vw, 2.5rem); line-height: 1.1; margin-bottom: 12px; }
+        .result p + p, .block p + p { margin-top: 10px; }
+        .todo-list { margin: 12px 0 0 1.2em; line-height: 1.7; opacity: 0.85; }
+        .hidden { display: none; }
+        .footer { text-align: center; font-size: 0.8rem; font-weight: 500; opacity: 0.3; padding: 60px 0 40px; }
+        @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+    </style>
+</head>
+<body>
+    <nav class="header-nav">
+        <a href="../" class="logo" title="Back to the Guard Dog site"><svg viewBox="0 0 64 64" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" d="M32 4 8 12v17c0 14 9 25 24 31 15-6 24-17 24-31V12L32 4Zm0 6 18 6v13c0 11-6 20-18 25-12-5-18-14-18-25V16l18-6Z"/><path fill="currentColor" fill-rule="evenodd" d="M20 18c0-1 1-1 2 0l7 7h6l7-7c1-1 2-1 2 0v16c0 8-5 13-12 16-7-3-12-8-12-16V18Zm4 14v4h5v-4h-5Zm11 0v4h5v-4h-5Zm-7 9 4 5 4-5h-8Z"/></svg>Guard Dog</a>
+        <button id="theme-toggle" class="theme-toggle" aria-label="Toggle Theme">
+            <svg id="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path>
+            </svg>
+        </button>
+    </nav>
+
+    <main class="content-section">
+        <header class="page-header">
+            <h1 class="hero-title">Watch it catch a leak.</h1>
+            <p class="hero-subtitle">Planted attacks. The real Guard Dog checks, running in your browser. Everything is fake except the checks.</p>
+            <div class="hero-cta">
+                <button class="btn primary-btn" id="run" disabled>Loading…</button>
+                <a class="btn secondary-btn" href="https://github.com/MaxSikorski/guard-dog">View the code</a>
+            </div>
+        </header>
+
+        <section aria-labelledby="scene-title">
+            <div class="section-label" id="scene-label">Ready</div>
+            <h2 class="scene-title" id="scene-title">Guard Dog doesn't trust what it reads, or what leaves the machine.</h2>
+            <p class="scene-story" id="scene-story">Press the button and watch each planted attack get caught. If a check ever misses, this page says so in red.</p>
+            <div class="cards" id="cards" aria-label="The scenes"></div>
+            <div class="divider"></div>
+            <div class="section-label">What happened</div>
+            <div class="code-block log" id="log" aria-live="polite"></div>
+            <div class="hero-cta"><button class="btn secondary-btn hidden" id="skip">Skip to the end</button></div>
+        </section>
+
+        <section class="result hidden" id="result">
+            <div class="divider"></div>
+            <h2 class="result-title" id="result-title"></h2>
+            <p id="result-proof"></p>
+            <p>These are generated test values on a made-up machine. No real keys, no real coins, no network.</p>
+        </section>
+
+        <section class="block hidden" id="todo-block">
+            <div class="divider"></div>
+            <div class="section-label">Not in yet</div>
+            <p>These scenes are waiting on code that isn't written. They are not passes, and they don't count in the score.</p>
+            <ul class="todo-list" id="todo-list"></ul>
+        </section>
+
+        <section class="block">
+            <div class="divider"></div>
+            <div class="section-label">Why I built this</div>
+            <p>Guard Dog is pre-alpha: there is nothing to install yet. But the two safety checks it is built around already exist and already run: the one that makes outside text harmless to print, and the one that looks for secrets leaving the machine. I'd rather you watch them work than take my word for it.</p>
+        </section>
+
+        <footer class="footer">Guard Dog · Apache-2.0 · No network, no real secrets</footer>
+    </main>
+
+    <script src="../vendor/gsap/gsap.min.js"></script><!-- GSAP, vendored (see ../vendor/gsap/LICENSE) -->
+    <script src="watchdog.wasm.js"></script>
+    <script src="demo.js"></script>
+</body>
+</html>
