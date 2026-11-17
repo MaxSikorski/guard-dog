@@ -922,6 +922,38 @@ fn a_range_cannot_reopen_beyond_its_own_limit() {
 }
 
 #[test]
+fn a_closing_cannot_contradict_the_limits_of_its_own_range() {
+    for r in [
+        // The record names 3 as affected and also caps the range at 3.
+        r#"[{"introduced":"1"},{"last_affected":"3"},{"limit":"3"}]"#,
+        r#"[{"introduced":"1"},{"last_affected":"3"},{"limit":"2"},{"limit":"3"}]"#,
+        // The fix lies beyond every limit.
+        r#"[{"introduced":"1"},{"fixed":"5"},{"limit":"3"}]"#,
+        r#"[{"introduced":"1"},{"fixed":"5"},{"limit":"3"},{"limit":"4"}]"#,
+    ] {
+        for reason in all_reasons(r, &["0.5", "1.5", "3", "4", "6"]) {
+            assert_eq!(reason, UnknownReason::MalformedRange, "{r}");
+        }
+    }
+    // Valid shapes stay as they were.
+    let r = r#"[{"introduced":"1"},{"fixed":"2"},{"limit":"3"}]"#;
+    assert!(is_in(r, "1.5"));
+    assert!(is_out(r, "2.5"));
+    // A fix at the limit, a last_affected below it, or a star are all fine.
+    let r = r#"[{"introduced":"1"},{"fixed":"3"},{"limit":"3"}]"#;
+    assert!(is_in(r, "2"));
+    assert!(is_out(r, "3"));
+    let r = r#"[{"introduced":"1"},{"last_affected":"3"},{"limit":"4"}]"#;
+    assert!(is_in(r, "3"));
+    assert!(is_out(r, "3.5"));
+    let r = r#"[{"introduced":"1"},{"last_affected":"3"},{"limit":"3"},{"limit":"*"}]"#;
+    assert!(is_in(r, "3"));
+    // One limit above the closing is enough, since limits expand.
+    let r = r#"[{"introduced":"1"},{"fixed":"5"},{"limit":"3"},{"limit":"9"}]"#;
+    assert!(is_in(r, "4"));
+}
+
+#[test]
 fn limits_expand_so_a_reopening_below_only_some_limits_is_fine() {
     // 3 is below the limit 9, so the range may reopen there.
     let r = r#"[{"introduced":"0"},{"fixed":"2"},{"limit":"9"},{"limit":"1"},{"introduced":"3"}]"#;
@@ -1411,7 +1443,7 @@ fn unknown_never_moves_toward_out_of_range() {
 /// Known-invalid patterns are never out of range, whatever else is around them.
 #[test]
 fn a_known_invalid_range_is_never_out_of_range() {
-    let pattern = (0u8..8, 0u8..4, 1u8..4, 0u8..3).prop_map(|(shape, a, k, ws)| {
+    let pattern = (0u8..10, 0u8..4, 1u8..4, 0u8..3).prop_map(|(shape, a, k, ws)| {
         let pad = ["", " ", "\t"][ws as usize];
         let (lo, hi) = (a, a + k);
         let events = match shape {
@@ -1422,7 +1454,9 @@ fn a_known_invalid_range_is_never_out_of_range() {
             4 => json!([{"fixed": lo.to_string()}, {"introduced": hi.to_string()}]),
             5 => json!([{"introduced": "0"}, {"limit": hi.to_string()}, {"introduced": (hi + 1).to_string()}]),
             6 => json!([{"introduced": "0"}, {"fixed": format!("{pad}0{pad}")}]),
-            _ => json!([{"introduced": lo.to_string()}, {"last_affected": hi.to_string()}, {"last_affected": (hi + 1).to_string()}]),
+            7 => json!([{"introduced": lo.to_string()}, {"last_affected": hi.to_string()}, {"last_affected": (hi + 1).to_string()}]),
+            8 => json!([{"introduced": lo.to_string()}, {"last_affected": hi.to_string()}, {"limit": hi.to_string()}]),
+            _ => json!([{"introduced": lo.to_string()}, {"fixed": (hi + 1).to_string()}, {"limit": hi.to_string()}]),
         };
         eco(events)
     });
@@ -1575,7 +1609,20 @@ fn valid_parts(v: &Valid) -> (Vec<Step>, Vec<u8>, bool, Value) {
                 .filter_map(|(_, c)| *c)
                 .max()
                 .unwrap_or(0);
-            let limits: Vec<u8> = limits.iter().copied().filter(|l| *l > max_open).collect();
+            let mut limits: Vec<u8> = limits.iter().copied().filter(|l| *l > max_open).collect();
+            // A closing must not sit beyond every limit (a last_affected at or
+            // above them all, a fixed strictly above them all): drop the limits.
+            if !*star
+                && steps.iter().any(|(k, c)| {
+                    c.is_some_and(|c| match k {
+                        'L' => !limits.iter().any(|l| *l > c),
+                        'F' => !limits.iter().any(|l| *l >= c),
+                        _ => false,
+                    })
+                })
+            {
+                limits.clear();
+            }
             let mut events: Vec<Value> = steps
                 .iter()
                 .map(|(k, c)| {
