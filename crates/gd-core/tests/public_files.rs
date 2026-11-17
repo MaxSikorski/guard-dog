@@ -1,35 +1,44 @@
 //! Public files must hold no details of the machine they were written on.
 //!
-//! Every git-tracked text file is scanned line by line for home paths, temp
-//! paths, a pasted `id -G` group list, this machine's host and user name, and
-//! email addresses. Each refusal names `file:line`. The checker is a plain
-//! function so a second test can feed it planted strings.
+//! Every git-tracked file is scanned line by line (a symlink by its target
+//! text). Two kinds of check run, kept apart:
 //!
-//! The planted strings in this file are built from pieces, so this file does
-//! not trip its own checker.
+//! - `check_line` is deterministic and reads no environment: home paths, temp
+//!   paths, a pasted `id -G` group list, email addresses.
+//! - `check_identity` looks for this machine's own host and user name. The
+//!   identity is passed in, so the self-test uses made-up ones.
+//!
+//! Each refusal names `file:line`. The planted strings in this file are built
+//! from pieces, so the file does not trip its own checker; the real file walk
+//! covers this file too.
 
-// Helpers in a test file are not covered by clippy.toml's test exemption; a panic here is a failed test.
-#![allow(clippy::indexing_slicing, clippy::expect_used)]
-
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Tracked files that are skipped on purpose. Empty: no fixture has needed it.
-/// Add `(path, reason)` only for a deliberately synthetic file that would
-/// false-positive, and say why.
+/// Tracked files skipped on purpose. Empty: nothing has needed it. Add
+/// `(path, reason)` only for a deliberately synthetic file that would
+/// false-positive.
 const SKIP_FILES: &[(&str, &str)] = &[];
 
-/// Names allowed after `/home/`: placeholders and the service users the lab
-/// and the test fixtures already use (`lab/compose.yml`, `gd-egress` tests).
+/// Names allowed after the Linux home folder prefix: placeholders and the
+/// service users the lab and the test fixtures already use
+/// (`lab/compose.yml`, the `gd-egress` tests).
 const ALLOWED_HOME_NAMES: &[&str] = &["user", "bitcoin", "admin", "umbrel"];
 
-/// Names allowed after `/Users/`: none. Any real-looking name is refused.
+/// Names allowed after the macOS or Windows users folder prefix: none.
 const ALLOWED_USERS_NAMES: &[&str] = &[];
 
-/// Email addresses that are allowed, each public by design.
-/// `you@yourwallet.com` is the placeholder in the website's example;
-/// `jack@greensock.com` is the author contact inside the vendored GSAP
-/// licence header; `git@github.com` is the standard ssh clone address.
+/// Names allowed after the root home prefix: the lightning data folders inside
+/// the lab's containers (`lab/compose.yml`), which are not this machine's.
+const ALLOWED_ROOT_NAMES: &[&str] = &[".lnd", ".lightning"];
+
+/// Names allowed after the tilde home prefix: none.
+const ALLOWED_TILDE_NAMES: &[&str] = &[];
+
+/// Email addresses allowed, each public by design: the website's placeholder,
+/// the author contact in the vendored GSAP licence header, the ssh clone
+/// address, and noreply addresses.
 const ALLOWED_EMAILS: &[&str] = &[
     "you@yourwallet.com",
     "jack@greensock.com",
@@ -38,8 +47,7 @@ const ALLOWED_EMAILS: &[&str] = &[
     "noreply@github.com",
 ];
 
-/// Email domains that are allowed whatever the name: GitHub's noreply
-/// addresses and the reserved example domains.
+/// Email domains allowed whatever the name.
 const ALLOWED_EMAIL_DOMAINS: &[&str] = &[
     "users.noreply.github.com",
     "example.com",
@@ -47,7 +55,7 @@ const ALLOWED_EMAIL_DOMAINS: &[&str] = &[
     "example.net",
 ];
 
-/// Host or user names that are too common to count as a leak.
+/// Host or user names too common to count as a leak.
 const COMMON_NAMES: &[&str] = &[
     "root",
     "runner",
@@ -69,31 +77,15 @@ const COMMON_NAMES: &[&str] = &[
     "linuxkit",
 ];
 
-/// What this machine calls itself, read once from the environment.
+/// What this machine calls itself. Passed in, never read by the checks.
 struct Identity {
     names: Vec<String>,
 }
 
 impl Identity {
-    fn from_environment() -> Self {
-        let mut raw = Vec::new();
-        for key in ["HOSTNAME", "USER", "LOGNAME"] {
-            if let Ok(value) = std::env::var(key) {
-                raw.push(value);
-            }
-        }
-        // macOS does not export HOSTNAME; ask the system for it.
-        if std::env::var("HOSTNAME").is_err()
-            && let Ok(out) = Command::new("hostname").output()
-        {
-            raw.push(String::from_utf8_lossy(&out.stdout).trim().to_string());
-        }
-        Self::from_names(raw)
-    }
-
-    /// Keep names of 4+ characters that are not common words. A host name
-    /// like `box.local` also yields its first label, `box`, when long enough.
-    fn from_names(raw: Vec<String>) -> Self {
+    /// Keep names of 4+ characters that are not common words. A host name like
+    /// `box.local` also yields its first label.
+    fn from_names(raw: &[String]) -> Self {
         let mut names = Vec::new();
         for value in raw {
             let lower = value.trim().to_lowercase();
@@ -109,41 +101,90 @@ impl Identity {
         }
         Self { names }
     }
+
+    fn from_environment() -> Self {
+        let mut raw = Vec::new();
+        for key in ["HOSTNAME", "USER", "LOGNAME"] {
+            if let Ok(value) = std::env::var(key) {
+                raw.push(value);
+            }
+        }
+        // macOS does not export HOSTNAME; ask the system for it.
+        if std::env::var("HOSTNAME").is_err()
+            && let Ok(out) = Command::new("hostname").output()
+        {
+            raw.push(String::from_utf8_lossy(&out.stdout).trim().to_string());
+        }
+        Self::from_names(&raw)
+    }
 }
 
 fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')
 }
 
-/// Every refusal found in one line, as plain-English reasons.
-fn check_line(line: &str, who: &Identity) -> Vec<String> {
+/// The deterministic checks. Reads no environment.
+fn check_line(line: &str) -> Vec<String> {
     let mut found = Vec::new();
     home_paths(line, &mut found);
     temp_paths(line, &mut found);
     group_list(line, &mut found);
-    machine_names(line, who, &mut found);
     emails(line, &mut found);
     found
 }
 
+/// Name characters right after `at`.
+fn name_at(text: &str, at: usize) -> String {
+    text.get(at..)
+        .unwrap_or("")
+        .chars()
+        .take_while(|c| is_name_char(*c))
+        .collect()
+}
+
+/// Report a path marker followed by a real-looking name, matched without
+/// regard to case. A marker glued to a longer word (`docs/home/x`) is a
+/// relative path, not a home folder; `file://localhost/...` is a home folder.
+fn report_after(line: &str, marker: &str, allowed: &[&str], found: &mut Vec<String>) {
+    let lower = line.to_lowercase();
+    if lower.len() != line.len() {
+        return; // odd Unicode changed the byte lengths; the markers are ASCII
+    }
+    for (at, _) in lower.match_indices(marker.to_lowercase().as_str()) {
+        let before = lower.get(..at).unwrap_or("");
+        if before.chars().next_back().is_some_and(is_name_char) && !before.ends_with("localhost") {
+            continue;
+        }
+        let name = name_at(line, at + marker.len());
+        if name.is_empty() || allowed.contains(&name.to_lowercase().as_str()) {
+            continue;
+        }
+        found.push(format!("home path {marker}{name}"));
+    }
+}
+
 fn home_paths(line: &str, found: &mut Vec<String>) {
-    for (marker, allowed) in [
-        (concat!("/Us", "ers/"), ALLOWED_USERS_NAMES),
-        (concat!("/ho", "me/"), ALLOWED_HOME_NAMES),
-    ] {
-        for (at, _) in line.match_indices(marker) {
-            // `docs/home/x` is a relative path, not a home directory.
-            if line[..at].chars().next_back().is_some_and(is_name_char) {
-                continue;
-            }
-            let name: String = line[at + marker.len()..]
-                .chars()
-                .take_while(|c| is_name_char(*c))
-                .collect();
-            if name.is_empty() || allowed.contains(&name.as_str()) {
-                continue;
-            }
-            found.push(format!("home path {marker}{name}"));
+    report_after(line, concat!("/Us", "ers/"), ALLOWED_USERS_NAMES, found);
+    report_after(line, concat!("/ho", "me/"), ALLOWED_HOME_NAMES, found);
+    report_after(line, concat!("/ro", "ot/"), ALLOWED_ROOT_NAMES, found);
+    // Windows, single backslashes and the doubled ones of JSON.
+    report_after(line, concat!("\\Us", "ers\\"), ALLOWED_USERS_NAMES, found);
+    report_after(line, concat!("\\Us", "ers\\\\"), ALLOWED_USERS_NAMES, found);
+    // URL-encoded.
+    report_after(line, concat!("%2FUs", "ers%2F"), ALLOWED_USERS_NAMES, found);
+    report_after(line, concat!("%2Fho", "me%2F"), ALLOWED_HOME_NAMES, found);
+    // Tilde form, after a space, quote or the start of the line.
+    for (at, _) in line.match_indices("~/") {
+        if line
+            .get(..at)
+            .and_then(|s| s.chars().next_back())
+            .is_some_and(is_name_char)
+        {
+            continue;
+        }
+        let name = name_at(line, at + 2);
+        if !name.is_empty() && !ALLOWED_TILDE_NAMES.contains(&name.as_str()) {
+            found.push(format!("home path ~/{name}"));
         }
     }
 }
@@ -160,14 +201,16 @@ fn temp_paths(line: &str, found: &mut Vec<String>) {
     }
 }
 
-/// Eight or more small whole numbers in a row, single-space separated, look
-/// like the output of `id -G`. Dotted versions such as `0.17.0` do not count.
+/// Eight or more whole numbers of 1 to 5 digits in a row, space separated
+/// (backticks, quotes and brackets around them are ignored; commas do not join numbers, so byte arrays are fine), look like
+/// the output of `id -G`. Dotted versions such as `0.17.0` do not count.
 fn group_list(line: &str, found: &mut Vec<String>) {
     let mut run = 0;
     let mut longest = 0;
     for token in line.split(' ') {
-        let small =
-            !token.is_empty() && token.len() <= 3 && token.bytes().all(|b| b.is_ascii_digit());
+        let bare =
+            token.trim_matches(|c: char| matches!(c, '`' | '\'' | '"' | '[' | ']' | '(' | ')'));
+        let small = !bare.is_empty() && bare.len() <= 5 && bare.bytes().all(|b| b.is_ascii_digit());
         run = if small { run + 1 } else { 0 };
         longest = longest.max(run);
     }
@@ -178,33 +221,10 @@ fn group_list(line: &str, found: &mut Vec<String>) {
     }
 }
 
-fn machine_names(line: &str, who: &Identity, found: &mut Vec<String>) {
-    let lower = line.to_lowercase();
-    for name in &who.names {
-        for (at, _) in lower.match_indices(name.as_str()) {
-            let before = lower[..at].chars().next_back();
-            let after = lower[at + name.len()..].chars().next();
-            // Whole words only, so a short name inside a longer word is fine.
-            if before.is_some_and(|c| c.is_alphanumeric())
-                || after.is_some_and(|c| c.is_alphanumeric())
-            {
-                continue;
-            }
-            found.push("this machine's host or user name".to_string());
-            break;
-        }
-    }
-}
-
+#[allow(clippy::indexing_slicing)] // every index is guarded by the loop bounds
 fn emails(line: &str, found: &mut Vec<String>) {
     let bytes = line.as_bytes();
     for (at, _) in line.match_indices('@') {
-        let mut start = at;
-        while start > 0
-            && (bytes[start - 1].is_ascii_alphanumeric() || b"._%+-".contains(&bytes[start - 1]))
-        {
-            start -= 1;
-        }
         let mut end = at + 1;
         while end < bytes.len()
             && (bytes[end].is_ascii_alphanumeric() || b".-".contains(&bytes[end]))
@@ -215,10 +235,28 @@ fn emails(line: &str, found: &mut Vec<String>) {
         let tld_is_letters = domain
             .rsplit_once('.')
             .is_some_and(|(_, tld)| tld.len() >= 2 && tld.bytes().all(|b| b.is_ascii_alphabetic()));
-        if start == at || !tld_is_letters {
+        if !tld_is_letters {
             continue; // `@types/node`, `pkg@1.2.3`, a bare `@`
         }
-        let address = format!("{}@{}", &line[start..at], domain).to_lowercase();
+        let local = if at > 0 && bytes[at - 1] == b'"' {
+            // A quoted local part: "name"@host
+            line[..at - 1]
+                .rfind('"')
+                .map_or("", |open| &line[open + 1..at - 1])
+        } else {
+            let mut start = at;
+            while start > 0
+                && (bytes[start - 1].is_ascii_alphanumeric()
+                    || b"._%+-".contains(&bytes[start - 1]))
+            {
+                start -= 1;
+            }
+            &line[start..at]
+        };
+        if local.is_empty() {
+            continue;
+        }
+        let address = format!("{local}@{domain}").to_lowercase();
         if ALLOWED_EMAILS.contains(&address.as_str())
             || ALLOWED_EMAIL_DOMAINS.contains(&domain.to_lowercase().as_str())
         {
@@ -228,15 +266,41 @@ fn emails(line: &str, found: &mut Vec<String>) {
     }
 }
 
+/// This machine's names. In a path (a word holding a slash or backslash) the
+/// name is found even inside a longer segment; in prose only as a whole word.
+fn check_identity(line: &str, who: &Identity) -> Vec<String> {
+    let mut found = Vec::new();
+    let lower = line.to_lowercase();
+    for name in &who.names {
+        for token in lower.split_whitespace() {
+            let in_path = token.contains('/') || token.contains('\\');
+            let hit = token.match_indices(name.as_str()).any(|(at, _)| {
+                let before = token.get(..at).and_then(|s| s.chars().next_back());
+                let after = token.get(at + name.len()..).and_then(|s| s.chars().next());
+                let whole = !before.is_some_and(char::is_alphanumeric)
+                    && !after.is_some_and(char::is_alphanumeric);
+                whole || in_path
+            });
+            if hit {
+                found.push("this machine's host or user name".to_string());
+                break;
+            }
+        }
+    }
+    found
+}
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-fn tracked_files(root: &Path) -> Vec<String> {
+/// `(is_symlink, path)` for every tracked file.
+#[allow(clippy::expect_used, clippy::panic)] // no git, or a line we cannot read, means no test; say so
+fn tracked_files(root: &Path) -> Vec<(bool, String)> {
     let out = Command::new("git")
         .arg("-C")
         .arg(root)
-        .args(["ls-files", "-z"])
+        .args(["ls-files", "-z", "-s"])
         .output()
         .expect("git must be installed to list the tracked files");
     assert!(
@@ -244,39 +308,80 @@ fn tracked_files(root: &Path) -> Vec<String> {
         "git ls-files failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    out.stdout
-        .split(|b| *b == 0)
-        .filter(|name| !name.is_empty())
-        .map(|name| String::from_utf8_lossy(name).into_owned())
-        .collect()
+    let mut files = Vec::new();
+    for entry in out.stdout.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+        let text = String::from_utf8_lossy(entry);
+        // `<mode> <hash> <stage>\t<path>`
+        let Some((meta, path)) = text.split_once('\t') else {
+            panic!("unexpected git ls-files line: {text}");
+        };
+        files.push((meta.starts_with("120000"), path.to_string()));
+    }
+    files
 }
 
-#[test]
-fn public_files_hold_no_local_details() {
-    let root = repo_root();
-    let who = Identity::from_environment();
+/// The text to scan for one tracked file: its contents, or a symlink's target.
+/// `Ok(None)` for binary files and for files git lists but the working tree
+/// has deleted; any other read error is a failure naming the path.
+fn text_of(root: &Path, path: &str, is_link: bool) -> Result<Option<String>, String> {
+    let full = root.join(path);
+    if is_link {
+        return match std::fs::read_link(&full) {
+            Ok(target) => Ok(Some(target.to_string_lossy().into_owned())),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("{path}: cannot read the symlink: {e}")),
+        };
+    }
+    match std::fs::read(&full) {
+        Ok(bytes) if bytes.contains(&0) => Ok(None),
+        Ok(bytes) => Ok(String::from_utf8(bytes).ok()),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{path}: cannot read the file: {e}")),
+    }
+}
+
+/// Scan the whole tracked tree; returns the files scanned and one string per refusal.
+fn scan_tree(root: &Path, who: &Identity) -> (usize, Vec<String>) {
     let mut refusals = Vec::new();
     let mut scanned = 0;
-    for path in tracked_files(&root) {
+    for (is_link, path) in tracked_files(root) {
         if SKIP_FILES.iter().any(|(skip, _)| *skip == path) {
             continue;
         }
-        let Ok(bytes) = std::fs::read(root.join(&path)) else {
-            continue; // a tracked file deleted in the working tree
-        };
-        if bytes.contains(&0) {
-            continue; // binary
-        }
-        let Ok(text) = String::from_utf8(bytes) else {
-            continue; // not text
+        let text = match text_of(root, &path, is_link) {
+            Ok(Some(text)) => text,
+            Ok(None) => continue,
+            Err(failure) => {
+                refusals.push(failure);
+                continue;
+            }
         };
         scanned += 1;
         for (index, line) in text.lines().enumerate() {
-            for reason in check_line(line, &who) {
+            for reason in check_line(line)
+                .into_iter()
+                .chain(check_identity(line, who))
+            {
                 refusals.push(format!("{path}:{}: {reason}", index + 1));
             }
         }
     }
+    (scanned, refusals)
+}
+
+#[test]
+fn public_files_hold_no_local_details() {
+    let who = Identity::from_environment();
+    if who.names.is_empty() {
+        eprintln!(
+            "NOTE: no usable host or user name found in the environment; the machine-name check did NOT run."
+        );
+        assert!(
+            std::env::var_os("GD_REQUIRE_IDENTITY").is_none(),
+            "GD_REQUIRE_IDENTITY is set but no host or user name could be read"
+        );
+    }
+    let (scanned, refusals) = scan_tree(&repo_root(), &who);
     assert!(
         scanned > 50,
         "only {scanned} text files scanned; is the file list wrong?"
@@ -288,69 +393,134 @@ fn public_files_hold_no_local_details() {
     );
 }
 
+/// `count` numbers, `first`, `first + step`, ..., as one space-separated string.
+fn numbers(count: u32, first: u32, step: u32) -> String {
+    (0..count)
+        .map(|i| (first + i * step).to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[test]
 fn the_checker_catches_planted_details_and_leaves_ordinary_text_alone() {
-    let who = Identity::from_names(vec![
-        "Zorbax-Mac.local".to_string(),
-        "zorbaxuser".to_string(),
-        "root".to_string(),
-    ]);
-    assert_eq!(who.names, ["zorbax-mac.local", "zorbax-mac", "zorbaxuser"]);
+    // Synthetic identities, built from pieces so nothing here is a real name.
+    let host = ["zor", "bax-mac.local"].concat();
+    let login = ["zor", "baxuser"].concat();
+    let short_host = ["zor", "bax-mac"].concat();
+    let who = Identity::from_names(&[host.clone(), login.clone(), "root".to_string()]);
+    assert_eq!(who.names, [host.clone(), short_host.clone(), login.clone()]);
 
-    let caught = [
-        format!("see {}alice/Projects/x", concat!("/Us", "ers/")),
-        format!("cd {}bob/node", concat!("/ho", "me/")),
-        format!(
-            "export DIR={}T/tmp.abc",
-            concat!("/private/", "var/folders/zz/0123")
-        ),
-        format!(
-            "{}-501/-Users-x/scratch",
-            concat!("/private/", "tmp/claude")
-        ),
-        format!("{}7/x", concat!("/var/", "folders/")),
-        "groups: 20 12 61 79 80 81 98 33 100".to_string(),
-        "uid 501 20 12 61 79 80 81 98 33 100 204 250".to_string(),
-        "written on Zorbax-Mac".to_string(),
-        "host zorbax-mac.local up".to_string(),
-        "user=zorbaxuser".to_string(),
-        "contact max@private-mail.org please".to_string(),
-        "mail: Someone.Else+tag@gmail.com.".to_string(),
+    let alias = ["al", "ice"].concat();
+    let slash = ["/", "Users", "/"].concat();
+    let home = ["/", "home", "/"].concat();
+    let root = ["/", "root", "/"].concat();
+    let private = ["/private", "/var/", "folders/"].concat();
+    let mail_host = ["private", "-mail.org"].concat();
+    let win = ["Us", "ers"].concat();
+
+    // Deterministic checks: each must be caught with no identity at all.
+    let planted_deterministic = [
+        format!("see {slash}{alias}/Projects/x"),
+        format!("cd {home}{alias}/node"),
+        format!("ls {root}{alias}/keys"),
+        format!("cd ~/{alias}/keys"),
+        format!("open ~/{}/x", "Projects"),
+        format!("C:\\{win}\\{alias}\\Desktop"),
+        format!("\"C:\\\\{win}\\\\{alias}\\\\x\""),
+        format!("https://h/?p=%2F{win}%2F{alias}%2Fx"),
+        format!("https://h/?p=%2f{}%2f{alias}", win.to_lowercase()),
+        format!("file://localhost{slash}{alias}/x"),
+        format!("file://{slash}{alias}/x"),
+        format!("export DIR={private}zz/0123"),
+        format!("{}-501/x", ["/private", "/tmp/claude"].concat()),
+        format!("{}7/x", ["/var/", "folders/"].concat()),
+        format!("groups: {}", numbers(9, 20, 7)),
+        format!("`{}`", numbers(8, 12, 3)),
+        format!("[{}]", numbers(10, 100, 1111)),
+        format!("\"{}\"", numbers(8, 65500, 4)),
+        format!("contact {alias}@{mail_host} please"),
+        format!("mail: Some.Else+tag@{}.", ["gm", "ail.com"].concat()),
+        format!("\"{alias}\"@{mail_host}"),
+        format!("{{\"to\": \"{alias}@{mail_host}\"}}"),
     ];
-    for line in &caught {
+    for line in &planted_deterministic {
         assert!(
-            !check_line(line, &who).is_empty(),
+            !check_line(line).is_empty(),
             "planted detail not caught: {line}"
         );
     }
 
-    let fine = [
-        "TLS 1.3 only",
-        "tested on Bitcoin Core 0.17.0 0.18.4 0.19.2 0.20.1 0.21.2 22.0 23.0 24.0",
-        "versions 1 2 3 4 5 6 7",
-        "run 20 12 61 79 80 81 98 only seven then text",
-        "docs/home/index.html and crates/ho/me",
-        concat!(
-            "volume /ho",
-            "me/bitcoin/.bitcoin and ",
-            "/ho",
-            "me/user and ",
-            "/ho",
-            "me/admin"
-        ),
-        concat!("placeholder /Us", "ers/<name>/ and ", "/ho", "me/<you>"),
-        "email you@yourwallet.com or jack@greensock.com",
-        "git@github.com:MaxSikorski/guard-dog.git",
-        "12345+max@users.noreply.github.com and a@example.com",
-        "import @types/node and serde@1.0.200",
-        "the Zorbaxes are not Zorbax-Macs, nor ZORBAXUSERS",
-        "root runs this as root",
+    // Identity checks.
+    let planted_identity = [
+        format!("written on {short_host}"),
+        format!("host {host} up"),
+        format!("user={login}"),
+        format!("/tmp/backup{login}2/report"),
+        format!("C:\\data\\{login}-old\\x"),
+        format!("{} up", host.to_uppercase()),
     ];
-    for line in fine {
+    for line in &planted_identity {
         assert!(
-            check_line(line, &who).is_empty(),
-            "ordinary text refused: {line}: {:?}",
-            check_line(line, &who)
+            !check_identity(line, &who).is_empty(),
+            "planted name not caught: {line}"
         );
     }
+
+    // Ordinary text: neither check may flag it.
+    let fine = [
+        "TLS 1.3 only".to_string(),
+        "tested on Bitcoin Core 0.17.0 0.18.4 0.19.2 0.20.1 0.21.2 22.0 23.0 24.0".to_string(),
+        format!("seven numbers: {}", numbers(7, 20, 7)),
+        format!("eight but dotted: {}", numbers(8, 0, 1).replace(' ', ".0 ")),
+        format!("six digits are not groups: {}", numbers(9, 100_000, 1)),
+        "docs/home/index.html and crates/ho/me and a/root/b".to_string(),
+        "mkdir -p /srv/data and ~ and ~/ alone".to_string(),
+        format!("volume {home}bitcoin/.bitcoin and {home}user and {home}admin and {home}umbrel/x"),
+        format!("tmpfs {root}.lnd and {root}.lightning"),
+        format!("placeholder {slash}<name>/ and {home}<you>/ and C:\\{win}\\%USERNAME%\\x"),
+        "email you@yourwallet.com or jack@greensock.com".to_string(),
+        "git@github.com:Owner/repo.git".to_string(),
+        "12345+x@users.noreply.github.com and a@example.com".to_string(),
+        "import @types/node and serde@1.0.200 and @media".to_string(),
+        format!(
+            "the {}es are not {short_host}s, nor {}S",
+            &login[..6],
+            login.to_uppercase()
+        ),
+        "root runs this as root".to_string(),
+        format!("let bytes = [{}];", numbers(12, 0, 1).replace(' ', ", ")),
+    ];
+    for line in &fine {
+        assert!(
+            check_line(line).is_empty(),
+            "ordinary text refused: {line}: {:?}",
+            check_line(line)
+        );
+        assert!(
+            check_identity(line, &who).is_empty(),
+            "ordinary text names the machine: {line}"
+        );
+    }
+}
+
+#[test]
+fn symlink_targets_are_text_and_only_a_missing_file_is_forgiven() {
+    let dir = std::env::temp_dir().join(format!("gd-public-files-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap_or_default();
+    let target = ["/Us", "ers/x/y"].concat();
+    #[cfg(unix)]
+    {
+        assert!(std::os::unix::fs::symlink(&target, dir.join("link")).is_ok());
+        let text = text_of(&dir, "link", true);
+        assert_eq!(text, Ok(Some(target.clone())));
+        assert!(!check_line(&target).is_empty());
+        // Listed by git but deleted in the working tree: skipped.
+        assert_eq!(text_of(&dir, "gone", true), Ok(None));
+        assert_eq!(text_of(&dir, "gone", false), Ok(None));
+        // A directory where a file should be is a real read error: it names the path.
+        assert!(std::fs::create_dir_all(dir.join("sub")).is_ok());
+        let failure = text_of(&dir, "sub", false);
+        assert!(failure.is_err_and(|m| m.starts_with("sub:")));
+    }
+    std::fs::remove_dir_all(&dir).unwrap_or_default();
 }
