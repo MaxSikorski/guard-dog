@@ -1,0 +1,236 @@
+# Judge B: what a correct advisory matcher must say, for every recorded setup
+# and every advisory in advisories/corpus/. Written by hand BEFORE any matcher
+# exists. Never loosen an entry to make the matcher pass without a written
+# reason in the PR and in this file's history.
+#
+# Format and rules: fixtures/README.md ("Expected advisory matches").
+# Checked by crates/gd-core/tests/expected_matches.rs.
+#
+# Each [[expect]] judges the version and the conditions separately:
+#   version   = "in-range" | "out-of-range" | "unknown" | "not-applicable"
+#               (not-applicable: the product isn't in the setup at all)
+#   condition = "met" | "not-met" | "unknown"
+#               (the advisory's required database_specific conditions,
+#               service_running included)
+# and the result follows from the two:
+#   not-affected      the version is out of range, or a required condition is not met
+#   affected          the version is in range and every required condition is met
+#   possibly-affected anything else; `question` says what would settle it
+# review = "max" marks a pair where the call was not clear-cut.
+
+format = 1
+
+[[setup]]
+id = "lab-regtest"
+platform = "docker"
+chain = "regtest"
+exposure = "none"
+description = "Guard Dog's regtest lab: five 64-bit containers on one internal Docker network with no route out, no published ports and all data on tmpfs."
+versions_from = "lab/compose.yml"
+
+[[setup.service]]
+id = "bitcoin-core"
+version = "32.1"
+
+[[setup.service]]
+id = "core-lightning"
+version = "26.06.9"
+
+[[setup.service]]
+id = "lnd"
+version = "0.21.6-beta"
+
+[[setup.service]]
+id = "nutshell"
+version = "0.21.0"
+
+[[setup.service]]
+id = "strfry"
+version = "1.1.2-148-g4cd3cf6"
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "CVE-2024-3094"
+result = "possibly-affected"
+version = "unknown"
+condition = "unknown"
+reason = "Affected is xz 5.6.0 to 5.6.1 (package_installed xz-utils or liblzma, required); the lab records no package versions for its five images, so neither check can be done."
+question = "Which xz-utils or liblzma version, if any, is installed in each of the five lab images?"
+review = "max"
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "CVE-2024-35202"
+result = "not-affected"
+version = "out-of-range"
+condition = "met"
+reason = "Bitcoin Core 32.1 is not below the fix 25.0 (range 0 to fixed 25.0)."
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "CVE-2024-38359"
+result = "not-affected"
+version = "out-of-range"
+condition = "met"
+reason = "LND 0.21.6-beta is not below the fix 0.17.0-beta (SEMVER range 0 to fixed 0.17.0-beta)."
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "CVE-2024-49379"
+result = "not-affected"
+version = "not-applicable"
+condition = "not-met"
+reason = "Required service_running umbrelos is not met: the lab runs no umbrelOS."
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "CVE-2024-52911"
+result = "not-affected"
+version = "out-of-range"
+condition = "met"
+reason = "Bitcoin Core 32.1 is outside the range introduced 0.14.0 to fixed 29.0."
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "CVE-2024-52922"
+result = "not-affected"
+version = "out-of-range"
+condition = "met"
+reason = "Bitcoin Core 32.1 is not below the fix 25.1 (range 0 to fixed 25.1)."
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "CVE-2025-46598"
+result = "not-affected"
+version = "out-of-range"
+condition = "met"
+reason = "Bitcoin Core 32.1 is not below the fix 30.0 (range 0 to fixed 30.0)."
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "CVE-2025-62859"
+result = "not-affected"
+version = "out-of-range"
+condition = "met"
+reason = "Bitcoin Core 32.1 is not below the fix 29.2 (range 0 to fixed 29.2; 30.0 also carries the fix)."
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "CVE-2025-62861"
+result = "not-affected"
+version = "out-of-range"
+condition = "met"
+reason = "Bitcoin Core 32.1 is in neither range 28.0 to fixed 28.3 nor 29.0 to fixed 29.2. The lab does build block templates (generatetoaddress), so only the version clears it."
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "CVE-2026-117346"
+result = "not-affected"
+version = "in-range"
+condition = "not-met"
+reason = "32.1 is the fix on the 64-bit entry (32.0 to fixed 32.1), but it falls in the unfixed entry (0, no fix) that applies only to 32-bit systems or blocks on FAT32; the lab runs 64-bit images (amd64, arm64) with blocks on tmpfs, so that platform condition is not met."
+review = "max"
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "CVE-2026-117349"
+result = "not-affected"
+version = "out-of-range"
+condition = "met"
+reason = "Bitcoin Core 32.1 is exactly the fix of the 32 line (range 32.0 to fixed 32.1), so it is out of range."
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "CVE-2026-119757"
+result = "not-affected"
+version = "not-applicable"
+condition = "not-met"
+reason = "Required service_running btcpay-server is not met: the lab runs no BTCPay Server."
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "GHSA-wj92-jhwh-85j5"
+result = "not-affected"
+version = "not-applicable"
+condition = "not-met"
+reason = "Required service_running rtl and backend eclair are not met: the lab runs neither RTL nor Eclair."
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "PYSEC-2025-89"
+result = "not-affected"
+version = "out-of-range"
+condition = "met"
+reason = "The lab's mint is Nutshell (PyPI package cashu) 0.21.0, not below the fix 0.18.0 (range 0 to fixed 0.18.0)."
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "x_alby-hub-2026-09-internet-exposed-takeover"
+result = "not-affected"
+version = "not-applicable"
+condition = "not-met"
+reason = "Required service_running alby-hub and port 8080 exposed to the internet are both not met: no Alby Hub, and the lab network has no route out."
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "x_btcpay-2026-v2.4.7-85-security-findings"
+result = "not-affected"
+version = "not-applicable"
+condition = "not-met"
+reason = "Required service_running btcpay-server is not met: the lab runs no BTCPay Server."
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "x_cln-2026-v26.06.8-unspecified-vulnerabilities"
+result = "not-affected"
+version = "out-of-range"
+condition = "met"
+reason = "Core Lightning 26.06.9 is not below the fix 26.06.8 (range 0 to fixed 26.06.8)."
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "x_coinkite-2026-07-coldcard-weak-seed-entropy"
+result = "not-affected"
+version = "not-applicable"
+condition = "not-met"
+reason = "Required hardware_model Mk2, Mk3, Mk4, Mk5 or Q is not met: the lab has no Coldcard and no hardware wallet."
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "x_fedimint-2026-v0.11.2-security-fixes"
+result = "not-affected"
+version = "not-applicable"
+condition = "not-met"
+reason = "Required service_running fedimintd is not met: the lab runs no Fedimint guardian or gateway."
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "x_lightning-labs-2026-lnd-brontide-write-allocation-oom"
+result = "not-affected"
+version = "out-of-range"
+condition = "met"
+reason = "LND 0.21.6-beta is not below the fix 0.20.0-beta (SEMVER range 0 to fixed 0.20.0-beta)."
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "x_lightning-labs-2026-lnd-dns-bootstrap-type-assertion-panic"
+result = "not-affected"
+version = "out-of-range"
+condition = "not-met"
+reason = "LND 0.21.6-beta is in neither range 0 to fixed 0.20.2-beta nor 0.21.0-beta to fixed 0.21.1-beta; separately, a regtest node has no DNS seeds, so the bootstrap condition is not met either."
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "x_lightning-labs-2026-lnd-gossip-validation-barrier-stall"
+result = "not-affected"
+version = "out-of-range"
+condition = "met"
+reason = "LND 0.21.6-beta is outside the range introduced 0.19.0-beta to fixed 0.20.1-beta."
+
+[[expect]]
+setup = "lab-regtest"
+advisory = "x_lightning-labs-2026-lnd-tapd-cancelled-htlc-marked-settled"
+result = "not-affected"
+version = "out-of-range"
+condition = "not-met"
+reason = "LND 0.21.6-beta is outside 0.18.4-beta to fixed 0.19.0-beta, and the required tapd invoice interceptor (or any HtlcModifier client) is not met: the lab runs no tapd or Lightning Terminal."
