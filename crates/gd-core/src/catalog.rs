@@ -427,6 +427,20 @@ pub struct Pattern {
     majors: Option<BTreeSet<u64>>,
 }
 
+/// Is the whole text `^\d+(\.\d+)*$`: digit runs separated by single dots?
+fn is_bare_numeric(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .split('.')
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Is this first path segment a registry host? It holds `.` or `:`, or is
+/// `localhost`. The one rule for validation and normalisation.
+fn is_registry_segment(first: &str) -> bool {
+    first.contains(['.', ':']) || first == "localhost"
+}
+
 /// The leading number of a plain version: two or more dot-separated runs of
 /// ASCII digits and nothing else (`28.1.0`). A number too big for `u64` reads as
 /// `u64::MAX`. `None` when the token is not a plain version.
@@ -515,10 +529,15 @@ impl Pattern {
                 // regex is spelled.
                 // A reply is bare when the version group is the whole reply: an
                 // empty set then refuses it, and leaves prefixed replies alone.
-                let bare = caps
-                    .name("version")
-                    .is_some_and(|m| m.start() == 0 && m.end() == text.len());
-                match (&self.majors, plain_major(v)) {
+                // "Bare" is decided from the whole reply (`^\d+(\.\d+)*$`), never
+                // from the capture: a regex may drop a leading component.
+                let bare = is_bare_numeric(text);
+                let major = if bare {
+                    plain_major(text)
+                } else {
+                    plain_major(v)
+                };
+                match (&self.majors, major) {
                     (Some(set), Some(m)) if !set.contains(&m) && (bare || !set.is_empty()) => {
                         ReplyMatch::Unreadable(Unreadable::NotAVersion)
                     }
@@ -2425,9 +2444,7 @@ fn image_reference_ok(image: &str) -> bool {
     }
     let segs: Vec<&str> = name.split('/').collect();
     let (domain, components) = match segs.split_first() {
-        Some((first, rest))
-            if !rest.is_empty() && (first.contains(['.', ':']) || *first == "localhost") =>
-        {
+        Some((first, rest)) if !rest.is_empty() && is_registry_segment(first) => {
             (Some(*first), rest)
         }
         _ => (None, segs.as_slice()),
@@ -2526,7 +2543,7 @@ pub fn normalise_image(image: &str) -> String {
     };
     let mut parts: Vec<&str> = name.split('/').collect();
     let first = parts.first().copied().unwrap_or("");
-    let has_registry = parts.len() > 1 && (first.contains('.') || first.contains(':'));
+    let has_registry = parts.len() > 1 && is_registry_segment(first);
     if has_registry {
         if (first == "index.docker.io" || first == "registry-1.docker.io")
             && let Some(p) = parts.first_mut()
@@ -2912,10 +2929,13 @@ fn parse_recognize(
         } else {
             None
         };
-        if ports.iter().any(|q| q.port == port && q.proto == proto) {
+        if let Some(first) = ports
+            .iter()
+            .position(|q| q.port == port && q.proto == proto)
+        {
             return Err(format!(
-                "recognize.ports lists {port}/{} twice",
-                proto.as_str()
+                "recognize.ports items {first} and {} list the same port and protocol",
+                ports.len()
             ));
         }
         ports.push(Port {
@@ -3187,9 +3207,7 @@ fn parse_version(
             .and_then(|r| r.strip_suffix(")$"))
             .is_some_and(|b| !b.contains(['(', ')', '|']) && !b.starts_with(['?', '*', '+', '{']));
         if !body_ok {
-            return Err(format!(
-                "version.regex reads plain versions of major {m}, so it must pin that major as written: ^(?P<version>{m}\\. then no group or alternation, then )$"
-            ));
+            return Err("version.regex reads plain versions of one major, so it must pin that major as written: ^(?P<version>MAJOR\\. then no group or alternation, then )$".into());
         }
     }
     // At match time too: a plain version read must have one of these majors, so no
@@ -3402,13 +3420,17 @@ fn check_unique(entries: &BTreeMap<String, Entry>) -> R<()> {
 /// Images are disjoint across entries; ports are too, except the exact SHARED_PORTS.
 fn check_disjoint(entries: &BTreeMap<String, Entry>) -> R<()> {
     let mut images: Vec<(&str, &str, usize)> = Vec::new();
-    let mut ports: BTreeMap<(u16, Proto), BTreeSet<&str>> = BTreeMap::new();
+    let mut ports: BTreeMap<(u16, Proto), BTreeMap<&str, usize>> = BTreeMap::new();
     for (id, e) in entries {
         for (n, i) in e.recognize.images.iter().enumerate() {
             images.push((i, id, n));
         }
-        for p in &e.recognize.ports {
-            ports.entry((p.port, p.proto)).or_default().insert(id);
+        for (n, p) in e.recognize.ports.iter().enumerate() {
+            ports
+                .entry((p.port, p.proto))
+                .or_default()
+                .entry(id)
+                .or_insert(n);
         }
     }
     if images.len() > MAX_ENTRIES {
@@ -3433,18 +3455,21 @@ fn check_disjoint(entries: &BTreeMap<String, Entry>) -> R<()> {
             }
         }
     }
-    let mut per_port: BTreeMap<u16, BTreeSet<&str>> = BTreeMap::new();
+    let mut per_port: BTreeMap<u16, BTreeMap<&str, usize>> = BTreeMap::new();
     for ((port, _), ids) in &ports {
-        per_port
-            .entry(*port)
-            .or_default()
-            .extend(ids.iter().copied());
+        let m = per_port.entry(*port).or_default();
+        for (id, n) in ids {
+            m.entry(id).or_insert(*n);
+        }
     }
-    for (port, ids) in &per_port {
+    // Entries and item indexes are shown, never the port number.
+    for ids in per_port.values() {
         if ids.len() > CATALOG_MAX_PRODUCTS_PER_PORT {
+            let shown: Vec<String> = ids.iter().map(|(i, n)| format!("`{i}` item {n}")).collect();
             return Err(format!(
-                "port {port} is in recognize.ports of {} entries, more than CATALOG_MAX_PRODUCTS_PER_PORT ({CATALOG_MAX_PRODUCTS_PER_PORT})",
-                ids.len()
+                "recognize.ports: one port is listed by {} entries ({}), more than CATALOG_MAX_PRODUCTS_PER_PORT ({CATALOG_MAX_PRODUCTS_PER_PORT})",
+                ids.len(),
+                shown.join(", ")
             ));
         }
     }
@@ -3453,9 +3478,10 @@ fn check_disjoint(entries: &BTreeMap<String, Entry>) -> R<()> {
             .iter()
             .any(|(p, pr, _)| p == port && *pr == proto.as_str());
         if ids.len() > 1 && !allowed {
+            let shown: Vec<String> = ids.iter().map(|(i, n)| format!("`{i}` item {n}")).collect();
             return Err(format!(
-                "port {port}/{} is listed by more than one entry {ids:?} and is not in SHARED_PORTS",
-                proto.as_str()
+                "recognize.ports: one port and protocol is listed by more than one entry ({}) and is not in SHARED_PORTS",
+                shown.join(", ")
             ));
         }
     }

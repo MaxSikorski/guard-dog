@@ -41,7 +41,7 @@ source_kind = "advisory"
 osv_packages = ["GIT https://github.com/fedimint/fedimint"]
 ghsa = false
 feeds = []
-blind_spot = "Security fixes are in release notes with no CVE. The gateway and the guardian share one repo, one release train and one OSV package. Whether the project has GitHub advisories or a feed a machine can read has not been checked."
+blind_spot = "Security fixes are in release notes with no CVE. The gateway and the guardian share one repo (one release train) and one OSV package. Whether the project has GitHub advisories or a feed a machine can read has not been checked."
 
 [signing]
 level = "unknown"
@@ -64,7 +64,7 @@ todo = [
   "ports: no port is named in the repo",
   "recorded-reply: 0.10.1 and 0.11.2 are the advisory's fixed versions, not recorded replies; record a real label value",
   "version.regex: pinned to the 0.x series the advisory shows (a bare x.y.z pattern is refused); older releases are not read; widen it when a real label is recorded",
-  "sibling: fedimintd has the same repo, release train and OSV package; the two can only be told apart by binary name, which the version fields cannot express",
+  "sibling: fedimintd has the same repo, release train and OSV package. The two can only be told apart by binary name, which the version fields cannot express",
   "advisories.ghsa: unverified; check the project's Security tab",
   "signing: level, method and keys are not recorded",
   "platform_map: app ids on UmbrelOS, StartOS, RaspiBlitz and myNode",

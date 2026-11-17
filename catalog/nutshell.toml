@@ -67,7 +67,7 @@ sources = [
   "https://github.com/cashubtc/nutshell/blob/main/cashu/mint/router.py",
 ]
 todo = [
-  "licence: the lab comment says MIT; confirm against the upstream LICENSE file",
+  "licence: the lab comment says (MIT); confirm against the upstream LICENSE file",
   "website: none recorded in the repo",
   "upstream.repo: assumed from the Docker Hub namespace cashubtc and the spike notes; confirm",
   "ports: 3338 is as set in lab/compose.yml; confirm it is the upstream default",

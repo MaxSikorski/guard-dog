@@ -79,7 +79,7 @@ sources = [
 ]
 todo = [
   "version.tls.server_name: LND's own certificate always lists localhost; the lab adds `lnd` with --tlsextradomain=lnd, and other platforms may add other names",
-  "licence: the lab comment says MIT; confirm against the upstream LICENSE file",
+  "licence: the lab comment says (MIT); confirm against the upstream LICENSE file",
   "upstream.security_policy: not found in the repo records",
   "ports: 9735 and 10009 are as set in lab/compose.yml; confirm they are upstream defaults; REST (8080) is not enabled in the lab (--norest) and is left out until a source is checked",
   "units: RaspiBlitz and myNode systemd unit names",

@@ -6,8 +6,8 @@
 //! Every embedded text is checked at compile time (`catalog_scan.rs`): a file
 //! with a credential-shaped line fails `cargo build` itself, before a binary
 //! exists, whether or not anyone runs the tests. The build error is a fixed
-//! message that never shows file text; the line number comes from
-//! `cargo test -p gd-core --test catalog`.
+//! message that never shows file text; to find the line, read the rules in
+//! `catalog/README.md` and look at the comments and long values of that file.
 
 /// One catalog file as (id, text), with the compile-time credential check.
 macro_rules! entry {
@@ -18,7 +18,7 @@ macro_rules! entry {
             concat!(
                 "catalog/",
                 $id,
-                ".toml has a credential-shaped line; run `cargo test -p gd-core --test catalog` for the line number"
+                ".toml has a credential-shaped line; see the compile-time guard rules in catalog/README.md"
             )
         );
         ($id, TEXT)

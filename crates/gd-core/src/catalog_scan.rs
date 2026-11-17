@@ -5,10 +5,13 @@
 //! indexing, no slicing, so the compiler itself can run it. A catalog file with
 //! a credential-shaped line stops the build before a binary exists, whether or
 //! not anyone runs the tests. The fixed message of the build error never shows
-//! file text; the line number comes from `cargo test -p gd-core --test catalog`.
+//! file text; the line number is reported when an entry is loaded (the catalog test).
 //!
-//! Two views of the text are scanned. The *line view* is the file as written.
-//! The *comment stream* is everything after the first `#` on each line, all
+//! Four scans run over the text. The *line view* is the file as written. The
+//! *continuation view* joins a line ending in `\` to the next, as TOML does for a
+//! multi-line string. The seed rule W2 also runs over the whole text, with
+//! whitespace, newlines, `\`, quotes, brackets, braces, `:`, `,` and `;` as
+//! separators. The *comment stream* is everything after the first `#` on each line, all
 //! lines joined in file order, so a secret split across several comment lines
 //! (with value lines or blank lines between them) is one token again. The
 //! rules (T0 to T13, W1, W2) are in `catalog/README.md` and in the spec this
@@ -336,10 +339,27 @@ const fn seed_words(v: &[u8]) -> usize {
 }
 
 const fn is_sep(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b',' | b';' | 0)
+    matches!(
+        c,
+        b' ' | b'\t'
+            | b'\n'
+            | b'\r'
+            | b'\\'
+            | b','
+            | b';'
+            | b'"'
+            | b'\''
+            | b'['
+            | b']'
+            | b'{'
+            | b'}'
+            | b':'
+            | 0
+    )
 }
 
-/// W2 on the comment stream (JOIN is the byte 0): 12 or more seed-like tokens
+/// W2 on a stream (JOIN is the byte 0; whitespace, newlines, `\`, quotes, brackets,
+/// braces, `:`, `,` and `;` all separate tokens): 12 or more seed-like tokens
 /// in a row, skipping numbering tokens. The end of the 12th, or `NONE`.
 const fn seed_stream(v: &[u8]) -> usize {
     let mut i = 0;
@@ -375,6 +395,41 @@ const fn seed_stream(v: &[u8]) -> usize {
         }
     }
     NONE
+}
+
+/// The continuation view: `t` with every line-ending `\` (only blanks after it,
+/// then a newline) removed together with the newline and all whitespace that
+/// follows, which is how TOML joins a multi-line string. Writes it to `c` and
+/// returns its length, and the byte of `t` that view byte `target` came from
+/// (`NONE` when `target` is out of range).
+const fn build_view(t: &[u8], c: &mut [u8], target: usize) -> (usize, usize) {
+    let mut i = 0;
+    let mut n = 0;
+    let mut orig = NONE;
+    while i < t.len() {
+        let Some(b) = at(t, i) else { break };
+        if b == b'\\' {
+            let mut k = i + 1;
+            while matches!(at(t, k), Some(b' ' | b'\t' | b'\r')) {
+                k += 1;
+            }
+            if matches!(at(t, k), Some(b'\n')) {
+                k += 1;
+                while matches!(at(t, k), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+                    k += 1;
+                }
+                i = k;
+                continue;
+            }
+        }
+        set(c, n, b);
+        if n == target {
+            orig = i;
+        }
+        n += 1;
+        i += 1;
+    }
+    (n, orig)
 }
 
 /// T0: the first byte below 0x20 other than tab, newline and carriage return.
@@ -498,6 +553,19 @@ pub const fn credential_line(text: &str) -> usize {
     let end = min(min(control_byte(t), scan_tokens(t, 64)), seed_words(t));
     if end != NONE {
         best = earliest(best, line_of(t, end));
+    }
+    // The seed stream over the whole text, not only comments.
+    let end = seed_stream(t);
+    if end != NONE {
+        best = earliest(best, line_of(t, end));
+    }
+    // The continuation view: a value joined by line-ending backslashes.
+    let mut c = [0u8; MAX_SCAN_BYTES];
+    let (lc, _) = build_view(t, &mut c, NONE);
+    let end = scan_tokens(head(&c, lc), 64);
+    if end != NONE {
+        let (_, orig) = build_view(t, &mut c, end);
+        best = earliest(best, line_of(t, if orig == NONE { 0 } else { orig }));
     }
     // The comment stream, with and without JOIN bytes.
     let mut a = [0u8; MAX_SCAN_BYTES];

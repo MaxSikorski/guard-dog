@@ -71,7 +71,7 @@ sources = [
   "https://github.com/bitcoin/bitcoin/blob/master/SECURITY.md",
 ]
 todo = [
-  "licence: the lab comment says MIT; confirm against the upstream COPYING file",
+  "licence: the lab comment says (MIT); confirm against the upstream COPYING file",
   "images: docker.io/bitcoin/bitcoin is an unofficial build by a third party (willcl-ark/bitcoin-core-docker); Bitcoin Core publishes no image",
   "release_feed: confirm Core publishes through GitHub releases (the release assets list is empty)",
   "ports: the real RPC and P2P defaults are not recorded in the repo; 18443 is the lab's regtest RPC port only, so no version.endpoint_port is set",

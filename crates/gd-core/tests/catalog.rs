@@ -104,7 +104,7 @@ fn entry_files() -> Vec<(String, String)> {
         if let Some(stem) = name.strip_suffix(".toml") {
             files.push((stem.to_string(), fs::read_to_string(&path).unwrap()));
         } else {
-            assert_eq!(name, "README.md", "unexpected file in catalog/: {name}");
+            assert!(name == "README.md", "unexpected file in catalog/");
         }
     }
     files.sort();
@@ -161,7 +161,7 @@ fn strings<'a>(t: &'a Table, k: &str, ctx: &str) -> Result<Vec<&'a str>, String>
 fn validate(stem: &str, text: &str) -> Result<Table, String> {
     let entry = catalog::load(stem, text).map_err(|e| e.to_string())?;
     check_files(&entry).map_err(|e| format!("{stem}: {e}"))?;
-    toml::from_str(text).map_err(|e| format!("{stem}: not valid TOML: {e}"))
+    toml::from_str(text).map_err(|_| format!("{stem}: not valid TOML"))
 }
 
 /// The trusted inventory: every regular file under `fixtures/` and `advisories/`,
@@ -385,15 +385,13 @@ fn check_recordings(entries: &BTreeMap<String, Table>, rec: &[Recorded]) -> Resu
             return Err(format!("lab service `{svc}` has no recorded reply"));
         }
     }
-    for r in rec {
-        let id = lab_id(&r.service).ok_or(format!(
-            "recorded service `{}` is not in LAB_SERVICES",
-            r.service
-        ))?;
+    // Manifest text is never printed: only the recording's index and trusted slugs.
+    for (n, r) in rec.iter().enumerate() {
+        let id =
+            lab_id(&r.service).ok_or(format!("recording {n} is not a service in LAB_SERVICES"))?;
         if id != r.id {
             return Err(format!(
-                "recorded `{}` is id `{}` but LAB_SERVICES says `{id}`",
-                r.service, r.id
+                "recording {n} ({id}): its id differs from what LAB_SERVICES says"
             ));
         }
         let entry = entries
@@ -404,8 +402,7 @@ fn check_recordings(entries: &BTreeMap<String, Table>, rec: &[Recorded]) -> Resu
         if got.as_deref() != Some(r.version.as_str()) {
             // Never the reply or the versions: only the service and the id.
             return Err(format!(
-                "{id}: the regex on the {} reply does not give the version the lab recorded",
-                r.service
+                "{id}: the regex on the recording {n} reply does not give the version the lab recorded"
             ));
         }
     }
@@ -436,9 +433,15 @@ fn check_negative(entries: &BTreeMap<String, Table>, rec: &[Recorded]) -> Result
         for (what, re) in &patterns {
             for (k, (owner, raw)) in raws.iter().enumerate() {
                 if owner != id && re.matches(&u(raw)).is_read() {
-                    // The index into the replies, never the reply text.
+                    // The index into the replies, never the reply text; the owner only
+                    // when it is a catalogued entry.
+                    let who = if entries.contains_key(owner) {
+                        format!("{owner}'s")
+                    } else {
+                        "another service's".to_string()
+                    };
                     return Err(format!(
-                        "{id}: the {what} also matches {owner}'s reply (recording {k})"
+                        "{id}: the {what} also matches {who} reply (recording {k})"
                     ));
                 }
             }
@@ -488,31 +491,35 @@ fn check_lab(
     let mapped: BTreeSet<&str> = LAB_SERVICES.iter().map(|(s, _)| *s).collect();
     if services != mapped {
         return Err(format!(
-            "LAB_SERVICES {mapped:?} differs from the services in {LAB_FILE} {services:?}"
+            "LAB_SERVICES differs from the services in {LAB_FILE}"
         ));
     }
-    for (svc, id, repo) in lab {
+    for (n, (svc, id, repo)) in lab.iter().enumerate() {
         if lab_id(svc) != Some(id.as_str()) {
             return Err(format!(
-                "lab service `{svc}` has label id `{id}`, LAB_SERVICES says {:?}",
-                lab_id(svc)
+                "lab item {n}: its label id differs from what LAB_SERVICES says"
             ));
         }
         let entry = entries
             .get(id)
-            .ok_or(format!("lab service `{svc}` ({id}) has no catalog entry"))?;
-        let images = strings(table(entry, "recognize", id)?, "images", id)?;
-        let hit = images.iter().any(|p| match p.strip_suffix('*') {
-            Some(prefix) => repo.starts_with(prefix),
-            None => p == repo,
-        });
-        if !hit {
+            .ok_or(format!("lab item {n} has no catalog entry"))?;
+        // The production matcher decides, on the lab's own image reference, for a
+        // container: no prefix test of the judge's own.
+        let loaded = loaded_entry(id, entry)?;
+        let key = EndpointKey::for_container("docker", &u("lab")).unwrap();
+        if !matches!(loaded.identify_image(&key, &u(repo)), ReplyMatch::Read(_)) {
             return Err(format!(
-                "{id}: lab image {repo} matches none of recognize.images {images:?}"
+                "{id}: lab item {n}: the image matches none of recognize.images"
             ));
         }
     }
     Ok(())
+}
+
+/// The loaded entry for a (possibly edited) table: written back as TOML and loaded.
+fn loaded_entry(id: &str, entry: &Table) -> Result<Entry, String> {
+    let text = toml::to_string(entry).map_err(|_| format!("{id}: the entry cannot be written"))?;
+    catalog::load(id, &text).map_err(|_| format!("{id}: the entry does not load"))
 }
 
 /// A port whose source is the lab file must appear in that service's definition,
@@ -536,7 +543,7 @@ fn check_lab_ports(
                 || texts.values().any(|t| t.contains(&other));
             if !found {
                 return Err(format!(
-                    "{id}: port {port} is not in {LAB_FILE} for `{svc}`"
+                    "{id}: a port the entry takes from {LAB_FILE} is not in it for `{svc}`"
                 ));
             }
         }
@@ -595,9 +602,9 @@ fn check_products(
         .collect();
     let not_yet_set: BTreeSet<&str> = not_yet.iter().copied().collect();
     if extra != not_yet_set {
-        return Err(format!(
-            "entries that are not Judge B products {extra:?} differ from NOT_YET_IN_JUDGE_B {not_yet_set:?}"
-        ));
+        return Err(
+            "the entries that are not Judge B products differ from NOT_YET_IN_JUDGE_B".into(),
+        );
     }
     let gap: BTreeSet<&str> = products
         .keys()
@@ -606,9 +613,7 @@ fn check_products(
         .collect();
     let listed: BTreeSet<&str> = uncatalogued.iter().copied().collect();
     if gap != listed {
-        return Err(format!(
-            "products with no entry {gap:?} differ from UNCATALOGUED {listed:?} (the list may only shrink, by editing it)"
-        ));
+        return Err("the products with no entry differ from UNCATALOGUED (the list may only shrink, by editing it)".into());
     }
     for (id, (aliases, packages)) in products {
         let Some(e) = entries.get(id) else { continue };
@@ -621,14 +626,10 @@ fn check_products(
             .map(String::from)
             .collect();
         if &got_aliases != aliases {
-            return Err(format!(
-                "{id}: aliases differ from Judge B's: {got_aliases:?} vs {aliases:?}"
-            ));
+            return Err(format!("{id}: aliases differ from Judge B's"));
         }
         if &got_pkgs != packages {
-            return Err(format!(
-                "{id}: osv_packages differ from Judge B's: {got_pkgs:?} vs {packages:?}"
-            ));
+            return Err(format!("{id}: osv_packages differ from Judge B's"));
         }
     }
     Ok(())
@@ -2482,7 +2483,7 @@ fn hardening_cases_are_refused() {
     refused(
         "strfry",
         &replaced(&fry, "[version]\n", &ports.replace("PROTO", "tcp")),
-        "twice",
+        "list the same port",
     );
     validate(
         "strfry",
@@ -3364,15 +3365,17 @@ fn probes_read_the_recorded_replies() {
             .expect(&missing);
         let proof = match e.identify_endpoint(&ep(), std::slice::from_ref(&probe_reply)) {
             ReplyMatch::Read(i) => i,
-            other => panic!("{id}: {other:?}"),
+            _ => panic!("{id}: the recorded probe reply did not identify the product"),
         };
-        assert_eq!(
-            proof.read_version(&ep(), &version_reply),
-            VersionMatch::Read(expected),
-            "{id}"
+        assert!(
+            proof.read_version(&ep(), &version_reply) == VersionMatch::Read(expected),
+            "{id}: the recorded version reply did not give the expected version"
         );
         let manifest = rec.iter().find(|r| r.id == *id).unwrap();
-        assert_eq!(manifest.version, *expected, "{id}");
+        assert!(
+            manifest.version == *expected,
+            "{id}: the manifest version differs from the expected one"
+        );
     }
     // A catalog field the recorded reply does not have fails the lookup.
     let changed = replaced(&text_of("lnd"), "field = \"state\"", "field = \"status\"");
@@ -3904,6 +3907,13 @@ fn credential_samples() -> Vec<(&'static str, String)> {
         ("T13 rune", format!("k = \"{}\"", "xY7".repeat(14))),
         ("W1 seed", format!("k = \"{words}\"")),
         ("W2 seed in a comment", format!("# {}", WORDS.join(", "))),
+        (
+            "W2 JSON seed array",
+            format!(
+                "x = '{{\"cipher_seed_mnemonic\":[{}]}}'",
+                WORDS.map(|w| format!("\"{w}\"")).join(",")
+            ),
+        ),
     ]
 }
 
@@ -4301,9 +4311,205 @@ fn judge_messages_never_print_reply_text() {
         version: "x".into(),
     }];
     let e = check_negative(&entries, &rec).unwrap_err();
+    assert!(e.contains("lnd") && e.contains("recording 0"), "{e}");
     assert!(
-        e.contains("lnd") && e.contains("other") && e.contains("recording 0"),
+        !e.contains("qzxmark") && e.contains("another service"),
         "{e}"
     );
-    assert!(!e.contains("qzxmark"), "{e}");
+}
+
+#[test]
+fn seeds_in_arrays_and_split_values_are_refused() {
+    // Codex r5 HIGH, Opus r5 L1 and L2: the seed rule runs over the whole text, and a
+    // line-ending backslash joins a value back together before the token rules run.
+    let lnd = text_of("lnd");
+    let quoted: Vec<String> = WORDS.iter().map(|w| format!("\"{w}\"")).collect();
+    let json = format!("{{\"cipher_seed_mnemonic\":[{}]}}", quoted.join(","));
+    let multi = format!(
+        "licence = \"\"\"\n{}\n{}\n{}\"\"\"\n",
+        WORDS[..4].join(" "),
+        WORDS[4..8].join(" "),
+        WORDS[8..].join(" ")
+    );
+    let continued_mac = format!(
+        "summary = \"\"\"\\\n  AgE{}\\\n  {}\"\"\"\n",
+        "a".repeat(15),
+        "a".repeat(15)
+    );
+    let continued_hex = format!(
+        "summary = \"\"\"\\\n  {}\\\n  {}\"\"\"\n",
+        "0a".repeat(16),
+        "1b".repeat(16)
+    );
+    let array_value = format!("summary = '[{}]'\n", quoted.join(","));
+    let braces = format!("summary = \"{{{}}}\"\n", WORDS.join(";"));
+    for (what, text) in [
+        ("a JSON seed in a comment", format!("# {json}\n")),
+        ("a seed array in a value", array_value),
+        ("a seed over the lines of a string", multi),
+        ("a macaroon over a continuation", continued_mac),
+        ("hex over a continuation", continued_hex),
+        ("a seed in braces", braces),
+    ] {
+        assert!(
+            catalog::raw_credential_line(&format!("format = 1\n{text}")) != 0,
+            "{what}: not found by the const scan"
+        );
+        let e = catalog::load("lnd", &format!("{lnd}{text}"));
+        let shown = e
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(shown.contains("has a secret shape"), "{what}: {shown}");
+        assert!(!shown.contains("abandon"), "{what}: a word leaked");
+    }
+    // A plain wrapped sentence or an ordinary continuation is still fine.
+    for clean in [
+        "summary = \"\"\"\\\n  one two\\\n  three\"\"\"\n",
+        "# note: the list is [\"a\", \"b\"] and {x: y}\n",
+    ] {
+        assert_eq!(catalog::raw_credential_line(clean), 0, "{clean}");
+    }
+}
+
+#[test]
+fn a_partial_capture_cannot_make_a_bare_reply_readable() {
+    // Codex r5 MED 1: `7.26.06.9` is a bare numeric reply whatever the regex captured,
+    // so its major (7) must be permitted; Core Lightning permits none.
+    let cln = text_of("core-lightning");
+    let shipped_regex = r"regex = '^v(?P<version>\d+\.\d+(?:\.\d+)?(?:rc\d+)?(?:-\d+-g[0-9a-f]{7,})?(?:-modded)?)$'";
+    let text = replaced(
+        &cln,
+        shipped_regex,
+        r"regex = '^(?:v|7\.)(?P<version>26\.06\.9)$'",
+    );
+    let e = catalog::load("core-lightning", &text).unwrap();
+    let proof = match e.identify_image(&ck(), &u("elementsproject/lightningd:v26.06.9")) {
+        ReplyMatch::Read(i) => i,
+        _ => panic!("the image did not identify Core Lightning"),
+    };
+    assert!(proof.read_version(&ck(), &u("v26.06.9")) == VersionMatch::Read("26.06.9"));
+    assert!(
+        !matches!(
+            proof.read_version(&ck(), &u("7.26.06.9")),
+            VersionMatch::Read(_)
+        ),
+        "a bare reply with an unpermitted major was read"
+    );
+    // The same at the pattern level, with an empty set.
+    let re = Pattern::new_version(r"^(?:v|7\.)(?P<version>26\.06\.9)$").unwrap();
+    assert!(matches!(
+        re.version(&u("v26.06.9")),
+        ReplyMatch::Read("26.06.9")
+    ));
+}
+
+#[test]
+fn registry_detection_is_one_rule() {
+    // Codex r5 MED 2: `localhost` is a registry for validation and for normalising.
+    assert_eq!(normalise_image("localhost/widget"), "localhost/widget");
+    assert_eq!(
+        normalise_image("docker.io/localhost/widget"),
+        "docker.io/localhost/widget"
+    );
+    let lnd = text_of("lnd");
+    let images = "images = [\"docker.io/lightninglabs/lnd\"]";
+    let hub = replaced(&lnd, images, "images = [\"docker.io/localhost/widget\"]");
+    let e = catalog::load("lnd", &hub).unwrap();
+    assert!(matches!(
+        e.identify_image(&ck(), &u("docker.io/localhost/widget")),
+        ReplyMatch::Read(_)
+    ));
+    assert!(matches!(
+        e.identify_image(&ck(), &u("localhost/widget")),
+        ReplyMatch::NoMatch
+    ));
+    let local = replaced(&lnd, images, "images = [\"localhost/widget\"]");
+    let e = catalog::load("lnd", &local).unwrap();
+    assert!(matches!(
+        e.identify_image(&ck(), &u("localhost/widget")),
+        ReplyMatch::Read(_)
+    ));
+    assert!(matches!(
+        e.identify_image(&ck(), &u("docker.io/localhost/widget")),
+        ReplyMatch::NoMatch
+    ));
+}
+
+#[test]
+fn numeric_values_never_appear_in_errors() {
+    // Codex r5 MED 3: ports and derived majors are values too. An unusual port and major
+    // are the markers; the errors name the entry, the field and item indexes only.
+    let marker = "45678";
+    let port = |what: &str| {
+        format!(
+            "[[recognize.ports]]\nport = {marker}\nproto = \"tcp\"\nwhat = \"{what}\"\nexposure = \"lan\"\n\n"
+        )
+    };
+    let shown = |e: &catalog::CatalogError| [e.to_string(), format!("{e:?}")];
+    // The same port twice in one entry.
+    let fry = text_of("strfry");
+    let twice = replaced(
+        &fry,
+        "[version]\n",
+        &format!("{}{}[version]\n", port("a"), port("b")),
+    );
+    let e = catalog::load("strfry", &twice).unwrap_err();
+    for s in shown(&e) {
+        assert!(!s.contains(marker), "a port leaked: {s}");
+    }
+    assert!(e.to_string().contains("list the same port"), "{e}");
+    // The same port in two entries, and in more entries than one port may carry.
+    let nut = text_of("nutshell");
+    let a = replaced(&fry, "[version]\n", &format!("{}[version]\n", port("a")));
+    let b = replaced(&nut, "[version]\n", &format!("{}[version]\n", port("b")));
+    let e = catalog::load_all(&[("strfry", &a), ("nutshell", &b)]).unwrap_err();
+    for s in shown(&e) {
+        assert!(!s.contains(marker), "a port leaked: {s}");
+    }
+    assert!(e.to_string().contains("recognize.ports"), "{e}");
+    // A one-major regex that is not pinned as written: the major is derived, not printed.
+    let tapd = text_of("tapd");
+    let rx = "regex = '^(?P<version>0\\.\\d+\\.\\d+)$'";
+    let ex = "raw = \"0.5.1\"\nversion = \"0.5.1\"";
+    let t = replaced(
+        &tapd,
+        rx,
+        "regex = '^(?P<version>(?:45678)\\.\\d+\\.\\d+)$'",
+    );
+    let t = replaced(&t, ex, "raw = \"45678.5.1\"\nversion = \"45678.5.1\"");
+    let e = catalog::load("tapd", &t).unwrap_err();
+    for s in shown(&e) {
+        assert!(!s.contains(marker), "a major leaked: {s}");
+    }
+    assert!(e.to_string().contains("must pin that major"), "{e}");
+}
+
+#[test]
+fn the_lab_judge_uses_the_production_image_matcher() {
+    // Codex r5 M5: a wildcard never reaches across a `/`, so a lab image one level
+    // deeper than the pattern is not identified, however the strings begin.
+    let mut good = entries();
+    let lab = lab_services();
+    check_lab(&good, &lab).unwrap();
+    good.get_mut("lnd")
+        .unwrap()
+        .get_mut("recognize")
+        .unwrap()
+        .as_table_mut()
+        .unwrap()
+        .insert(
+            "images".into(),
+            Value::Array(vec![Value::String("docker.io/lightninglabs/lnd-*".into())]),
+        );
+    let mut deeper = lab.clone();
+    let at = deeper.iter().position(|(_, id, _)| id == "lnd").unwrap();
+    deeper[at].2 = "docker.io/lightninglabs/lnd-test/other".into();
+    let e = check_lab(&good, &deeper).unwrap_err();
+    assert!(e.contains("matches none of recognize.images"), "{e}");
+    assert!(!e.contains("lightninglabs"), "{e}");
+    // One level, as the wildcard allows, is identified.
+    deeper[at].2 = "docker.io/lightninglabs/lnd-test".into();
+    check_lab(&good, &deeper).unwrap();
 }
