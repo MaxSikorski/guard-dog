@@ -43,7 +43,7 @@ jobs:
   lab:
     name: lab
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30 # toolchain 10, build 10, lab 5, check 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -70,6 +70,7 @@ jobs:
           rustup toolchain install --no-self-update
           rustup show active-toolchain
       - name: Build the two-back-ends check
+        timeout-minutes: 10
         run: cargo test --locked -p gd-core --test two_backends --no-run
       - name: Start the lab cold, fund and open a channel (5 minute limit)
         run: |
@@ -96,8 +97,9 @@ jobs:
           echo "${line} (wall clock ${elapsed}s)" >> "${GITHUB_STEP_SUMMARY}"
       - name: The fixtures and the live lab must show Judge B the same setup
         # GD_LAB=1: a missing manifest fails instead of skipping. The output is
-        # public: it names facts and versions from a small character set, and
-        # never echoes other manifest text.
+        # public. It prints only fixed messages, [a-z0-9-] ids, versions in
+        # up.sh's plain() characters, and on a read error the manifest path with
+        # the OS error; never other manifest text and never lab/.data/creds.
         env:
           GD_LAB: "1"
         timeout-minutes: 5
