@@ -42,6 +42,7 @@ pub struct SetupView {
     states: BTreeMap<InstanceRef, Observed<ServiceState>>,
     packages: BTreeMap<PackageKey, Observed<PackageState>>,
     settings: BTreeMap<SettingId, Observed<SettingValue>>,
+    unidentified: BTreeSet<CatalogId>,
 }
 
 fn not_checked<T>() -> Observed<T> {
@@ -49,29 +50,47 @@ fn not_checked<T>() -> Observed<T> {
 }
 
 impl SetupView {
+    /// True when some unrecognised endpoint lists `product` as what it might
+    /// be. A product can be `Running` through one fact and still have a second,
+    /// unidentified instance, so a matcher asks this too before saying
+    /// "not affected".
+    pub fn may_be_unidentified(&self, product: &CatalogId) -> bool {
+        self.unidentified.contains(product)
+    }
+
+    /// The answer for something no fact mentioned: `Unidentified` if an
+    /// unrecognised endpoint might be it, else `NotChecked`.
+    fn missing<T>(&self, product: &CatalogId) -> Observed<T> {
+        if self.may_be_unidentified(product) {
+            Observed::Unknown(Unknown::new(UnknownReason::Unidentified))
+        } else {
+            not_checked()
+        }
+    }
+
     /// A service's version, by the best detection method.
     pub fn service(&self, instance: &InstanceRef) -> Observed<PlainVersion> {
-        self.services
-            .get(instance)
-            .cloned()
-            .unwrap_or_else(not_checked)
+        match self.services.get(instance) {
+            Some(found) => found.clone(),
+            None => self.missing(&instance.catalog),
+        }
     }
 
     /// Running, stopped or not found. `service_running` is read from here,
     /// never from "a fact exists".
     pub fn state(&self, instance: &InstanceRef) -> Observed<ServiceState> {
-        self.states
-            .get(instance)
-            .cloned()
-            .unwrap_or_else(not_checked)
+        match self.states.get(instance) {
+            Some(found) => found.clone(),
+            None => self.missing(&instance.catalog),
+        }
     }
 
     /// A package inside a service: absent, or installed.
     pub fn package(&self, inside: &InstanceRef, product: &CatalogId) -> Observed<PackageState> {
-        self.packages
-            .get(&(inside.clone(), product.clone()))
-            .cloned()
-            .unwrap_or_else(not_checked)
+        match self.packages.get(&(inside.clone(), product.clone())) {
+            Some(found) => found.clone(),
+            None => self.missing(product),
+        }
     }
 
     /// A setting (`option_enabled`, `feature_enabled`, ...): what the facts say,
@@ -216,6 +235,7 @@ pub fn setup_view(facts: &[Fact]) -> SetupView {
     blind_spots.sort();
     blind_spots.dedup();
 
+    let unidentified = candidates;
     SetupView {
         source: fold(&sources, |a, b| a == b),
         states: states
@@ -224,7 +244,7 @@ pub fn setup_view(facts: &[Fact]) -> SetupView {
                 let folded = fold(&found, |a, b| a == b);
                 (
                     instance.clone(),
-                    unless_candidate(folded, candidates.contains(&instance.catalog)),
+                    unless_candidate(folded, unidentified.contains(&instance.catalog)),
                 )
             })
             .collect(),
@@ -239,11 +259,12 @@ pub fn setup_view(facts: &[Fact]) -> SetupView {
         block_storage: fold(&storage, fs_agree),
         exposure: fold_exposure(&reaches),
         services,
+        unidentified: unidentified.clone(),
         packages: packages
             .into_iter()
             .map(|(key, found)| {
                 let folded = fold_package(&found);
-                let maybe = candidates.contains(&key.1);
+                let maybe = unidentified.contains(&key.1);
                 (key, unless_candidate_package(folded, maybe))
             })
             .collect(),
@@ -251,21 +272,25 @@ pub fn setup_view(facts: &[Fact]) -> SetupView {
 }
 
 /// Something unrecognised might be this product, so its absence can't be
-/// claimed: a not-found service becomes `Unknown(NotChecked)`.
+/// claimed: a not-found service becomes `Unknown(Unidentified)`.
 fn unless_candidate(state: Observed<ServiceState>, maybe_it: bool) -> Observed<ServiceState> {
     match state {
-        Observed::Seen(ServiceState::NotFound(_)) if maybe_it => not_checked(),
+        Observed::Seen(ServiceState::NotFound(_)) if maybe_it => {
+            Observed::Unknown(Unknown::new(UnknownReason::Unidentified))
+        }
         other => other,
     }
 }
 
-/// The same for a package: not-installed becomes `Unknown(NotChecked)`.
+/// The same for a package: not-installed becomes `Unknown(Unidentified)`.
 fn unless_candidate_package(
     state: Observed<PackageState>,
     maybe_it: bool,
 ) -> Observed<PackageState> {
     match state {
-        Observed::Seen(PackageState::NotInstalled) if maybe_it => not_checked(),
+        Observed::Seen(PackageState::NotInstalled) if maybe_it => {
+            Observed::Unknown(Unknown::new(UnknownReason::Unidentified))
+        }
         other => other,
     }
 }
@@ -288,14 +313,19 @@ fn fs_agree(a: &FsKind, b: &FsKind) -> bool {
     }
 }
 
-/// The reason to report when nothing was seen: the smallest, so the choice
+/// The reason to report when nothing was seen: a `Conflict` if any input had
+/// one (it must not hide behind a gap), else the smallest, so the choice
 /// doesn't depend on order. No detail text is carried over.
 fn no_value<T>(unknowns: &[UnknownReason]) -> Observed<T> {
-    let reason = unknowns
-        .iter()
-        .min()
-        .copied()
-        .unwrap_or(UnknownReason::NotChecked);
+    let reason = if unknowns.contains(&UnknownReason::Conflict) {
+        UnknownReason::Conflict
+    } else {
+        unknowns
+            .iter()
+            .min()
+            .copied()
+            .unwrap_or(UnknownReason::NotChecked)
+    };
     Observed::Unknown(Unknown::new(reason))
 }
 

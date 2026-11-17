@@ -68,7 +68,12 @@ Phase 1.1 PR 1 (`crates/gd-core/src/fact.rs`, `view.rs`). Property tests use the
 | `a_missing_key_is_unknown_never_none` | same | The view's accessors answer `Unknown(NotChecked)` for a service, state, package or setting no fact mentioned. |
 | `a_claim_on_the_wrong_subject_is_a_blind_spot_not_silence` | same | A Service or Package claim on a non-service subject raises `WrongSubject`, counted once. |
 | `containers_not_checked_is_a_blind_spot_that_round_trips` | same | `Area::Containers` and `BlindSpotKind::NotChecked` make a blind spot that survives JSON. |
-| `an_unrecognized_service_on_a_known_port_blocks_a_claim_of_absence` | same | An unrecognised endpoint whose candidates include `lnd` turns lnd's not-found state and not-installed package into Unknown; other candidates leave them alone. |
+| `an_unrecognized_service_on_a_known_port_blocks_a_claim_of_absence` | same | An unrecognised endpoint whose candidates include `lnd` turns lnd's not-found state and not-installed package into `Unknown(Unidentified)`; other candidates leave them alone. |
+| `a_running_product_can_still_have_an_unidentified_second_instance` | same | A product that is Running stays Running, and `may_be_unidentified` still says an unrecognised endpoint might be another instance of it. |
+| `no_service_fact_plus_an_unidentified_endpoint_is_unknown_not_absent`, `without_an_unidentified_endpoint_nothing_is_flagged` | same | With no service fact, an endpoint naming the product makes its state and package `Unknown(Unidentified)`; with none, it stays `NotChecked` and `may_be_unidentified` is false. |
+| `a_conflict_is_reported_over_not_checked` | same | A conflict and a gap fold to `Unknown(Conflict)` in either order. |
+| `candidates_are_deduplicated_and_a_long_list_is_refused_on_load` | same | Repeated candidate ids collapse; 32 load and 33 are refused. |
+| `wire_structs_refuse_unknown_keys` | same | An extra key in a fact, an Unknown, evidence or a complete search is refused on load. |
 | `settings_are_read_from_facts_and_gaps_are_unknown` | same | Setting facts reach the view; disagreement is a conflict, a gap is Unknown, a never-asked key is `Unknown(NotChecked)`. |
 | `versions_cannot_look_like_options_or_paths` | same | A version must start with a letter or digit (also after `!`): `.`, `..`, `-x`, `0!-x` are refused. |
 | `outside_text_and_unknown_detail_are_capped_and_checked_on_load`, `every_outside_text_slot_is_capped` | same | Names, labels, OS and detail text are cut at construction (1 KiB, detail 256 B) and refused over the cap on load. |

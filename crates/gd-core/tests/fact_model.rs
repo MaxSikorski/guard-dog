@@ -686,10 +686,10 @@ fn an_unrecognized_service_on_a_known_port_blocks_a_claim_of_absence() {
         unrecognized(vec![cat("lnd")]),
     ];
     let v = setup_view(&facts);
-    assert!(is_unknown(&v.state(&lnd), UnknownReason::NotChecked));
+    assert!(is_unknown(&v.state(&lnd), UnknownReason::Unidentified));
     assert!(is_unknown(
         &v.package(&key.0, &key.1),
-        UnknownReason::NotChecked
+        UnknownReason::Unidentified
     ));
     // Candidates for another product leave lnd's absence alone.
     let other = setup_view(&[
@@ -1950,9 +1950,8 @@ fn a_conflict_is_reported_over_not_checked() {
 
 #[test]
 fn candidates_are_deduplicated_and_a_long_list_is_refused_on_load() {
-    let many = |n: usize| -> Vec<CatalogId> {
-        (0..n).map(|i| cat(&format!("product-{i}"))).collect()
-    };
+    let many =
+        |n: usize| -> Vec<CatalogId> { (0..n).map(|i| cat(&format!("product-{i}"))).collect() };
     // Repeats collapse; the same id forty times is one candidate.
     let repeated = unrecognized_on(vec![cat("lnd"); 40]);
     let back: Fact = serde_json::from_str(&json(&repeated)).unwrap();
@@ -1970,10 +1969,7 @@ fn candidates_are_deduplicated_and_a_long_list_is_refused_on_load() {
 
 #[test]
 fn wire_structs_refuse_unknown_keys() {
-    let f = fact(
-        Subject::Host,
-        Claim::Chain(unknown(UnknownReason::NoReply)),
-    );
+    let f = fact(Subject::Host, Claim::Chain(unknown(UnknownReason::NoReply)));
     let mut top: Json = serde_json::from_str(&json(&f)).unwrap();
     assert!(serde_json::from_value::<Fact>(top.clone()).is_ok());
     top["extra"] = Json::Bool(true);

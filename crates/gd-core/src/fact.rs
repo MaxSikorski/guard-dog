@@ -35,6 +35,9 @@ pub const FACT_MODEL: u32 = 1;
 
 /// At most this many pieces of evidence per fact; more are dropped.
 pub const MAX_EVIDENCE: usize = 4;
+
+/// Most catalog products one unrecognised endpoint may list as what it might be.
+pub const MAX_CANDIDATES: usize = 32;
 /// Evidence text is cut to this many bytes, marker included.
 pub const MAX_EVIDENCE_BYTES: usize = 1024;
 /// Detail text on an [`Unknown`] is cut to this many bytes, marker included.
@@ -220,6 +223,7 @@ pub struct Unknown {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UnknownWire {
     reason: UnknownReason,
     detail: Option<Untrusted<String>>,
@@ -303,6 +307,8 @@ pub enum UnknownReason {
     NotSupportedHere,
     /// Looked for, but the sensor did not cover everything, so "not there" can't be said.
     IncompleteCoverage,
+    /// Something answered that might be this product but was not identified.
+    Unidentified,
 }
 
 /// What a service, host or setup is, and how sure the sensor was.
@@ -398,6 +404,7 @@ pub struct CompleteSearch {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CompleteSearchWire {
     coverage: Coverage,
     evidence: Evidence,
@@ -682,6 +689,7 @@ pub struct Evidence {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EvidenceWire {
     call: CallId,
     raw: Untrusted<String>,
@@ -723,7 +731,7 @@ impl Evidence {
 /// One thing a sensor saw. Build it with [`Fact::new`], which keeps at most
 /// [`MAX_EVIDENCE`] pieces of evidence.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(from = "FactWire")]
+#[serde(try_from = "FactWire")]
 pub struct Fact {
     pub subject: Subject,
     pub claim: Claim,
@@ -733,6 +741,7 @@ pub struct Fact {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FactWire {
     subject: Subject,
     claim: Claim,
@@ -741,27 +750,39 @@ struct FactWire {
     evidence: Vec<Evidence>,
 }
 
-impl From<FactWire> for Fact {
-    fn from(wire: FactWire) -> Self {
-        Fact::new(
+impl TryFrom<FactWire> for Fact {
+    type Error = FactError;
+    fn try_from(wire: FactWire) -> Result<Self, FactError> {
+        if let Claim::Unrecognized { candidates, .. } = &wire.claim
+            && candidates.len() > MAX_CANDIDATES
+        {
+            return Err(FactError {
+                what: "candidates list (over 32 products)",
+            });
+        }
+        Ok(Fact::new(
             wire.subject,
             wire.claim,
             wire.source,
             wire.observed_at,
             wire.evidence,
-        )
+        ))
     }
 }
 
 impl Fact {
     pub fn new(
         subject: Subject,
-        claim: Claim,
+        mut claim: Claim,
         source: Source,
         observed_at: Timestamp,
         mut evidence: Vec<Evidence>,
     ) -> Self {
         evidence.truncate(MAX_EVIDENCE);
+        if let Claim::Unrecognized { candidates, .. } = &mut claim {
+            candidates.sort();
+            candidates.dedup();
+        }
         Self {
             subject,
             claim,
