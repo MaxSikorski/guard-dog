@@ -207,7 +207,8 @@ impl VersionScheme for GoTag {
     }
 
     /// An installed Go value carries no build metadata except Go's own
-    /// `+incompatible`: a canonical Go module version has none, and any other
+    /// `+incompatible` (only from major 2 up; on major 0 or 1 it is refused like
+    /// any other metadata): a canonical Go module version has none, and any other
     /// (`+dirty`, `+build5`) says nothing about which code was built, so it is
     /// refused, never ordered as the clean tag.
     ///
@@ -217,7 +218,8 @@ impl VersionScheme for GoTag {
     /// through `parse` and keep ordinary rules.)
     fn candidate(&self, raw: &str) -> Result<Candidate<SemVerVersion>, VersionError> {
         let v = self.parse(raw)?;
-        if !v.build.is_empty() && v.build.as_slice() != ["incompatible"] {
+        let incompatible_ok = !matches!(v.major.to_string().as_str(), "0" | "1");
+        if !v.build.is_empty() && !(incompatible_ok && v.build.as_slice() == ["incompatible"]) {
             return Err(VersionError::Malformed);
         }
         if is_describe_form(&v.pre) {
