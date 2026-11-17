@@ -301,3 +301,32 @@ pub fn base32_decode_loose(chars: &[u8]) -> Vec<u8> {
         .collect();
     ungroup(&values, 5)
 }
+
+/// Whether `c` is a character of the Bitcoin base58 alphabet.
+pub fn is_base58(c: u8) -> bool {
+    BASE58.contains(&c)
+}
+
+/// Decodes base58 text into bytes (leading `1`s are zero bytes), without checking any checksum.
+/// A character outside the alphabet gives `None`. For reading keys re-encoded under another
+/// version, whose bytes are what matters.
+pub fn base58_decode(text: &[u8]) -> Option<Vec<u8>> {
+    // Big-endian base-256 digits of the number, built one base58 digit at a time.
+    let mut bytes: Vec<u8> = Vec::new();
+    for &c in text {
+        let mut carry = u32::try_from(BASE58.iter().position(|a| *a == c)?).ok()?;
+        for b in bytes.iter_mut().rev() {
+            carry += u32::from(*b) * 58;
+            *b = u8::try_from(carry & 0xff).ok()?;
+            carry >>= 8;
+        }
+        while carry > 0 {
+            bytes.insert(0, u8::try_from(carry & 0xff).ok()?);
+            carry >>= 8;
+        }
+    }
+    let zeros = text.iter().take_while(|&&c| c == b'1').count();
+    let mut out = vec![0u8; zeros];
+    out.extend(bytes);
+    Some(out)
+}

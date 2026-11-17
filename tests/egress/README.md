@@ -3,10 +3,10 @@
 Judge C asks one question: does anything leave the box that shouldn't, including planted canary secrets? It reads three independent records of everything Guard Dog tried to send (the resolver log, the recorder's decrypted flows and the raw packet capture), and fails the run on any of these:
 
 - **F1** a destination that isn't in `allowlist.toml`, judged by the network layer: the name asked for, the address reached, the port and the TLS server name must all agree with one entry
-- **F2** a planted canary or a secret-shaped value in any form from the decoding set, anywhere a byte could have gone
+- **F2** a planted canary or a secret-shaped value in any form from the decoding set, in anything the resolver log, the recorder or the packet capture holds
 - **F3** a packet that fell into the black hole, meaning it tried to leave without being redirected
 - **F4** a missing control: a judge that sees nothing must never pass
-- **F5** a capture that can't be read, is incomplete, or disagrees with itself (gaps, lost tails, kernel drops, fragments, extra or cut-off DNS records, compressed bodies, a missing end marker)
+- **F5** a capture that can't be read, is incomplete, or disagrees with itself (gaps, lost tails, kernel drops, fragments, extra or cut-off DNS records, bodies that cannot be decoded, a missing end marker)
 
 The checker is `crates/gd-egress` (`gd-egress check`). Today it runs on **synthetic** captures only; the live lab that makes real captures arrives in the next piece.
 
@@ -16,7 +16,8 @@ The checker is `crates/gd-egress` (`gd-egress check`). Today it runs on **synthe
 
 - every flow went to an allowlisted destination
 - the capture is complete from a proven start (the control before the workload) to a proven end (the control after it, and the recorder's end marker)
-- no planted canary appears in any captured byte under the decoding set, up to two nested layers: raw, lowercase, percent-escaped, JSON-escaped, separator-stripped and letters-only views; base64, base64url, base32 and hex tokens decoded two layers deep; IP addresses matched by value in dotted, integer, `0x` and IPv6 forms
+- no planted canary appears in the recorder's decrypted requests, the resolver log, the packet capture's loopback traffic to the recorder and resolver, or anything sent to the black hole, under the decoding set, up to two nested layers: raw, lowercase, percent-escaped, JSON-escaped, separator-stripped and letters-only views; base64, base64url, base32 and hex tokens decoded two layers deep; key bytes written as source code (`[0x8d, 0x1f]`, `[141, 31]`, `\x8d\x1f`); an xpub re-encoded under another version (zpub, ypub, tpub, ...); seed words as their first four letters and as SeedQR digits; IP addresses matched by value in dotted, integer, `0x`, IPv6, dashed host-name (`ip-198-51-100-7`), reverse-lookup (`in-addr.arpa`, `ip6.arpa`) and IPv4-mapped forms
+- request bodies are decoded first: gzip, zlib, raw deflate and brotli, named by `Content-Encoding`, `Transfer-Encoding` (anything but `chunked` and `identity`), `grpc-encoding` (message by message), a gzip content type, or by the first bytes of the body and of every decoded layer
 
 **Not covered**, and caught or bounded by other layers instead:
 
@@ -24,28 +25,31 @@ The checker is `crates/gd-egress` (`gd-egress check`). Today it runs on **synthe
 - covert timing and size channels
 - secrets inside end-to-end-encrypted payloads to allowed destinations (NIP-44, until Phase 5 gives the judge the test key)
 - encodings outside the decoding set, or nested three or more deep
+- a value deliberately split across successive request paths or headers (a body split across requests is joined; paths and headers are scanned one by one, and joined only in the destination's whole stream)
+- loopback traffic to ports other than the recorder's 8080 and the resolver's 5353 is counted but not scanned: it cannot leave the box
+- whether the recorder logged every client byte the kernel acknowledged (a pipelined request after a `503` with `Connection: close`): the per-connection byte count arrives with the recorder in PR 2
 
 Those are the job of the never-have list and least privilege (threat model section 5), runtime allowlist enforcement (Phase 4.5), the supply-chain checks (`cargo deny`, the 14-day cooldown, `cargo audit`, review of new crates), reproducible builds with signed releases, and the review tiers.
 
-**Compressed request bodies fail the judge** (`undecoded-content-encoding`). Decompression arrives in PR 1b, and is required before `allowlist.toml` gets its first entry.
+**Decoding is bounded, and failing closed.** Decoding stops at 16 MiB of output per body, at 1000 times the size of what is being decoded, and after three layers; any of these is F5 `decode-bound`. A stream that will not decode, bytes left over after it, a coding we do not decode (`zstd`, `compress`, an unknown name) and a body that starts like zstd, xz, bzip2, zip or 7z are F5 `undecoded-content-encoding`. Nothing in either case is a pass. What decoded before a corrupt stream went bad is still scanned; the output a bound cut off is dropped, because the run has failed and scanning a bomb's output is the work it is after. `chunked` is message framing that the recorder has already removed, so it is not a compression. This is required before `allowlist.toml` gets its first entry, and it is now in place.
 
 ## What the lab must supply
 
-Besides the files in the capture directory layout, the judge needs `pcap/tcpdump.log`: tcpdump's own closing summary (`N packets captured`, `N packets received by filter`, `N packets dropped by kernel`). The lab piece (PR 2; its `netns.sh` is not in the repository yet) writes tcpdump's messages to `tcpdump.log`, stops tcpdump with SIGINT, waits for it to exit and keeps that file as `pcap/tcpdump.log`. A missing file, missing lines, any drop, or a packet count that differs from the pcap is F5. The recorder's addon should write a global `seq` number on every `http` and `tcp` event so requests on different connections can be put back in order (without it the line number is used).
+Besides the files in the capture directory layout, the judge needs `pcap/tcpdump.log`: tcpdump's own closing summary (`N packets captured`, `N packets received by filter`, `N packets dropped by kernel`). The lab piece (PR 2; its `netns.sh` is not in the repository yet) writes tcpdump's messages to `tcpdump.log`, stops tcpdump with SIGINT, waits for it to exit and keeps that file as `pcap/tcpdump.log`. A missing file, a missing or repeated count line, any drop, or a packet count that differs from the pcap is F5. The recorder's addon should write a global `seq` number on every `http` and `tcp` event so requests on different connections can be put back in order (without it the line number is used). A request logged after a control request on the control's own connection (keep-alive) must have a larger `seq`, or it is F5 `order`.
 
 ## What is in this folder
 
 | Path | What |
 |---|---|
-| `synthetic/` | 61 expected reports, one per scenario. **Synthetic: built by `crates/gd-egress/tests/support/mod.rs`, never a real capture.** Each was written before the code that makes it pass. |
+| `synthetic/` | 81 expected reports, one per scenario. **Synthetic: built by `crates/gd-egress/tests/support/mod.rs`, never a real capture.** Each was written before the code that makes it pass. |
 | `golden/canaries-seed-1.json` | The canaries made from seed 1 (`canaries.json` format 2, with the raw bytes of each), byte for byte. Pins the generator. |
 | `expected-rules.txt` | The firewall and route dump the sealed box must have. **Provisional** until the lab arrives; the lab piece replaces it with the real, reviewed dump. |
 
 Reports contain no counts, no times and never a canary (those print as `<canary:CLASS>`), so an expected file is the same for every seed.
 
-## The 61 scenarios
+## The 81 scenarios
 
-S01 to S18 are the first set; S19 to S61 each cover one review finding (O = Opus, C = Codex, then the second Codex round).
+S01 to S18 are the first set; S19 to S61 each cover one review finding (O = Opus, C = Codex, then the second Codex round); S62 to S81 cover the third review (Opus) and the decoders.
 
 | # | Scenario | What it proves |
 |---|---|---|
@@ -88,7 +92,7 @@ S01 to S18 are the first set; S19 to S61 each cover one review finding (O = Opus
 | S37 | unanswered-wire-question | A DNS question the resolver never logged (C) |
 | S38 | nsec-as-method | A secret in the HTTP method (C) |
 | S39 | nsec-json-u-escaped | An nsec written as JSON `\u00XX` escapes (C) |
-| S40 | gzip-body | A compressed body fails closed until PR 1b (C) |
+| S40 | gzip-body | An nsec inside a gzip body: found after decoding (C; was F5 until PR 1b) |
 | S41 | dns-txt-additional | A DNS query with an extra record fails closed (C) |
 | S42 | tcp-dns-short-frame | A DNS-over-TCP frame that runs past the stream (C) |
 | S43 | dns-short-header | A DNS datagram shorter than a header (C) |
@@ -110,6 +114,26 @@ S01 to S18 are the first set; S19 to S61 each cover one review finding (O = Opus
 | S59 | ipv4-split-bodies | An IPv4 address split over four requests on two connections |
 | S60 | dns-truncated-opt | A DNS query with a cut-off OPT record: F5 |
 | S61 | dst-ip-redacted | The planted IPv4 as the original destination prints redacted |
+| S62 | deflate-zlib-leak | An nsec inside a zlib (`deflate`) body |
+| S63 | brotli-leak | A gzip stream carrying an nsec inside a brotli body: both layers are decoded |
+| S64 | gzip-clean | A harmless gzip body: PASS, nothing flagged just for being compressed |
+| S65 | gzip-ratio-bomb | 8 MiB of zeros packed under 8 KiB: F5 `decode-bound` |
+| S66 | gzip-three-deep | An nsec under three gzip layers: found |
+| S67 | gzip-four-deep | The same under four: F5 `decode-bound`, never a pass |
+| S68 | gzip-truncated | A gzip body cut in half: F5 `undecoded-content-encoding` |
+| S69 | grpc-gzip-leak | An nsec in a gzip message inside a gRPC frame (`grpc-encoding: gzip`) |
+| S70 | grpc-zstd | `grpc-encoding: zstd`: F5 |
+| S71 | transfer-encoding-gzip | An nsec in a body with `Transfer-Encoding: gzip, chunked` |
+| S72 | content-type-gzip | A gzip body named only by `Content-Type: application/gzip` |
+| S73 | gzip-magic-no-header | A gzip body with no header saying so: found by its first bytes |
+| S74 | zstd-magic | A body that starts like zstd: F5 |
+| S75 | ptr-name-leak | The planted IPv4 as a `in-addr.arpa` PTR lookup: found, and the name prints redacted |
+| S76 | nsec-key-as-byte-list | The nsec's 32 key bytes as a Rust `{:?}` list `[141, 31, ...]` |
+| S77 | zpub-leak | The planted xpub re-encoded as a zpub |
+| S78 | dns-opt-owner-not-root | A DNS query whose OPT record has a name instead of the root: F5 |
+| S79 | dns-client-response | A message with the response bit set sent to the resolver: F5, and its question is still judged |
+| S80 | tcp-no-syn | Data to the recorder with no handshake before it: F5 `tcp-gap` |
+| S81 | keep-alive-before-post-control | A request on the post control's connection logged before it: F5 `order` |
 
 ## Regenerating the golden file
 

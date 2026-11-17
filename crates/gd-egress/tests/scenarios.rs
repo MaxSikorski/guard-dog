@@ -893,8 +893,9 @@ fn a_keep_alive_request_after_the_post_control_must_come_later() {
     let mut later = Scenario::new("later", 1);
     later.post_extra_seq = Some(1_000_000);
     assert_eq!(later.report(), want);
-    // The same request logged with a sequence number at or before the control's own: out of order.
-    for seq in [0, 5] {
+    // The same request logged with a sequence number before the control's (pre control 1, post
+    // control 2) or equal to it: out of order.
+    for seq in [0, 1, 2] {
         let mut early = Scenario::new("early", 1);
         early.post_extra_seq = Some(seq);
         let report = early.report();
