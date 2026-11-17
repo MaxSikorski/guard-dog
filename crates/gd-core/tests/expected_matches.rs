@@ -494,7 +494,9 @@ fn check(
                         "{fwhat}: name `{name}` is not a condition name used in advisories/corpus"
                     ));
                 }
-                let service = f.get("service").map(|_| text(f, "service", &fwhat, &mut errors));
+                let service = f
+                    .get("service")
+                    .map(|_| text(f, "service", &fwhat, &mut errors));
                 if let Some(sv) = service
                     && !services.contains_key(sv)
                 {
