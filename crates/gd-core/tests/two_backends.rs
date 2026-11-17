@@ -744,6 +744,18 @@ fn an_oversized_or_odd_file_is_never_read_whole() {
             .unwrap_err()
             .contains("not a plain file")
     );
+    #[cfg(unix)]
+    {
+        let link = dir.join("link.toml");
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(root().join(RECORDED_FILE), &link).unwrap();
+        assert!(
+            read_manifest_file(&link)
+                .unwrap_err()
+                .contains("not a plain file"),
+            "a symlink is refused, even to a good manifest"
+        );
+    }
 }
 
 #[test]
