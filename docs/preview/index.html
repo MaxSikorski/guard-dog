@@ -451,7 +451,7 @@ const D = {
       source: "Coinkite advisory (July 2026) · curated" },
     { id: "GD-SAMPLE-0003", sev: "high", status: "affected", area: "Bitcoin",
       title: "Bitcoin Core's control port answers on your home network",
-      service: "Bitcoin Core", version: "29.5", fixed: "a settings change", safest: "29.5 (you're on it)", when: "today",
+      service: "Bitcoin Core", version: "30.4", fixed: "a settings change", safest: "30.4 (you're on it)", when: "today",
       why: "Port 8332 (RPC) listens on every address, so any device on your Wi-Fi can try to talk to your node's control interface. Only your own apps on this box need it.",
       evidence: [ "Listener 0.0.0.0:8332 (bitcoind)", "Reachable from 192.0.2.0/24 according to the firewall rules" ],
       playbook: [ "Bind RPC to the local Docker network only (one tap below).", "Keep rpcallowip limited to the apps that need it." ],
@@ -459,7 +459,7 @@ const D = {
       source: "Guard Dog configuration check" },
     { id: "GD-SAMPLE-0004", sev: "medium", status: "possibly", area: "Scout",
       title: "A second Bitcoin node on your network runs a very old version",
-      service: "Bitcoin Core 0.21.1 at 192.0.2.40 (found by Scout)", version: "0.21.1", fixed: "25.0 and newer", safest: "29.5", when: "yesterday",
+      service: "Bitcoin Core 0.21.1 at 192.0.2.40 (found by Scout)", version: "0.21.1", fixed: "25.0 and newer", safest: "30.4", when: "yesterday",
       why: "Scout recognized it from its handshake (\"/Satoshi:0.21.1/\"). Versions older than 25.0 have publicly disclosed vulnerabilities. Is this an old node you forgot about?",
       evidence: [ "Bitcoin P2P version handshake on 192.0.2.40:8333 → /Satoshi:0.21.1/", "Device vendor: Raspberry Pi (from its hardware address)" ],
       question: { text: "Is this device yours?", options: ["Yes, I'll update or retire it", "No, I don't know it"] },
@@ -498,7 +498,7 @@ const D = {
   ],
   inventory: [
     { group: "Bitcoin", icon: "i-btc", items: [
-      { name: "Bitcoin Core", v: "29.5", safest: "29.5", by: "RPC (read-only user)", level: "Understood", sev: "high", note: "RPC open to LAN" } ] },
+      { name: "Bitcoin Core", v: "30.4", safest: "30.4", by: "RPC (read-only user)", level: "Understood", sev: "high", note: "RPC open to LAN" } ] },
     { group: "Lightning", icon: "i-bolt", items: [
       { name: "LND", v: "0.20.2-beta", safest: "0.20.2-beta", by: "read-only macaroon", level: "Understood", sev: "ok" },
       { name: "Alby Hub", v: "1.18.2", safest: "1.24.0", by: "Umbrel app + image", level: "Understood", sev: "critical" },
@@ -541,7 +541,7 @@ const D = {
   },
   devices: [
     { ip: "192.0.2.1", name: "Router", vendor: "Netgear", kind: "router", known: true, ports: "53, 80, 443, 1900", fp: "UPnP on" },
-    { ip: "192.0.2.20", name: "regtest-node.local (this node)", vendor: "Raspberry Pi", kind: "node", known: true, ports: "22, 80, 8080, 8333, 9735", fp: "Umbrel · Bitcoin Core 29.5 · LND" },
+    { ip: "192.0.2.20", name: "regtest-node.local (this node)", vendor: "Raspberry Pi", kind: "node", known: true, ports: "22, 80, 8080, 8333, 9735", fp: "Umbrel · Bitcoin Core 30.4 · LND" },
     { ip: "192.0.2.40", name: "Unknown Bitcoin node", vendor: "Raspberry Pi", kind: "btc", known: false, ports: "22, 8333", fp: "/Satoshi:0.21.1/" },
     { ip: "192.0.2.23", name: "Laptop", vendor: "Apple", kind: "laptop", known: true, ports: "—", fp: "" },
     { ip: "192.0.2.31", name: "Phone", vendor: "Apple", kind: "phone", known: true, ports: "—", fp: "" },
@@ -859,7 +859,7 @@ VIEWS.exposure = () => `
   </div>
   <div class="card" style="margin-top:14px"><h2>Router</h2>
     <div class="grid g3"><div class="stat"><span class="n" style="color:var(--med)">On</span><span class="l">UPnP (apps can open ports)</span></div>
-    <div class="stat"><span class="n">1</span><span class="l">port mapping, to Alby Hub</span></div>
+    <div class="stat"><span class="n">${D.exposure.internet.length}</span><span class="l">${D.exposure.internet.length ? "port mapping, to Alby Hub" : "port mappings"}</span></div>
     <div class="stat"><span class="n">Single</span><span class="l">NAT (no carrier NAT)</span></div></div></div>
   <div style="margin-top:14px">${disclaimer()}</div>`;
 
@@ -1164,7 +1164,7 @@ function wizard(step = 0) {
 }
 
 function runScanAnimation() {
-  const lines = ["Platform: Umbrel 1.4", "Apps: 23 found through the read-only proxy", "Bitcoin Core 29.5 (RPC, read-only user)", "LND 0.20.2-beta · Alby Hub 1.18.2 · ThunderHub",
+  const lines = ["Platform: Umbrel 1.4", "Apps: 23 found through the read-only proxy", "Bitcoin Core 30.4 (RPC, read-only user)", "LND 0.20.2-beta · Alby Hub 1.18.2 · ThunderHub",
     "BTCPay 2.4.7 · Fulcrum 1.12.0 · mempool 3.2.1", "Cashu mint 0.18.0 · Fedimint guardian 0.11.2", "strfry 1.0.4 · Blossom 3.1.0 · nsecBunker", "Listeners, firewall, router (UPnP: on, 1 mapping)",
     "Scout (listening): 10 devices, 2 unknown", "Advisory feed: 1,284 entries, 2 of 3 trusted signers", "Matching… 7 findings"];
   let i = 0;
