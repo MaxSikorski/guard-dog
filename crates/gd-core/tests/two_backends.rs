@@ -44,6 +44,7 @@
 )]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::env::VarError;
 use std::fs;
 use std::io::{ErrorKind, Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -127,6 +128,8 @@ struct Comparison {
     /// Families a judge reads that one back end doesn't record, so they were
     /// not compared. Never silent: the tests pin this list.
     not_compared: Vec<String>,
+    /// How many facts were actually compared, over every judge.
+    compared: usize,
 }
 
 fn family(key: &str) -> &str {
@@ -382,6 +385,7 @@ fn compare(a_name: &str, a: &View, b_name: &str, b: &View) -> Comparison {
             .chain(b.facts.keys())
             .filter(|k| both.contains(&family(k)))
             .collect();
+        out.compared += keys.len();
         for key in keys {
             let j = judge.name;
             match (a.facts.get(key), b.facts.get(key)) {
@@ -412,7 +416,7 @@ const LAB_NOT_COMPARED: [&str; 4] = [
 ];
 
 /// Assert the fixture and a lab back end agree, and that exactly the known
-/// gaps were left out. Returns how many facts were compared.
+/// gaps were left out. Returns how many facts were actually compared.
 fn assert_agree(fixture: &View, lab_name: &str, lab: &View) -> usize {
     let c = compare("fixture", fixture, lab_name, lab);
     assert!(
@@ -426,55 +430,70 @@ fn assert_agree(fixture: &View, lab_name: &str, lab: &View) -> usize {
         .map(|s| s.replace("{lab}", lab_name))
         .collect();
     assert_eq!(c.not_compared, expected, "the families left out changed");
-    lab.facts.len()
+    c.compared
 }
 
 /// The `org.guard-dog.lab.id` label of each service in `lab/compose.yml`, with
 /// its pinned image.
 fn compose_images() -> BTreeMap<String, String> {
     let docs = YamlLoader::load_from_str(&read(COMPOSE_FILE)).unwrap();
-    docs[0]["services"]
-        .as_hash()
-        .unwrap()
-        .values()
-        .map(|svc| {
-            (
-                svc["labels"]["org.guard-dog.lab.id"]
-                    .as_str()
-                    .unwrap()
-                    .to_owned(),
-                svc["image"].as_str().unwrap().to_owned(),
-            )
-        })
-        .collect()
+    let mut out = BTreeMap::new();
+    for svc in docs[0]["services"].as_hash().unwrap().values() {
+        let id = svc["labels"]["org.guard-dog.lab.id"].as_str().unwrap();
+        let image = svc["image"].as_str().unwrap();
+        assert!(
+            out.insert(id.to_owned(), image.to_owned()).is_none(),
+            "two services in {COMPOSE_FILE} share the id {id}"
+        );
+    }
+    out
 }
 
 /// The `# image <ref>` comment `lab/up.sh` writes above each `[[service]]`,
-/// paired with the id that follows it.
-fn manifest_images(text: &str) -> BTreeMap<String, String> {
+/// paired with the id that follows it. Errors never echo the line: it may
+/// hold anything.
+fn manifest_images(text: &str) -> Result<BTreeMap<String, String>, String> {
     let mut out = BTreeMap::new();
     let mut image: Option<&str> = None;
-    for line in text.lines() {
+    for (n, line) in text.lines().enumerate() {
+        let n = n + 1;
         if let Some(rest) = line.strip_prefix("# image ") {
-            image = Some(rest);
+            if image.replace(rest).is_some() {
+                return Err(format!("line {n}: a second # image line before an id"));
+            }
         } else if let Some(rest) = line.strip_prefix("id = \"") {
-            let id = rest.trim_end_matches('"').to_owned();
+            let id = rest
+                .strip_suffix('"')
+                .filter(|id| is_id(id))
+                .ok_or_else(|| format!("line {n}: an id line not in up.sh's shape"))?;
             let img = image
                 .take()
-                .unwrap_or_else(|| panic!("no # image line above {id}"));
-            out.insert(id, img.to_owned());
+                .ok_or_else(|| format!("line {n}: no # image line above service {id}"))?;
+            if out.insert(id.to_owned(), img.to_owned()).is_some() {
+                return Err(format!("line {n}: service {id} listed twice"));
+            }
         }
     }
-    out
+    Ok(out)
+}
+
+/// The images a manifest names must be exactly the ones `lab/compose.yml`
+/// pins, one per service.
+fn assert_images_match(text: &str, what: &str) {
+    let images = manifest_images(text).unwrap_or_else(|e| panic!("{what}: {e}"));
+    assert!(
+        images == compose_images(),
+        "{what} was not recorded from the images {COMPOSE_FILE} pins; re-record it (lab/README.md)"
+    );
 }
 
 /// `GD_LAB`: unset, empty or `0` means no lab is expected; `1` means one is up
 /// and must be compared. Anything else is a mistake, not a quiet skip.
 fn lab_expected() -> bool {
     match std::env::var("GD_LAB").as_deref() {
-        Err(_) | Ok("" | "0") => false,
+        Err(VarError::NotPresent) | Ok("" | "0") => false,
         Ok("1") => true,
-        Ok(_) => panic!("GD_LAB must be unset, 0 or 1"),
+        Ok(_) | Err(VarError::NotUnicode(_)) => panic!("GD_LAB must be unset, 0 or 1"),
     }
 }
 
@@ -529,16 +548,12 @@ fn the_recorded_lab_agrees_with_the_fixtures() {
     );
     // The recording is of today's lab: every pinned service, each under the
     // image `lab/compose.yml` pins now. Re-record after changing an image.
-    assert_eq!(
-        manifest_images(&text),
-        compose_images(),
-        "{RECORDED_FILE} was not recorded from the images {COMPOSE_FILE} pins; re-record it (lab/README.md)"
-    );
+    assert_images_match(&text, RECORDED_FILE);
     let compared = assert_agree(&fixture, "lab-recorded", &recorded);
     assert_eq!(
         compared,
-        3 + compose_images().len(),
-        "chain, platform, source and every service"
+        2 + compose_images().len(),
+        "chain, platform and every service"
     );
 }
 
@@ -556,6 +571,7 @@ fn the_live_lab_agrees_with_the_fixtures() {
             panic!("GD_LAB=1 but {LIVE_FILE} is missing: start the lab with lab/up.sh first")
         });
     let live = parse_manifest(&text).unwrap_or_else(|e| panic!("{LIVE_FILE} is refused: {e}"));
+    assert_images_match(&text, LIVE_FILE);
     let fixture = fixture_view(&read(FIXTURE_FILE), FIXTURE_SETUP);
     let compared = assert_agree(&fixture, "lab-live", &live);
     notice(&format!(
@@ -576,10 +592,9 @@ fn disagreements_are_named_field_by_field() {
             ("service lnd", "0.21.6-beta"),
         ],
     );
-    assert_eq!(
-        compare("fixture", &base, "lab", &base.clone()),
-        Comparison::default()
-    );
+    let same = compare("fixture", &base, "lab", &base.clone());
+    assert!(same.disagreements.is_empty() && same.not_compared.is_empty());
+    assert_eq!(same.compared, 3);
 
     let cases: [(&str, View, &[&str]); 6] = [
         (
@@ -712,14 +727,39 @@ fn a_good_manifest_is_read_exactly() {
     );
     assert_eq!(
         manifest_images(GOOD_MANIFEST),
-        BTreeMap::from([
+        Ok(BTreeMap::from([
             (
                 "bitcoin-core".to_owned(),
                 "bitcoin/bitcoin@sha256:00".to_owned()
             ),
             ("lnd".to_owned(), "lightninglabs/lnd@sha256:11".to_owned()),
-        ])
+        ]))
     );
+    // Broken image lines are refused without echoing the line.
+    let bidi = GOOD_MANIFEST
+        .replace("# image lightninglabs/lnd@sha256:11\n", "")
+        .replace("id = \"lnd\"", "id = \"lnd\" # \u{202e}evil");
+    for (what, text, reason) in [
+        (
+            "a second image line",
+            GOOD_MANIFEST.replace("# image lightninglabs", "# image x\n# image lightninglabs"),
+            "line 16: a second # image line before an id",
+        ),
+        (
+            "no image line",
+            GOOD_MANIFEST.replace("# image lightninglabs/lnd@sha256:11\n", ""),
+            "line 16: no # image line above service lnd",
+        ),
+        (
+            "an id line with a trailing comment holding a bidi override",
+            bidi,
+            "line 16: an id line not in up.sh's shape",
+        ),
+    ] {
+        let err = manifest_images(&text).unwrap_err();
+        assert_eq!(err, reason, "{what}");
+        assert!(err.is_ascii(), "{what}");
+    }
 }
 
 #[test]
