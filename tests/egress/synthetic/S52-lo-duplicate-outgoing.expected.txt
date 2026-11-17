@@ -1,0 +1,4 @@
+Judge C (egress capture): PASS
+control: dns ok, https ok, wire ok, blocked-path ok
+destinations: none
+findings: none

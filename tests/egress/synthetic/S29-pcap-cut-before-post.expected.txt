@@ -1,0 +1,7 @@
+Judge C (egress capture): FAIL
+control: dns ok, https ok, wire MISSING, blocked-path MISSING
+destinations: none
+F4 capture-blind blocked-path post
+F4 capture-blind wire post
+F5 sources-disagree dns-queries
+F5 sources-disagree tcp-handshakes

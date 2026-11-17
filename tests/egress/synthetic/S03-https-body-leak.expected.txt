@@ -1,0 +1,6 @@
+Judge C (egress capture): FAIL
+control: dns ok, https ok, wire ok, blocked-path ok
+destinations: 2 unlisted, 0 allowlisted
+F1 unlisted-destination dns leak.example.net
+F1 unlisted-destination https leak.example.net:443
+F2 canary-leaked nsec in http-body to leak.example.net:443

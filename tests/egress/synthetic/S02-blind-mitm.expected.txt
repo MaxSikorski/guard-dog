@@ -1,0 +1,4 @@
+Judge C (egress capture): FAIL
+control: dns ok, https MISSING, wire ok, blocked-path ok
+destinations: none
+F4 capture-blind mitm pre

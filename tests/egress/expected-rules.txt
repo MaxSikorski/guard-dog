@@ -1,0 +1,17 @@
+== iptables-save
+*nat
+:PREROUTING ACCEPT
+:INPUT ACCEPT
+:OUTPUT ACCEPT
+:POSTROUTING ACCEPT
+-A OUTPUT -o lo -j RETURN
+-A OUTPUT -p udp -m udp --dport 53 -j REDIRECT --to-ports 5353
+-A OUTPUT -p tcp -m tcp --dport 53 -j REDIRECT --to-ports 5353
+-A OUTPUT -m owner --uid-owner 10100 -j RETURN
+-A OUTPUT -p tcp -j REDIRECT --to-ports 8080
+COMMIT
+== ip6tables-save
+== ip route
+default dev gdsink0 scope link
+== ip -6 route
+default dev gdsink0 metric 1024 pref medium

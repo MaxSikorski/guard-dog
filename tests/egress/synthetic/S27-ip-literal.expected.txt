@@ -1,0 +1,4 @@
+Judge C (egress capture): FAIL
+control: dns ok, https ok, wire ok, blocked-path ok
+destinations: 1 unlisted, 1 allowlisted
+F1 unlisted-destination https api.example.org:443 (sni api.example.org, ip 192.0.2.9, authority-port 443, dns yes)
