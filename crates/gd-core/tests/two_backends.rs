@@ -165,29 +165,55 @@ fn read(rel: &str) -> String {
     fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
 }
 
+/// Which file a `Metadata` is: (device, inode) on Unix.
+fn identity(m: &fs::Metadata) -> (u64, u64) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        (m.dev(), m.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = m;
+        (0, 0)
+    }
+}
+
 /// Read at most `MAX_MANIFEST_BYTES` + 1 bytes, so an oversized file is never
-/// loaded whole. `NotFound` is `Ok(None)`; every other error, and a symlink
-/// or folder, is an error (never a skip). The file is opened first and then
-/// checked, so nothing can slip in between a look and the open.
+/// loaded whole. `NotFound` is `Ok(None)`; every other error, and a symlink,
+/// folder, FIFO or other odd file, is an error (never a skip).
+///
+/// The path is looked at first (`symlink_metadata`, so a FIFO is refused
+/// before an open that would wait for a writer, and a symlink is refused),
+/// then opened (no look-then-act on existence), then the opened file must be
+/// the very file that was looked at: same device and inode, still a regular
+/// file. A swap in between is refused. (Not `O_NOFOLLOW | O_NONBLOCK`:
+/// `libc` is not a dependency of this crate's tests, and the flag values are
+/// not portable to hardcode.)
 fn read_manifest_file(path: &Path) -> Result<Option<String>, String> {
     let rel = path.display();
+    let looked = match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot look at {rel}: {e}")),
+        Ok(m) => m,
+    };
+    if !looked.file_type().is_file() {
+        return Err(format!(
+            "{rel} is not a plain file (a symlink, folder or pipe)"
+        ));
+    }
     let file = match fs::File::open(path) {
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("cannot open {rel}: {e}")),
         Ok(f) => f,
     };
-    // `file.metadata()` is of the opened file (a folder opens fine on Unix);
-    // `symlink_metadata` is of the path, which is how a symlink shows.
-    let opened_is_file = file
+    let opened = file
         .metadata()
-        .map_err(|e| format!("cannot look at {rel}: {e}"))?
-        .is_file();
-    let path_is_file = fs::symlink_metadata(path)
-        .map_err(|e| format!("cannot look at {rel}: {e}"))?
-        .file_type()
-        .is_file();
-    if !opened_is_file || !path_is_file {
-        return Err(format!("{rel} is not a plain file (a symlink or a folder)"));
+        .map_err(|e| format!("cannot look at {rel}: {e}"))?;
+    if !opened.is_file() || identity(&opened) != identity(&looked) {
+        return Err(format!(
+            "{rel} is not a plain file, or changed while it was being opened"
+        ));
     }
     let mut bytes = Vec::new();
     file.take(MAX_MANIFEST_BYTES as u64 + 1)
@@ -512,7 +538,7 @@ fn manifest_images(text: &str) -> Result<BTreeMap<String, String>, String> {
 /// follows. The text must be `plain()` characters. Errors never echo a line.
 fn manifest_reported(text: &str) -> Result<BTreeMap<String, String>, String> {
     let mut out = BTreeMap::new();
-    let mut pending: Option<(usize, &str)> = None;
+    let mut pending: Option<(usize, &str, &str)> = None;
     for (n, line) in text.lines().enumerate() {
         let n = n + 1;
         if let Some((name, rest)) = line
@@ -524,7 +550,7 @@ fn manifest_reported(text: &str) -> Result<BTreeMap<String, String>, String> {
                 .map(|(r, _)| r)
                 .filter(|r| is_id(name) && is_plain(r))
                 .ok_or_else(|| format!("line {n}: a reported line not in up.sh's shape"))?;
-            if pending.replace((n, reported)).is_some() {
+            if pending.replace((n, name, reported)).is_some() {
                 return Err(format!("line {n}: a second reported line before an id"));
             }
         } else if let Some(rest) = line.strip_prefix("id = \"") {
@@ -532,12 +558,17 @@ fn manifest_reported(text: &str) -> Result<BTreeMap<String, String>, String> {
                 .strip_suffix('"')
                 .filter(|id| is_id(id))
                 .ok_or_else(|| format!("line {n}: an id line not in up.sh's shape"))?;
-            if let Some((_, reported)) = pending.take() {
+            if let Some((at, name, reported)) = pending.take() {
+                if !compose_name_matches(name, id) {
+                    return Err(format!(
+                        "line {at}: a reported line for {name} above service {id}"
+                    ));
+                }
                 out.insert(id.to_owned(), reported.to_owned());
             }
         }
     }
-    if let Some((n, _)) = pending {
+    if let Some((n, _, _)) = pending {
         return Err(format!(
             "line {n}: a reported line with no service after it"
         ));
@@ -545,10 +576,20 @@ fn manifest_reported(text: &str) -> Result<BTreeMap<String, String>, String> {
     Ok(out)
 }
 
+/// `lab/up.sh` writes the compose service name in the reported line and the
+/// label id on the `id` line; they must be the same service.
+fn compose_name_matches(name: &str, id: &str) -> bool {
+    match id {
+        "bitcoin-core" => name == "bitcoind",
+        "core-lightning" => name == "cln",
+        _ => name == id,
+    }
+}
+
 /// The version `lab/up.sh` derives from a service's reported text, by the
 /// same rules (`# 9.` in `lab/up.sh`): Bitcoin Core's `/Satoshi:32.1.0/` is
 /// `32.1`, Core Lightning drops a leading `v`, Nutshell drops `Nutshell/`,
-/// LND and strfry are used as they are. `None` for an id with no rule.
+/// (also bare, as `lab/up.sh` accepts it), LND and strfry are used as they are. `None` for an id with no rule.
 fn version_from_reported(id: &str, reported: &str) -> Option<String> {
     match id {
         "bitcoin-core" => {
@@ -561,7 +602,12 @@ fn version_from_reported(id: &str, reported: &str) -> Option<String> {
             }
         }
         "core-lightning" => Some(reported.strip_prefix('v').unwrap_or(reported).to_owned()),
-        "nutshell" => reported.strip_prefix("Nutshell/").map(str::to_owned),
+        "nutshell" => Some(
+            reported
+                .strip_prefix("Nutshell/")
+                .unwrap_or(reported)
+                .to_owned(),
+        ),
         "lnd" | "strfry" => Some(reported.to_owned()),
         _ => None,
     }
@@ -1143,10 +1189,15 @@ fn up_sh_writes_the_container_facts() {
     let up = read(UP_SH);
     for line in [
         r#"printf 'arch = "%s"\nblock_storage = "%s"\nexposure = "%s"\n' "$LAB_ARCH" "$LAB_STORAGE" "$LAB_EXPOSURE""#,
-        "docker image inspect -f '{{.Architecture}}'",
-        "{{.HostConfig.ReadonlyRootfs}}",
-        "{{range .Mounts}}{{.Type}} {{end}}",
-        ".PortBindings",
+        "docker image inspect \"$img\"",
+        ".ImageManifestDescriptor.platform.architecture",
+        ".HostConfig.PublishAllPorts == true",
+        ".NetworkSettings.Ports",
+        "startswith(\"container:\")",
+        ".HostConfig.ReadonlyRootfs == true",
+        "(.HostConfig.Tmpfs // {}) | length > 0",
+        ".Type == \"tmpfs\"",
+        "dc config --services",
     ] {
         assert!(up.contains(line), "lab/up.sh no longer has: {line}");
     }
@@ -1197,6 +1248,11 @@ fn reported_text_and_version_must_agree() {
             "line 18: a reported line not in up.sh's shape",
         ),
         (
+            "a reported line for another service",
+            GOOD_MANIFEST.replace("# bitcoind reported", "# cln reported"),
+            "line 12: a reported line for cln above service bitcoin-core",
+        ),
+        (
             "two reported lines before one id",
             GOOD_MANIFEST.replace("# lnd reported", "# x reported \"1\" (y)\n# lnd reported"),
             "line 19: a second reported line before an id",
@@ -1211,6 +1267,7 @@ fn reported_text_and_version_must_agree() {
         ("bitcoin-core", "/Satoshi:32.1.0/", "32.1"),
         ("bitcoin-core", "/Satoshi:32.1.1/", "32.1.1"),
         ("core-lightning", "v26.06.9", "26.06.9"),
+        ("nutshell", "0.21.0", "0.21.0"),
         ("lnd", "0.21.6-beta", "0.21.6-beta"),
         ("nutshell", "Nutshell/0.21.0", "0.21.0"),
         ("strfry", "1.1.2-148-g4cd3cf6", "1.1.2-148-g4cd3cf6"),
@@ -1325,7 +1382,14 @@ fn generate_manifest(rng: &mut Rng) -> Generated {
         .collect();
     let (mut images, mut reported) = (BTreeMap::new(), BTreeMap::new());
     for id in ids {
-        let version = format!("{}.{}.{}", rng.below(100), rng.below(100), 1 + rng.below(9));
+        // Bitcoin Core sometimes reports a `.0` patch, which means "a.b".
+        let zero_patch = id == "bitcoin-core" && rng.below(3) == 0;
+        let (a, b, c) = (rng.below(100), rng.below(100), 1 + rng.below(9));
+        let version = if zero_patch {
+            format!("{a}.{b}")
+        } else {
+            format!("{a}.{b}.{c}")
+        };
         let version = if id.starts_with('x') {
             rng.string(VERSION_ALPHABET, 1, 64)
         } else {
@@ -1334,13 +1398,19 @@ fn generate_manifest(rng: &mut Rng) -> Generated {
         let image = format!("img/{id}@sha256:{}", rng.string(b"0123456789abcdef", 8, 8));
         text.push('\n');
         if let Some(said) = match id.as_str() {
+            "bitcoin-core" if zero_patch => Some(format!("/Satoshi:{version}.0/")),
             "bitcoin-core" => Some(format!("/Satoshi:{version}/")),
             "core-lightning" => Some(format!("v{version}")),
             "nutshell" => Some(format!("Nutshell/{version}")),
             "lnd" | "strfry" => Some(version.clone()),
             _ => None,
         } {
-            text.push_str(&format!("# {id} reported \"{said}\" (some call)\n"));
+            let name = match id.as_str() {
+                "bitcoin-core" => "bitcoind",
+                "core-lightning" => "cln",
+                other => other,
+            };
+            text.push_str(&format!("# {name} reported \"{said}\" (some call)\n"));
             reported.insert(id.clone(), said);
         }
         text.push_str(&format!("# image {image}\n[[service]]\nid = \"{id}\"\n"));
@@ -1527,4 +1597,48 @@ fn random_bytes_and_cut_manifests_never_panic() {
         let _ = manifest_images(&g.text[..cut]);
         let _ = manifest_reported(&g.text[..cut]);
     }
+}
+
+#[test]
+fn a_pipe_a_symlink_and_a_swapped_file_are_refused() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("two-backends-odd");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    // The identity helper tells two files apart and recognises one file.
+    let (a, b) = (dir.join("a.toml"), dir.join("b.toml"));
+    fs::write(&a, "x").unwrap();
+    fs::write(&b, "x").unwrap();
+    let (ma, mb) = (fs::metadata(&a).unwrap(), fs::metadata(&b).unwrap());
+    assert_eq!(identity(&ma), identity(&fs::symlink_metadata(&a).unwrap()));
+    #[cfg(unix)]
+    {
+        assert_ne!(
+            identity(&ma),
+            identity(&mb),
+            "a swapped file is another file"
+        );
+        // A FIFO is refused at once; opening it would wait for a writer.
+        let fifo = dir.join("pipe.toml");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success(), "mkfifo");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = fifo.clone();
+        std::thread::spawn(move || tx.send(read_manifest_file(&path)).unwrap());
+        let got = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a FIFO at the path hung the reader");
+        assert!(got.unwrap_err().contains("not a plain file"));
+        // A symlink to a good file is refused.
+        let link = dir.join("link.toml");
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        assert!(
+            read_manifest_file(&link)
+                .unwrap_err()
+                .contains("not a plain file")
+        );
+    }
+    assert_eq!(read_manifest_file(&a), Ok(Some("x".to_owned())));
 }

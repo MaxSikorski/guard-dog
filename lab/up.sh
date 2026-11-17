@@ -216,25 +216,47 @@ step "versions match the pinned images"
 # running containers: CPU width, where data lives, and whether anything is
 # published on the host. Each lands in a global (no subshell, so fail works).
 LAB_ARCH="" LAB_STORAGE="" LAB_EXPOSURE=""
+# How many of these say the container is reachable from outside: all ports
+# published (-P), any host port binding (configured or live), host networking,
+# or a shared network namespace with another container.
+EXPOSED_JQ='[.[0]
+  | (.HostConfig.PublishAllPorts == true),
+    ((.HostConfig.PortBindings // {}) | to_entries[] | select((.value // []) | length > 0) | true),
+    ((.NetworkSettings.Ports // {}) | to_entries[] | select((.value // []) | length > 0) | true),
+    ((.HostConfig.NetworkMode // "") | (. == "host" or startswith("container:")))
+  ] | map(select(.)) | length'
+# tmpfs needs a read-only root, at least one tmpfs, and no other kind of mount.
+STORAGE_JQ='.[0] | if (.HostConfig.ReadonlyRootfs == true)
+  and ((.HostConfig.Tmpfs // {}) | length > 0)
+  and all((.Mounts // [])[]; .Type == "tmpfs") then "tmpfs" else "disk" end'
+# The image's architecture, and (Docker 25+ with the containerd store) the
+# architecture of the manifest that was actually pulled. If both are there and
+# differ, the answer is "mixed", never the host's guess; on an older Docker
+# only the first exists and is used.
+# shellcheck disable=SC2016
+ARCH_JQ='.[0] | .Architecture as $a
+  | (.ImageManifestDescriptor.platform.architecture // $a) as $b
+  | if $a == $b then $a else "mixed" end'
 inspect_lab() {
-  local cids cid img a kind seen_arch="" storage=tmpfs exposure=none n types t ro
+  local cids cid img a kind seen_arch="" storage=tmpfs exposure=none n want c
   cids="$(dc ps -aq)" || fail "could not list the lab's containers"
-  [ "$(printf '%s\n' "$cids" | grep -c .)" -eq 5 ] || fail "expected five lab containers"
+  want="$(dc config --services | grep -c .)" || fail "could not list the compose services"
+  c="$(printf '%s\n' "$cids" | grep -c .)" || c=0
+  [ "$c" -eq "$want" ] && [ "$want" -gt 0 ] || fail "expected $want lab containers, found $c"
   while IFS= read -r cid; do
     [[ $cid =~ ^[0-9a-f]{12,64}$ ]] || fail "unexpected container id"
     img="$(docker inspect -f '{{.Image}}' "$cid")" || fail "docker inspect failed"
-    a="$(plain "$(docker image inspect -f '{{.Architecture}}' "$img")")"
+    a="$(plain "$(docker image inspect "$img" | jq -er "$ARCH_JQ")")" || fail "docker image inspect failed"
     case $a in
       amd64 | arm64 | ppc64le | s390x | riscv64 | loong64 | mips64 | mips64le) kind=64-bit ;;
       386 | arm | mips | mipsle) kind=32-bit ;;
+      mixed) kind=mixed ;;
       *) fail "unknown image architecture" ;;
     esac
     if [ -z "$seen_arch" ]; then seen_arch=$kind; elif [ "$seen_arch" != "$kind" ]; then seen_arch=mixed; fi
-    types="$(docker inspect -f '{{range .Mounts}}{{.Type}} {{end}}' "$cid")" || fail "docker inspect failed"
-    ro="$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$cid")" || fail "docker inspect failed"
-    [ "$ro" = true ] || storage=disk
-    for t in $types; do [ "$t" = tmpfs ] || storage=disk; done
-    n="$(docker inspect "$cid" | jq -er '[.[0].HostConfig | ((.PortBindings // {}) | to_entries[] | select((.value // []) | length > 0)), select(.NetworkMode == "host")] | length')" || fail "docker inspect failed"
+    [ "$kind" != mixed ] || seen_arch=mixed
+    [ "$(docker inspect "$cid" | jq -er "$STORAGE_JQ")" = tmpfs ] || storage=disk
+    n="$(docker inspect "$cid" | jq -er "$EXPOSED_JQ")" || fail "docker inspect failed"
     [ "$n" = 0 ] || exposure=published
   done <<< "$cids"
   LAB_ARCH=$seen_arch LAB_STORAGE=$storage LAB_EXPOSURE=$exposure
