@@ -1,9 +1,9 @@
 //! The contract a version scheme gives the range evaluator.
 //!
 //! The catalog picks the scheme for a product; an OSV range type never picks a
-//! parser (design 2.1, "scheme authority"). The schemes themselves (SemVer,
-//! Bitcoin Core, PEP 440, ...) arrive in later pull requests and implement
-//! [`VersionScheme`]. The evaluator in [`crate::range`] only needs what is here.
+//! parser (design 2.1, "scheme authority"). SemVer, the Go tag adapter, Bitcoin
+//! Core and the channel scheme are here; PEP 440, CalVer and git-describe arrive
+//! in later pull requests. The evaluator in [`crate::range`] only needs what is here.
 
 use std::fmt;
 
@@ -121,4 +121,11 @@ pub trait VersionScheme {
 
     /// Whether versions of this scheme have an order at all.
     fn orders(&self) -> bool;
+
+    /// Whether this scheme may answer an entry on its own. A channel scheme may
+    /// not: its two orders, and its `-rcN` identity alias, are only answered
+    /// together by [`evaluate_channel_entry`]. Default `true`.
+    fn answers_alone(&self) -> bool {
+        true
+    }
 }

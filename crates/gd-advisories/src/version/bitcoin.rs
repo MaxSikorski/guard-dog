@@ -14,6 +14,7 @@ use std::fmt;
 
 use super::semver::{Num, check_length, parse_num};
 use super::{Candidate, VersionError, VersionScheme};
+use crate::MAX_VERSION_BYTES;
 
 /// Whether the installed value's source would have shown a release candidate.
 ///
@@ -95,7 +96,7 @@ fn read(raw: &str) -> Result<CoreVersion, VersionError> {
     else {
         return Err(VersionError::Malformed);
     };
-    Ok(CoreVersion {
+    let version = CoreVersion {
         major: parse_num(a)?,
         minor: parse_num(b)?,
         patch: match c {
@@ -103,7 +104,13 @@ fn read(raw: &str) -> Result<CoreVersion, VersionError> {
             None => Num::zero(),
         },
         rc,
-    })
+    };
+    // The canonical text grows by `.0` when the patch is absent; it must still
+    // fit the limit.
+    if version.to_string().len() > MAX_VERSION_BYTES {
+        return Err(VersionError::TooLong);
+    }
+    Ok(version)
 }
 
 /// The Bitcoin Core scheme. Advisory boundaries always go through [`parse`];

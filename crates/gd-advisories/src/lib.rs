@@ -3,8 +3,9 @@
 //! Phase 2.1, step 1: OSV 1.9.2 records become bounded typed data with their
 //! provenance and explicit gaps ([`parse_advisory`]), and package names get one
 //! canonical form ([`canonical_package`]). This crate is pure: no network, no
-//! files, no clock, no subprocess, no AI. Version ordering and range evaluation
-//! arrive in later steps.
+//! files, no clock, no subprocess, no AI. Range evaluation ([`evaluate_entry`]) and the
+//! SemVer, Go tag, Bitcoin Core and channel schemes are here; the product
+//! dispatch arrives in a later step.
 
 mod osv;
 mod package;

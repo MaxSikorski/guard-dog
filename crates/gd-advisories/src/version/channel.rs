@@ -12,10 +12,14 @@
 use std::cmp::Ordering;
 use std::fmt;
 
+use crate::MAX_VERSION_BYTES;
+
 use super::semver::{Num, check_length, parse_num};
-use super::{GoTag, SemVer, VersionError, VersionScheme};
+use super::{GoTag, SemVer, SemVerVersion, VersionError, VersionScheme};
 use crate::osv::{Advisory, RangeKind};
-use crate::range::{Place, UnknownReason, VersionEvidence, evaluate_entry, unknown};
+use crate::range::{
+    Place, UnknownReason, VersionEvidence, evaluate_entry, evaluate_entry_with, unknown,
+};
 
 /// A release channel, as the catalog's `channel` names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -174,14 +178,20 @@ impl ChannelScheme {
                 (StageKind::Rc, n)
             }
         };
-        Ok(ChannelVersion {
+        let version = ChannelVersion {
             major,
             minor,
             patch,
             kind,
             channel: self.channel,
             rc,
-        })
+        };
+        // The canonical text can be longer than the input (the `-rcN` alias
+        // gains the channel name); it must still fit the limit.
+        if version.to_string().len() > MAX_VERSION_BYTES {
+            return Err(VersionError::TooLong);
+        }
+        Ok(version)
     }
 }
 
@@ -200,20 +210,24 @@ impl VersionScheme for ChannelScheme {
     }
 
     /// Channel ranges are SemVer-shaped, but only [`evaluate_channel_entry`] may
-    /// answer them, through its own crate-private wrapper; a caller that
-    /// evaluates a `SEMVER` range with this scheme alone gets
-    /// `Unknown(SchemeMismatch)`.
+    /// answer them, through its own crate-private wrapper: the bare scheme
+    /// answers no entry at all (`answers_alone`).
     fn reads_semver_ranges(&self) -> bool {
         false
     }
 
-    /// The same for Go `ECOSYSTEM` ranges.
+    /// The same for Go `ECOSYSTEM` ranges: the bare scheme answers no entry at
+    /// all (`answers_alone`).
     fn reads_ecosystem_ranges(&self) -> bool {
         false
     }
 
     fn orders(&self) -> bool {
         true
+    }
+
+    fn answers_alone(&self) -> bool {
+        false
     }
 }
 
@@ -244,14 +258,15 @@ impl VersionScheme for DualChannel<'_> {
     fn orders(&self) -> bool {
         self.0.orders()
     }
+
+    fn answers_alone(&self) -> bool {
+        true
+    }
 }
 
 /// The one public way to check LND (beta) or Lightning Terminal (alpha) against
-/// an advisory entry. It always routes through the dual-order check: the
-/// literal SemVer side is [`SemVer`](super::SemVer) when every range of the
-/// entry is `SEMVER`, and [`GoTag`](super::GoTag) (the declared Go `v`
-/// adapter) otherwise, so Go `ECOSYSTEM` ranges and listed versions are read
-/// as Go tags. The channel scheme alone never answers either kind of range.
+/// an advisory entry. It always runs the dual-order check ([`dual_check`]).
+/// The channel scheme alone never answers an entry.
 #[must_use]
 pub fn evaluate_channel_entry(
     channel_scheme: &ChannelScheme,
@@ -259,21 +274,19 @@ pub fn evaluate_channel_entry(
     entry_index: usize,
     installed: Option<&str>,
 ) -> VersionEvidence {
-    let all_semver = advisory.affected.get(entry_index).is_some_and(|e| {
-        !e.ranges.is_empty() && e.ranges.iter().all(|r| matches!(r.kind, RangeKind::Semver))
-    });
-    if all_semver {
-        dual_check(channel_scheme, &SemVer, advisory, entry_index, installed)
-    } else {
-        dual_check(channel_scheme, &GoTag, advisory, entry_index, installed)
-    }
+    dual_check(channel_scheme, advisory, entry_index, installed)
 }
 
 /// The dual-order check for a channel product on `SEMVER` and Go ranges.
 ///
-/// The caller passes the channel scheme and the literal SemVer scheme (with the
-/// declared `v` adapter, [`GoTag`](super::GoTag)); each runs the evaluator on the
-/// same entry and installed value, the channel one with `SEMVER` ranges enabled.
+/// The channel side runs the evaluator with the channel scheme (its own order,
+/// `SEMVER` ranges enabled). The literal side runs it in SemVer order, reading:
+/// - the installed value and the listed versions with [`GoTag`], the declared
+///   `v` adapter for catalog values and Go module versions;
+/// - each `SEMVER` range's boundaries with strict [`SemVer`], because OSV
+///   `SEMVER` boundaries carry no `v`;
+/// - each `ECOSYSTEM` (Go) range's boundaries with [`GoTag`].
+///
 /// The answers combine as follows:
 /// - in range only if both say in range;
 /// - out of range only if both say out of range;
@@ -283,23 +296,31 @@ pub fn evaluate_channel_entry(
 ///   reason and place. The other side's answer is never used alone;
 /// - in range against out of range: `Unknown(SchemeConflict)`, the real
 ///   disagreement between the two orders.
-fn dual_check<B>(
+fn dual_check(
     channel_scheme: &ChannelScheme,
-    semver_scheme: &B,
     advisory: &Advisory,
     entry_index: usize,
     installed: Option<&str>,
-) -> VersionEvidence
-where
-    B: VersionScheme + ?Sized,
-{
+) -> VersionEvidence {
     let a = evaluate_entry(
         &DualChannel(channel_scheme),
         advisory,
         entry_index,
         installed,
     );
-    let b = evaluate_entry(semver_scheme, advisory, entry_index, installed);
+    let b = evaluate_entry_with(
+        &GoTag,
+        &|k: &RangeKind| -> &dyn VersionScheme<Version = SemVerVersion> {
+            if matches!(k, RangeKind::Semver) {
+                &SemVer
+            } else {
+                &GoTag
+            }
+        },
+        advisory,
+        entry_index,
+        installed,
+    );
     combine(entry_index, a, b)
 }
 
