@@ -227,12 +227,72 @@ fn looks_like_group_list(text: &str) -> bool {
     numbers.len() >= 8 && !consecutive
 }
 
-/// Group lists like the output of `id -G`: the whole line, or the whole
-/// contents of a backtick, quote, bracket or parenthesis span, is 8 or more
-/// numbers (see `looks_like_group_list`). A Rust byte string `b"..."` is
-/// data, not a group list. Dotted versions such as `0.17.0` never count.
+/// `line` with every complete Rust byte string (`b"..."`, `br"..."`,
+/// `br#"..."#`) overwritten by underscores, byte for byte, so offsets do not
+/// move and no delimiter inside one is ever scanned. An unterminated byte
+/// string is masked to the end of the line.
+#[allow(clippy::indexing_slicing)] // every index is checked against the length first
+fn mask_byte_strings(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut masked = bytes.to_vec();
+    let mut i = 0;
+    while i < bytes.len() {
+        let starts_word = i == 0 || !is_name_char(char::from(bytes[i - 1]));
+        if bytes[i] != b'b' || !starts_word {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        let raw = bytes.get(j) == Some(&b'r');
+        let mut hashes = 0;
+        if raw {
+            j += 1;
+            while bytes.get(j) == Some(&b'#') {
+                hashes += 1;
+                j += 1;
+            }
+        }
+        if bytes.get(j) != Some(&b'"') {
+            i += 1;
+            continue;
+        }
+        let mut k = j + 1;
+        let mut end = bytes.len() - 1;
+        while k < bytes.len() {
+            if !raw && bytes[k] == b'\\' {
+                k += 2;
+                continue;
+            }
+            if bytes[k] == b'"' && (!raw || (1..=hashes).all(|m| bytes.get(k + m) == Some(&b'#'))) {
+                end = if raw { k + hashes } else { k };
+                break;
+            }
+            k += 1;
+        }
+        let end = end.min(bytes.len() - 1);
+        for slot in &mut masked[i..=end] {
+            *slot = b'_';
+        }
+        i = end + 1;
+    }
+    String::from_utf8(masked).unwrap_or_else(|_| line.to_string())
+}
+
+/// Group lists like the output of `id -G`: 8 or more numbers (see
+/// `looks_like_group_list`) that are the whole line, the whole contents of a
+/// backtick, quote, bracket or parenthesis span, or everything after a label
+/// such as `groups:` or `gids=` to the end of the line. Rust byte strings are
+/// data, not group lists, and are masked out first. Dotted versions such as
+/// `0.17.0` never count.
 fn group_list(line: &str, found: &mut Vec<String>) {
+    let masked = mask_byte_strings(line);
+    let line = masked.as_str();
     let mut hit = looks_like_group_list(line);
+    for (at, _) in line.match_indices([':', '=']) {
+        if line.get(at + 1..).is_some_and(looks_like_group_list) {
+            hit = true;
+        }
+    }
     for (open, close) in [('`', '`'), ('"', '"'), ('\'', '\''), ('[', ']'), ('(', ')')] {
         let mut from = 0;
         while let Some(rel) = line.get(from..).and_then(|rest| rest.find(open)) {
@@ -240,12 +300,9 @@ fn group_list(line: &str, found: &mut Vec<String>) {
             let Some(len) = line.get(start..).and_then(|rest| rest.find(close)) else {
                 break;
             };
-            let byte_string =
-                open == '"' && line.get(..from + rel).is_some_and(|s| s.ends_with('b'));
-            if !byte_string
-                && line
-                    .get(start..start + len)
-                    .is_some_and(looks_like_group_list)
+            if line
+                .get(start..start + len)
+                .is_some_and(looks_like_group_list)
             {
                 hit = true;
             }
@@ -482,6 +539,10 @@ fn the_checker_catches_planted_details_and_leaves_ordinary_text_alone() {
         format!("{}-501/x", ["/private", "/tmp/claude"].concat()),
         format!("{}7/x", ["/var/", "folders/"].concat()),
         numbers(9, 20, 7),
+        format!("groups: {}", numbers(9, 20, 7)),
+        format!("gids: {}", numbers(8, 100, 13)),
+        format!("groups={}", numbers(8, 4, 9)),
+        format!("uid=501 gid=20 groups={}", numbers(8, 20, 7)),
         ["20", "12", "61", "79", "80", "81", "98", "701"].join(" "),
         format!(
             "`{}`",
@@ -544,6 +605,11 @@ fn the_checker_catches_planted_details_and_leaves_ordinary_text_alone() {
         "root runs this as root".to_string(),
         format!("let bytes = [{}];", numbers(12, 0, 1).replace(' ', ", ")),
         format!("supported versions: `{}`", numbers(8, 22, 1)),
+        format!("let x = b\"[{}]\";", numbers(8, 0, 7)),
+        format!("let x = br\"[{}]\";", numbers(8, 0, 7)),
+        format!("let x = br#\"({} \" )\"#;", numbers(8, 0, 7)),
+        format!("versions: {}", numbers(8, 22, 1)),
+        format!("gids=`{}` is not a list, it is a span of words", "a b"),
         format!("let x = b\"{}\";", numbers(9, 0, 7)),
     ];
     for line in &fine {
