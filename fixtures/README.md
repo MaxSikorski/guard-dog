@@ -54,7 +54,7 @@ Never loosen an expected result to make the matcher pass without a written reaso
 
 ## The lab as recorded (two back ends)
 
-`lab-recorded/manifest.toml` is the manifest a real `lab/up.sh` run wrote on 2026-11-16 (Mac, arm64), committed exactly as it came out: the chain, each service's id and the version the running service reported, plus comments naming the reply and the pinned image. No credentials. `crates/gd-core/tests/two_backends.rs` checks that Judge B sees the same facts through it as through the `lab-regtest` setup above, and that its `# image` lines are the images `lab/compose.yml` pins. Re-record it whenever a lab image changes (`lab/README.md`, "Changing an image").
+`lab-recorded/manifest.toml` is the manifest a real `lab/up.sh` run wrote on 2026-11-17 (Mac, arm64), committed exactly as it came out: the chain, the arch, block storage and exposure (all three read from `docker inspect` of the running containers, as `lab/up.sh` writes them), each service's id and the version the running service reported, plus comments naming the reply and the pinned image. No credentials. `crates/gd-core/tests/two_backends.rs` checks that Judge B sees the same facts through it as through the `lab-regtest` setup above, and that its `# image` lines are the images `lab/compose.yml` pins. Re-record it whenever a lab image changes (`lab/README.md`, "Changing an image").
 
 ## Next
 
@@ -193,3 +193,19 @@ If the script prints `TEST MODE: tools from a test folder; this is not a valid r
 | nix-bitcoin | no recording yet | archived since 2026-08-13 |
 | Plain Docker or Compose | no recording yet | the lab (step 3) |
 | Plain Linux with systemd | no recording yet | the lab (step 3) |
+
+### Raw replies (`lab-recorded/replies/`)
+
+The unchanged answers the services gave in a real `lab/up.sh` run, recorded on 2026-11-17 (Mac, arm64) from the images `lab/compose.yml` pins (the digests are in `lab-recorded/manifest.toml`). Each file is one HTTP reply body, saved byte for byte as received (no newline is added, so a file ends with a newline only if the service sent one; bitcoind's are the full JSON-RPC reply with its `result`, `error` and `id`); the run fails instead of saving a reply that holds a credential or a `gdlabcanary-` value. The names and addresses in them are the lab's own throwaway regtest values.
+
+| File | Call that made it | Image |
+|---|---|---|
+| `bitcoind/getnetworkinfo.json` | JSON-RPC `getnetworkinfo` over HTTP through the probe, as the `gdwatch` login | `bitcoin/bitcoin@sha256:d2454aaf2ff4ce1ebbc49f4aa05ed044c907b849a80a3f4c0ad23e488e50bbe0` (Bitcoin Core 32.1) |
+| `bitcoind/getblockchaininfo.json` | JSON-RPC `getblockchaininfo` over HTTP through the probe, as the `gdwatch` login | same |
+| `lnd/state.json` | `GET https://lnd:8080/v1/state`, no macaroon | `lightninglabs/lnd@sha256:54b3c87ad0bc3fea3fab8af23ace6421147ea97e6b56bf3911592d7853c185b8` (LND 0.21.6-beta) |
+| `lnd/versioner-version.json` | `GET https://lnd:8080/v2/versioner/version` with the `info:read` macaroon | same |
+| `cln/getinfo.json` | `POST https://cln:3010/v1/getinfo` with the `getinfo` rune (clnrest answers `201`) | `elementsproject/lightningd@sha256:de74289ddcccb68cd60543b08b2b8594002d819125d200492e17a95166d56577` (Core Lightning 26.06.9) |
+| `nutshell/info.json` | `GET http://nutshell:3338/v1/info` | `cashubtc/nutshell@sha256:beed25e291357368e35e1698bf2e4645d97ed435232a8f8ff6501c77d67c0b90` (Nutshell 0.21.0) |
+| `strfry/nip11.json` | `GET http://strfry:7777/` with `Accept: application/nostr+json` | `ghcr.io/hoytech/strfry@sha256:36f1886d185a88ca57c66ebe52e6e9e8428dac2486eea0a5d50ff934f18b60c3` (strfry 1.1.2-148-g4cd3cf6) |
+
+Re-record them with the manifest whenever a lab image changes (`lab/README.md`, "Changing an image").

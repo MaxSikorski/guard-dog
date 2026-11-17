@@ -1299,6 +1299,8 @@ fn lab_services() -> Vec<(String, String, String)> {
     let services = docs[0]["services"].as_hash().expect("services");
     services
         .iter()
+        // Tool services (probe, scanner) have a compose profile and are not lab products.
+        .filter(|(_, svc)| svc["profiles"].is_badvalue())
         .map(|(name, svc)| {
             (
                 name.as_str().unwrap().to_string(),
@@ -1319,6 +1321,7 @@ fn lab_texts() -> BTreeMap<String, String> {
         .as_hash()
         .expect("services")
         .iter()
+        .filter(|(_, s)| s["profiles"].is_badvalue())
         .map(|(n, s)| (n.as_str().unwrap().to_string(), format!("{s:?}")))
         .collect()
 }
