@@ -64,8 +64,8 @@ pub enum UnknownReason {
     UnparseableLimit,
     /// A range with a malformed shape: no events, no `introduced`, both `fixed`
     /// and `last_affected`, `"0"` on a non-`introduced` event, events that do
-    /// not alternate opening and closing, or an `introduced` at or above every
-    /// limit of its own range.
+    /// not alternate opening and closing, an `introduced` or `last_affected` at or
+    /// above every limit of its own range, or a `fixed` above every limit.
     ///
     /// "A closing with nothing open" is deliberately stricter than OSV, which
     /// ignores a redundant closing: here it is `MalformedRange`, because a
@@ -531,6 +531,22 @@ fn eval_range<S: VersionScheme + ?Sized>(
             && !limits.iter().any(|l| l > c)
         {
             keep_smallest(&mut problem, UnknownReason::MalformedRange, at(g.index));
+        }
+    }
+    // The same for closings: with ordinary limits only, a `last_affected` at or
+    // above every limit, or a `fixed` strictly above every limit, contradicts
+    // the range's own cap.
+    if !unbounded && !limits.is_empty() {
+        for g in &groups {
+            if let (Coordinate::At(c), Op::Close(kind)) = (&g.coordinate, g.op) {
+                let contradicts = match kind {
+                    Kind::LastAffected => !limits.iter().any(|l| l > c),
+                    _ => !limits.iter().any(|l| l >= c),
+                };
+                if contradicts {
+                    keep_smallest(&mut problem, UnknownReason::MalformedRange, at(g.index));
+                }
+            }
         }
     }
     if let Some((reason, place)) = problem {
