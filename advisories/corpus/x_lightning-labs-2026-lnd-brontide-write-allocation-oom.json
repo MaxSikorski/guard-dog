@@ -1,0 +1,68 @@
+{
+  "schema_version": "1.9.2",
+  "id": "x_lightning-labs-2026-lnd-brontide-write-allocation-oom",
+  "modified": "2026-11-16T00:00:00Z",
+  "published": "2026-09-21T00:00:00Z",
+  "summary": "LND: a peer sending heavy message traffic can exhaust the node's memory",
+  "details": "lnd's encrypted transport layer (Brontide) allocated a fresh buffer for every message written. A connected peer that drives a lot of traffic can use this to run the node out of memory, so the operating system kills it. No channel is needed, there is no fund loss, and the node restarts cleanly once the attacker disconnects. Fixed in 0.20.0-beta (released 2025-11-20) and not backported to 0.19, which reached end of life on 2026-06-05. Disclosed 2026-09-21, tier T3; no CVE listed.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "Go",
+        "name": "github.com/lightningnetwork/lnd"
+      },
+      "ranges": [
+        {
+          "type": "SEMVER",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "0.20.0-beta"
+            }
+          ]
+        }
+      ],
+      "database_specific": {
+        "range_note": "introduced version is not stated by the source; 0 is a placeholder meaning 'unknown start'."
+      }
+    }
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://security.lightning.engineering/2026/09/21/lnd-brontide-write-allocation-oom.html"
+    },
+    {
+      "type": "FIX",
+      "url": "https://github.com/lightningnetwork/lnd/pull/10183"
+    }
+  ],
+  "database_specific": {
+    "guard_dog": {
+      "conditions": [
+        {
+          "fact": "service_running",
+          "service": "lnd"
+        },
+        {
+          "fact": "port_exposed_to_internet",
+          "port": 9735,
+          "required": false,
+          "note": "any connected peer; no channel required"
+        }
+      ],
+      "conditions_format": "draft format, finalized in Phase 2.2",
+      "playbook": [
+        "Check the LND version.",
+        "If it is older than 0.20.0-beta, update to the current maintained release (0.19 gets no backport).",
+        "If LND keeps getting killed for running out of memory, look in the logs for a peer sending heavy traffic and disconnect it (lncli disconnect)."
+      ],
+      "source_checked": "2026-11-16"
+    },
+    "vendor_severity_tier": "T3",
+    "primary_source_kind": "vendor advisory site (Atom feed); no CVE",
+    "no_cve": true
+  }
+}

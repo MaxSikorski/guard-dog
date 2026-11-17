@@ -1,0 +1,94 @@
+{
+  "schema_version": "1.9.2",
+  "id": "x_fedimint-2026-v0.11.2-security-fixes",
+  "modified": "2026-11-16T00:00:00Z",
+  "published": "2026-08-13T12:02:14Z",
+  "summary": "Fedimint: version 0.11.2 and 0.10.1 collect security fixes for guardians, Lightning modules and gateways",
+  "details": "The Fedimint 0.11.2 release (2026-08-13) is a maintenance release collecting security fixes across the server, the Lightning modules and the gateway; 0.10.1 carries the same fixes for the 0.10 line. The project says no federation was affected and no funds were lost. The fixes close a path by which a gateway could have lost funds to a malicious counterparty, and harden guardians and gateways against malformed requests that could take them offline. In both cases protection depends on guardians running the new rules, so upgrading the guardian is what matters. Lightning contracts are bound more strictly to their offers and can only be funded once, and the on-chain wallet checks peg-ins and peg-out fee rates more conservatively. The release is backwards compatible across 0.8 to 0.11, and guardians can upgrade one at a time. No CVE is listed and the exact earlier versions affected are not stated.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "GIT",
+        "name": "https://github.com/fedimint/fedimint"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "0.10.1"
+            }
+          ]
+        }
+      ],
+      "database_specific": {
+        "range_note": "Start unknown: the release notes do not say which earlier versions are affected, so 0 stands for the 0.10 line and older. Release 0.12.0's notes say the same fixes were already shipped in 0.11.2 and 0.10.1."
+      }
+    },
+    {
+      "package": {
+        "ecosystem": "GIT",
+        "name": "https://github.com/fedimint/fedimint"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0.11.0"
+            },
+            {
+              "fixed": "0.11.2"
+            }
+          ]
+        }
+      ],
+      "database_specific": {
+        "range_note": "0.11.0 is a structural placeholder for the start of the 0.11 line."
+      }
+    }
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://github.com/fedimint/fedimint/releases/tag/v0.11.2"
+    },
+    {
+      "type": "WEB",
+      "url": "https://github.com/fedimint/fedimint/releases/tag/v0.10.1"
+    },
+    {
+      "type": "WEB",
+      "url": "https://github.com/fedimint/fedimint/releases/tag/v0.12.0"
+    }
+  ],
+  "database_specific": {
+    "guard_dog": {
+      "conditions": [
+        {
+          "fact": "service_running",
+          "service": "fedimintd",
+          "note": "guardian"
+        },
+        {
+          "fact": "service_running",
+          "service": "gatewayd",
+          "required": false,
+          "note": "gateway operators are also affected"
+        }
+      ],
+      "conditions_format": "draft format, finalized in Phase 2.2",
+      "playbook": [
+        "Check the fedimintd (and gatewayd) version.",
+        "If you run a guardian on 0.11.x below 0.11.2 or 0.10.x below 0.10.1, upgrade (guardians can upgrade one at a time). Go straight to 0.11.2 or later, not through 0.11.0 or 0.11.1, as the 0.12.0 release notes warn; older lines should move to a supported release.",
+        "If you operate a gateway, upgrade it as well."
+      ],
+      "source_checked": "2026-11-16"
+    },
+    "no_cve": true,
+    "primary_source_kind": "release notes only"
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "schema_version": "1.9.2",
+  "id": "x_cln-2026-v26.06.8-unspecified-vulnerabilities",
+  "modified": "2026-11-16T00:00:00Z",
+  "published": "2026-09-22T00:00:00Z",
+  "summary": "Core Lightning: the 26.06.8 point release fixes unspecified vulnerabilities (no CVE, no details)",
+  "details": "The release notes for Core Lightning 26.06.8 (2026-09-22) say it includes fixes for vulnerabilities responsibly reported by a number of sources and strongly recommend upgrading. There was no embargo period. The project withheld a small number of tests to make the fixes harder to turn into exploits. The release notes give no CVE, no description of the flaws and no affected range, so the affected range is unknown beyond 'earlier than 26.06.8'.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "GIT",
+        "name": "https://github.com/ElementsProject/lightning"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "26.06.8"
+            }
+          ]
+        }
+      ],
+      "database_specific": {
+        "range_note": "Start of the affected range is not stated by the release notes; 0 is a placeholder for 'unknown'. Nothing is known about which earlier releases carry which flaw."
+      }
+    }
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://github.com/ElementsProject/lightning/releases/tag/v26.06.8"
+    }
+  ],
+  "database_specific": {
+    "guard_dog": {
+      "conditions": [
+        {
+          "fact": "service_running",
+          "service": "core-lightning"
+        }
+      ],
+      "conditions_format": "draft format, finalized in Phase 2.2",
+      "playbook": [
+        "Check the Core Lightning version (lightning-cli getinfo).",
+        "If it is older than 26.06.8, update to 26.06.8 or a newer release.",
+        "Because the flaws are not described, treat this as a 'possibly affected' item and do not expect an alert to say what the attack is."
+      ],
+      "source_checked": "2026-11-16"
+    },
+    "no_cve": true,
+    "primary_source_kind": "release notes only",
+    "details_withheld_by_vendor": true
+  }
+}

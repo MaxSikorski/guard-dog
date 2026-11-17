@@ -1,0 +1,65 @@
+{
+  "schema_version": "1.9.2",
+  "id": "x_lightning-labs-2026-lnd-gossip-validation-barrier-stall",
+  "modified": "2026-11-16T00:00:00Z",
+  "published": "2026-09-21T00:00:00Z",
+  "summary": "LND: a flood of malformed channel announcements can stall the node's gossip processing",
+  "details": "A peer sending more than 1000 malformed channel_announcement messages can fill lnd's gossip validation with stuck jobs, so the victim can neither receive nor pass on gossip. Its channels effectively become private to the rest of the network, its view of the graph stops updating, and routing gets worse. The node keeps running and no funds are at risk; a restart clears the stall, though a graceful shutdown may hang. The flaw came in with a rework in 0.19.0-beta; earlier releases are not affected. Fixed in 0.20.1-beta (released 2026-02-12) and included in 0.21.0-beta and later. Lightning Labs disclosed it on 2026-09-21 and rated it T3 (lowest tier); no CVE is listed.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "Go",
+        "name": "github.com/lightningnetwork/lnd"
+      },
+      "ranges": [
+        {
+          "type": "SEMVER",
+          "events": [
+            {
+              "introduced": "0.19.0-beta"
+            },
+            {
+              "fixed": "0.20.1-beta"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://security.lightning.engineering/2026/09/21/lnd-gossip-validation-barrier-stall.html"
+    },
+    {
+      "type": "FIX",
+      "url": "https://github.com/lightningnetwork/lnd/pull/10540"
+    }
+  ],
+  "database_specific": {
+    "guard_dog": {
+      "conditions": [
+        {
+          "fact": "service_running",
+          "service": "lnd"
+        },
+        {
+          "fact": "port_exposed_to_internet",
+          "port": 9735,
+          "required": false,
+          "note": "any connected peer can send gossip"
+        }
+      ],
+      "conditions_format": "draft format, finalized in Phase 2.2",
+      "playbook": [
+        "Check the LND version.",
+        "If it is 0.19.0-beta up to (not including) 0.20.1-beta, update to 0.20.1-beta or later.",
+        "If gossip seems stuck in the meantime, restart LND; no action on funds is needed."
+      ],
+      "source_checked": "2026-11-16"
+    },
+    "vendor_severity_tier": "T3",
+    "primary_source_kind": "vendor advisory site (Atom feed); no CVE",
+    "no_cve": true
+  }
+}

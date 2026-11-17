@@ -1,0 +1,68 @@
+{
+  "schema_version": "1.9.2",
+  "id": "x_btcpay-2026-v2.4.7-85-security-findings",
+  "modified": "2026-11-16T00:00:00Z",
+  "published": "2026-10-29T00:00:00Z",
+  "summary": "BTCPay Server: version 2.4.7 fixes 85 security findings from an automated scan (no CVEs)",
+  "details": "The BTCPay Server 2.4.7 release notes (2026-10-29) say it fixes 85 security findings reported through an open-source scanner program: 1 Critical, 13 High, 52 Medium and 19 Low, using the report's own ratings. The notes recommend updating, especially for servers shared by several merchants. The list covers areas such as payouts, checkout forms, the BitPay-compatible API (anonymous invoice access, token checks, size limits), two-factor attempt limits, store-to-store access checks in app settings, search, notifications and email rules. No CVE or advisory number is given, and the release notes do not say which earlier version introduced each finding, so the affected range is unknown beyond 'earlier than 2.4.7'.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "GIT",
+        "name": "https://github.com/btcpayserver/btcpayserver"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "2.4.7"
+            }
+          ]
+        }
+      ],
+      "database_specific": {
+        "range_note": "Start of the affected range is not stated; 0 is a placeholder for 'unknown'. Findings are in different areas and may not all affect every earlier version."
+      }
+    }
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://github.com/btcpayserver/btcpayserver/releases/tag/v2.4.7"
+    }
+  ],
+  "database_specific": {
+    "guard_dog": {
+      "conditions": [
+        {
+          "fact": "service_running",
+          "service": "btcpay-server"
+        },
+        {
+          "fact": "multi_store_server",
+          "required": false,
+          "note": "the project stresses servers shared by several merchants"
+        }
+      ],
+      "conditions_format": "draft format, finalized in Phase 2.2",
+      "playbook": [
+        "Check the BTCPay Server version.",
+        "If it is older than 2.4.7, update to 2.4.7 or later (Server Settings, Maintenance, Update).",
+        "If several merchants share the server, update first and review store permissions afterwards."
+      ],
+      "source_checked": "2026-11-16"
+    },
+    "no_cve": true,
+    "primary_source_kind": "release notes only",
+    "vendor_severity_counts": {
+      "critical": 1,
+      "high": 13,
+      "medium": 52,
+      "low": 19
+    }
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "schema_version": "1.9.2",
+  "id": "x_alby-hub-2026-09-internet-exposed-takeover",
+  "modified": "2026-11-16T00:00:00Z",
+  "published": "2026-09-09T00:00:00Z",
+  "summary": "Alby Hub 1.7.0 to 1.18.5: a critical flaw can let an attacker take over a Hub that is reachable from the internet",
+  "details": "In September 2026 Alby warned of a critical flaw in Alby Hub versions 1.7.0 through 1.18.5 that could let an attacker take over a wallet and send its funds, but only where the Hub's management web interface was reachable from the internet. Versions 1.19.0 and later (first published 2025-08-29) are not affected. Alby said one user was affected and has not described the flaw itself. Alby's advice is to first stop outside access to the Hub (for Docker, publish the port to 127.0.0.1 only; for a cloud server, restrict the firewall rule for port 8080 to your own address), then update; users who ran an affected version while exposed are told to change the unlock password after updating and contact Alby's security address. This record is built from a news report of Alby's announcement; the announcement itself was an X post that could not be retrieved, and no CVE or published advisory exists.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "GIT",
+        "name": "https://github.com/getAlby/hub"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "1.7.0"
+            },
+            {
+              "last_affected": "1.18.5"
+            }
+          ]
+        }
+      ],
+      "database_specific": {
+        "fixed_in": [
+          "1.19.0"
+        ],
+        "range_note": "Range and fix version are from The Hacker News report (secondary source); Alby's own post was not retrieved."
+      }
+    }
+  ],
+  "references": [
+    {
+      "type": "ARTICLE",
+      "url": "https://thehackernews.com/2026/09/alby-hub-critical-flaw-could-let.html"
+    },
+    {
+      "type": "WEB",
+      "url": "https://github.com/getAlby/hub"
+    }
+  ],
+  "database_specific": {
+    "guard_dog": {
+      "conditions": [
+        {
+          "fact": "service_running",
+          "service": "alby-hub"
+        },
+        {
+          "fact": "port_exposed_to_internet",
+          "port": 8080,
+          "required": true,
+          "note": "only affected where the management interface is reachable from the internet"
+        }
+      ],
+      "conditions_format": "draft format, finalized in Phase 2.2",
+      "playbook": [
+        "Check the Alby Hub version and whether port 8080 is reachable from outside your own network (for example, a Docker setup that publishes 8080:8080 instead of 127.0.0.1:8080:8080, or a cloud firewall open to any address).",
+        "First close outside access to the Hub's management port, then update to a current release (1.19.0 is the first fixed version).",
+        "If the Hub was exposed while on 1.7.0 to 1.18.5, change the unlock password after updating, contact Alby's security address, and check the wallet for payments you did not make."
+      ],
+      "source_checked": "2026-11-16"
+    },
+    "no_cve": true,
+    "published_basis": "date of the news report; Alby's own announcement date was not retrieved",
+    "primary_source_kind": "SECONDARY: news report (Alby's own announcement was an X post, not retrieved)",
+    "primary_source_retrieved": false
+  }
+}

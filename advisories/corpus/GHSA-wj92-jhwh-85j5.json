@@ -1,0 +1,74 @@
+{
+  "schema_version": "1.9.2",
+  "id": "GHSA-wj92-jhwh-85j5",
+  "modified": "2026-11-16T00:00:00Z",
+  "published": "2026-09-08T00:00:00Z",
+  "summary": "RTL up to 0.15.11: one Eclair route lacks login protection and lets an outside caller force circular rebalance payments",
+  "details": "In Ride The Lightning (RTL) up to 0.15.11, the route that starts a circular rebalance on an Eclair node was registered without the login check that protects all other channel and payment routes. Anyone who can reach RTL's backend over the network can start a rebalance without the RTL password. The node pays routing fees for the forced payment, its channel balances can be shifted, and some routing and channel data leaks; the action can be repeated to drain fees. It only applies when the connected node is Eclair, and the operator had loaded that node at least once since RTL started. The project rates it Medium (5.6). Fixed in 0.15.12. No CVE is assigned, and OSV does not carry it.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "GIT",
+        "name": "https://github.com/Ride-The-Lightning/RTL"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "last_affected": "0.15.11"
+            }
+          ]
+        }
+      ],
+      "database_specific": {
+        "fixed_in": [
+          "0.15.12"
+        ],
+        "range_note": "Vendor states '<= v0.15.11', patched v0.15.12; the start of the range is not stated (0 means unknown)."
+      }
+    }
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://github.com/Ride-The-Lightning/RTL/security/advisories/GHSA-wj92-jhwh-85j5"
+    }
+  ],
+  "database_specific": {
+    "guard_dog": {
+      "conditions": [
+        {
+          "fact": "service_running",
+          "service": "rtl"
+        },
+        {
+          "fact": "backend_in_use",
+          "service": "rtl",
+          "value": "eclair",
+          "required": true
+        },
+        {
+          "fact": "port_exposed_to_internet",
+          "required": false,
+          "note": "attacker needs network access to RTL's backend; internet exposure makes it worse"
+        }
+      ],
+      "conditions_format": "draft format, finalized in Phase 2.2",
+      "playbook": [
+        "Check the RTL version and which Lightning node it connects to.",
+        "If it is 0.15.11 or older and uses Eclair, update RTL to 0.15.12 or later.",
+        "Until then, keep RTL off the public internet and check the node for rebalance payments you did not start."
+      ],
+      "source_checked": "2026-11-16"
+    },
+    "no_cve": true,
+    "not_in_osv_as_of": "2026-11-16",
+    "vendor_severity": "Medium",
+    "cvss": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:L",
+    "primary_source_kind": "GitHub security advisory (repository-only, no package ecosystem)"
+  }
+}
