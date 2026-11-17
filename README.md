@@ -102,6 +102,13 @@ Guard Dog is built to work well with AI agents, on both sides:
 
 I know I'm missing things. If you run your own node, relay or mint, you already know something Guard Dog needs to know. There's room for testers, people who know a service inside out, advisory curators, white-hat breakers, Rust and web developers, and writers. Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Community
+
+- **[Discussions](https://github.com/MaxSikorski/guard-dog/discussions):** questions, ideas, your setup and node platform talk.
+- **[Issues](https://github.com/MaxSikorski/guard-dog/issues/new/choose):** bugs, false alarms, missed advisories and adding your project to the catalog.
+- **[Code of Conduct](CODE_OF_CONDUCT.md)** for everyone taking part, and **[how the project is run](GOVERNANCE.md)**.
+- **[Getting help](SUPPORT.md)** and **[reporting a vulnerability privately](SECURITY.md)**.
+
 ## Support
 
 Guard Dog is free and open source, with no subscriptions and no ads. If it helps you:

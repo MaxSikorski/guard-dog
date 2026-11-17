@@ -1,0 +1,29 @@
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Early ideas, half-formed thoughts and answers to the open questions in the [roadmap](https://github.com/MaxSikorski/guard-dog/blob/main/ROADMAP.md#open-questions-where-id-love-help) all belong here. When an idea is concrete enough to build, it becomes an issue.
+
+        Guard Dog will never hold keys, move funds, change a system without the user's approval, send a setup's details anywhere the user didn't choose, or scan machines the user doesn't own.
+  - type: dropdown
+    id: about
+    attributes:
+      label: What is this about?
+      options:
+        - A new idea
+        - An answer to a roadmap open question
+        - Something Guard Dog should stop doing or do differently
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+      description: What you'd like, and why it matters to someone running their own node, relay or mint. If you're answering a roadmap question, say which number.
+    validations:
+      required: true
+  - type: textarea
+    id: how-you-do-it
+    attributes:
+      label: How you handle this today
+      description: Even "here's how I do it on my box" helps a lot.
