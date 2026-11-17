@@ -23,6 +23,7 @@ use std::sync::LazyLock;
 use regex::{Regex, RegexBuilder};
 use toml::{Table, Value};
 
+use crate::Untrusted;
 use crate::catalog_files::FILES;
 
 // ---------- reviewed lists ----------
@@ -277,16 +278,15 @@ str_enum! {
     CertSource {
         /// The certificate the node generated.
         NodeTlsCert = "node-tls-cert",
-        /// The system's root certificates.
-        SystemRoots = "system-roots",
         /// A certificate pinned in Guard Dog's config.
         PinnedInConfig = "pinned-in-config",
     }
 }
 
-/// A structured, read-only call. Never a shell string.
+/// The shape of a structured, read-only call. Never a shell string.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Call {
+#[non_exhaustive]
+pub enum CallKind {
     /// A command line: a bare program from `recognize.binaries` and plain words.
     Cli {
         /// The program, then its arguments.
@@ -313,22 +313,44 @@ pub enum Call {
     },
 }
 
+/// A call the loader checked: read-only, on [`READ_ONLY_CALLS`], with no shell,
+/// host or address in it. Only the loader can make one; code outside this
+/// module can read it but not forge it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Call(CallKind);
+
 impl Call {
+    /// What the call is.
+    #[must_use]
+    pub fn kind(&self) -> &CallKind {
+        &self.0
+    }
+
     /// The call as [`READ_ONLY_CALLS`] spells it: (form, descriptor).
     #[must_use]
     pub fn descriptor(&self) -> (&'static str, String) {
-        match self {
-            Self::Cli { argv, .. } => ("cli", argv.join(" ")),
-            Self::Http { path, .. } => ("http", format!("GET {path}")),
-            Self::Rpc { method } => ("rpc", method.clone()),
-            Self::Grpc { method } => ("grpc", method.clone()),
+        match &self.0 {
+            CallKind::Cli { argv, .. } => ("cli", argv.join(" ")),
+            CallKind::Http { path, .. } => ("http", format!("GET {path}")),
+            CallKind::Rpc { method } => ("rpc", method.clone()),
+            CallKind::Grpc { method } => ("grpc", method.clone()),
         }
     }
 }
 
+/// A token is a version only if it is 1 to 64 characters of `[0-9A-Za-z.+~-]`.
+fn is_version_token(s: &str) -> bool {
+    (1..=64).contains(&s.len())
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '~' | '-'))
+}
+
 /// A regex that runs on a service's reply. Anchored as `\A(?:pattern)\z`, at
 /// most 200 characters, no inline flags, a size limit on the compiled program,
-/// and only ever run on replies of at most [`MAX_REPLY`] bytes.
+/// compiled with Unicode off where the pattern allows it, and only ever run on
+/// replies of at most [`MAX_REPLY`] bytes that are pure ASCII. The reply is
+/// [`Untrusted`]; what comes out is a validated version token, never raw reply
+/// text.
 #[derive(Clone, Debug)]
 pub struct Pattern {
     re: Regex,
@@ -356,25 +378,38 @@ impl Pattern {
         Ok(p)
     }
 
-    /// Does the whole reply match? A reply over [`MAX_REPLY`] bytes never does.
-    #[must_use]
-    pub fn matches(&self, reply: &str) -> bool {
-        reply.len() <= MAX_REPLY && self.re.is_match(reply)
+    /// A reply is only ever matched when it is at most [`MAX_REPLY`] bytes and ASCII.
+    fn readable(reply: &str) -> bool {
+        reply.len() <= MAX_REPLY && reply.is_ascii()
     }
 
-    /// The `version` group of a whole-reply match. A reply over [`MAX_REPLY`]
-    /// bytes, or one the pattern only partly matches, gives `None`.
+    /// Does the whole reply match? A reply over [`MAX_REPLY`] bytes, or with
+    /// any non-ASCII character, never does.
     #[must_use]
-    pub fn version<'a>(&self, reply: &'a str) -> Option<&'a str> {
-        if reply.len() > MAX_REPLY {
+    pub fn matches(&self, reply: &Untrusted<String>) -> bool {
+        // expose_untrusted: matched by an anchored, bounded regex; nothing is returned.
+        let text = reply.expose_untrusted();
+        Self::readable(text) && self.re.is_match(text)
+    }
+
+    /// The `version` group of a whole-reply match, if it is a valid version
+    /// token (1 to 64 of `[0-9A-Za-z.+~-]`). A reply over [`MAX_REPLY`] bytes,
+    /// a non-ASCII one, a partial match or any other token gives `None`.
+    #[must_use]
+    pub fn version<'a>(&self, reply: &'a Untrusted<String>) -> Option<&'a str> {
+        // expose_untrusted: only a token that passes `is_version_token` leaves this function.
+        let text = reply.expose_untrusted();
+        if !Self::readable(text) {
             return None;
         }
-        self.re.captures(reply)?.name("version").map(|m| m.as_str())
+        let v = self.re.captures(text)?.name("version")?.as_str();
+        is_version_token(v).then_some(v)
     }
 }
 
 /// `[upstream]`: where the project lives.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Upstream {
     /// `https://host/owner/repo`.
     pub repo: String,
@@ -390,6 +425,7 @@ pub struct Upstream {
 
 /// One `[[recognize.ports]]` item.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Port {
     /// 1 to 65535.
     pub port: u16,
@@ -406,18 +442,38 @@ pub struct Port {
 /// One `[[recognize.probes]]` item: a read-only call that helps tell a product apart.
 #[derive(Clone, Debug)]
 pub struct Probe {
-    /// The kind of call.
-    pub kind: ProbeKind,
-    /// The call.
-    pub call: Call,
-    /// The port it goes to (default: `version.endpoint_port`).
-    pub port: Option<u16>,
-    /// The reply field the pattern reads, when there is a pattern.
-    pub field: Option<String>,
+    kind: ProbeKind,
+    call: Call,
+    port: Option<u16>,
+    field: Option<String>,
     matcher: Option<Pattern>,
 }
 
 impl Probe {
+    /// The kind of call.
+    #[must_use]
+    pub fn kind(&self) -> ProbeKind {
+        self.kind
+    }
+
+    /// The call.
+    #[must_use]
+    pub fn call(&self) -> &Call {
+        &self.call
+    }
+
+    /// The port it goes to (default: `version.endpoint_port`).
+    #[must_use]
+    pub fn port(&self) -> Option<u16> {
+        self.port
+    }
+
+    /// The reply field the pattern reads, when there is a pattern.
+    #[must_use]
+    pub fn field(&self) -> Option<&str> {
+        self.field.as_deref()
+    }
+
     /// The anchored pattern this probe's field must match, if it has one.
     #[must_use]
     pub fn pattern(&self) -> Option<&Pattern> {
@@ -425,15 +481,16 @@ impl Probe {
     }
 
     /// Does the probe's pattern match this reply field? `false` with no pattern,
-    /// and for a reply over [`MAX_REPLY`] bytes.
+    /// and for a reply over [`MAX_REPLY`] bytes or with non-ASCII text.
     #[must_use]
-    pub fn matches(&self, reply: &str) -> bool {
+    pub fn matches(&self, reply: &Untrusted<String>) -> bool {
         self.matcher.as_ref().is_some_and(|p| p.matches(reply))
     }
 }
 
 /// `[recognize]`: how to tell the product is there.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Recognize {
     /// Normalised image names (`docker.io/namespace/repo`, `*` only at the end).
     pub images: Vec<String>,
@@ -449,6 +506,7 @@ pub struct Recognize {
 
 /// `[version.tls]` of a gRPC source. There is no way to skip verification.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Tls {
     /// Where the certificate comes from.
     pub cert_source: CertSource,
@@ -459,14 +517,27 @@ pub struct Tls {
 /// `[version.call]`.
 #[derive(Clone, Debug)]
 pub struct VersionCall {
+    field: String,
+    call: Option<Call>,
+}
+
+impl VersionCall {
     /// The reply field read: a plain dotted name.
-    pub field: String,
+    #[must_use]
+    pub fn field(&self) -> &str {
+        &self.field
+    }
+
     /// The call; `None` for `image-label` and `platform-manifest` sources.
-    pub call: Option<Call>,
+    #[must_use]
+    pub fn call(&self) -> Option<&Call> {
+        self.call.as_ref()
+    }
 }
 
 /// One `[[version.examples]]` item.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Example {
     /// The reply, as sent.
     pub raw: String,
@@ -481,27 +552,70 @@ pub struct Example {
 /// `[version]`: how to read the product's version.
 #[derive(Clone, Debug)]
 pub struct Version {
-    /// Where the version is read from.
-    pub source: Source,
-    /// The least-privileged credential, in words.
-    pub credential: String,
-    /// The regex source text.
-    pub regex: String,
-    /// How versions compare.
-    pub scheme: Scheme,
-    /// The port a network source goes to, one of `recognize.ports`.
-    pub endpoint_port: Option<u16>,
-    /// TLS, for a gRPC source.
-    pub tls: Option<Tls>,
-    /// The call and the field read from its reply.
-    pub call: VersionCall,
-    /// Replies and the versions they give.
-    pub examples: Vec<Example>,
+    source: Source,
+    credential: String,
+    regex: String,
+    scheme: Scheme,
+    endpoint_port: Option<u16>,
+    tls: Option<Tls>,
+    call: VersionCall,
+    examples: Vec<Example>,
     pattern: Pattern,
+}
+
+impl Version {
+    /// Where the version is read from.
+    #[must_use]
+    pub fn source(&self) -> Source {
+        self.source
+    }
+
+    /// The least-privileged credential, in words.
+    #[must_use]
+    pub fn credential(&self) -> &str {
+        &self.credential
+    }
+
+    /// The regex source text.
+    #[must_use]
+    pub fn regex_source(&self) -> &str {
+        &self.regex
+    }
+
+    /// How versions compare.
+    #[must_use]
+    pub fn scheme(&self) -> Scheme {
+        self.scheme
+    }
+
+    /// The port a network source goes to, one of `recognize.ports`.
+    #[must_use]
+    pub fn endpoint_port(&self) -> Option<u16> {
+        self.endpoint_port
+    }
+
+    /// TLS, for a gRPC source.
+    #[must_use]
+    pub fn tls(&self) -> Option<&Tls> {
+        self.tls.as_ref()
+    }
+
+    /// The call and the field read from its reply.
+    #[must_use]
+    pub fn call(&self) -> &VersionCall {
+        &self.call
+    }
+
+    /// Replies and the versions they give.
+    #[must_use]
+    pub fn examples(&self) -> &[Example] {
+        &self.examples
+    }
 }
 
 /// One `[[platform_map]]` item.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct PlatformMap {
     /// The platform.
     pub platform: String,
@@ -515,6 +629,7 @@ pub struct PlatformMap {
 
 /// One `[[advisories.feeds]]` item.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Feed {
     /// `atom`, `rss`, `markdown-repo` or `release-notes`.
     pub kind: String,
@@ -524,6 +639,7 @@ pub struct Feed {
 
 /// `[advisories]`: where the product's security advisories come from.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Advisories {
     /// `"<ECOSYSTEM> <name>"`.
     pub osv_packages: Vec<String>,
@@ -537,6 +653,7 @@ pub struct Advisories {
 
 /// One `[[signing.keys]]` item.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SigningKey {
     /// Whose key.
     pub who: String,
@@ -548,6 +665,7 @@ pub struct SigningKey {
 
 /// `[signing]`: how the product's releases are signed.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Signing {
     /// `signed-multi`, `signed-single`, `tag-only`, `unsigned` or `unknown`.
     pub level: String,
@@ -567,6 +685,7 @@ pub struct Signing {
 
 /// `[review]`: what was checked and what is still open.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Review {
     /// A date, `YYYY-MM-DD`.
     pub last_reviewed: String,
@@ -576,48 +695,117 @@ pub struct Review {
     pub todo: Vec<String>,
 }
 
-/// One catalog entry, validated.
+/// One catalog entry, validated. Only the loader makes one; its fields are read
+/// through accessors.
 #[derive(Clone, Debug)]
 pub struct Entry {
-    /// The slug; equals the file name.
-    pub id: String,
-    /// The display name.
-    pub name: String,
-    /// `service`, `platform`, `device`, `app`, `miner` or `package`.
-    pub kind: String,
-    /// Other names advisories use.
-    pub aliases: Vec<String>,
-    /// One plain-English line.
-    pub summary: String,
-    /// Does it hold funds or keys, or host software that does?
-    pub money: bool,
-    /// The upstream licence.
-    pub licence: String,
-    /// The entry this one is a fork of.
-    pub fork_of: Option<String>,
-    /// Entries this product ships; one fact per bundled id.
-    pub bundles: Vec<String>,
-    /// Where the project lives.
-    pub upstream: Upstream,
-    /// How to recognise it.
-    pub recognize: Recognize,
-    /// How to read its version.
-    pub version: Version,
-    /// How platforms package it.
-    pub platform_map: Vec<PlatformMap>,
-    /// Where its advisories come from.
-    pub advisories: Advisories,
-    /// How its releases are signed.
-    pub signing: Signing,
-    /// What was checked.
-    pub review: Review,
+    id: String,
+    name: String,
+    kind: String,
+    aliases: Vec<String>,
+    summary: String,
+    money: bool,
+    licence: String,
+    fork_of: Option<String>,
+    bundles: Vec<String>,
+    upstream: Upstream,
+    recognize: Recognize,
+    version: Version,
+    platform_map: Vec<PlatformMap>,
+    advisories: Advisories,
+    signing: Signing,
+    review: Review,
 }
 
 impl Entry {
+    /// The slug; equals the file name.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
     /// The display name.
     #[must_use]
     pub fn display_name(&self) -> &str {
         &self.name
+    }
+
+    /// `service`, `platform`, `device`, `app`, `miner` or `package`.
+    #[must_use]
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    /// Other names advisories use.
+    #[must_use]
+    pub fn aliases(&self) -> &[String] {
+        &self.aliases
+    }
+
+    /// One plain-English line.
+    #[must_use]
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+
+    /// Does it hold funds or keys, or host software that does?
+    #[must_use]
+    pub fn money(&self) -> bool {
+        self.money
+    }
+
+    /// The upstream licence.
+    #[must_use]
+    pub fn licence(&self) -> &str {
+        &self.licence
+    }
+
+    /// The entry this one is a fork of.
+    #[must_use]
+    pub fn fork_of(&self) -> Option<&str> {
+        self.fork_of.as_deref()
+    }
+
+    /// Entries this product ships; one fact per bundled id.
+    #[must_use]
+    pub fn bundles(&self) -> &[String] {
+        &self.bundles
+    }
+
+    /// Where the project lives.
+    #[must_use]
+    pub fn upstream(&self) -> &Upstream {
+        &self.upstream
+    }
+
+    /// How to recognise it.
+    #[must_use]
+    pub fn recognize(&self) -> &Recognize {
+        &self.recognize
+    }
+
+    /// How platforms package it.
+    #[must_use]
+    pub fn platform_map(&self) -> &[PlatformMap] {
+        &self.platform_map
+    }
+
+    /// Where its advisories come from.
+    #[must_use]
+    pub fn advisories(&self) -> &Advisories {
+        &self.advisories
+    }
+
+    /// How its releases are signed.
+    #[must_use]
+    pub fn signing(&self) -> &Signing {
+        &self.signing
+    }
+
+    /// What was checked.
+    #[must_use]
+    pub fn review(&self) -> &Review {
+        &self.review
     }
 
     /// How versions of this product compare.
@@ -640,9 +828,10 @@ impl Entry {
     }
 
     /// Reads the version from a reply. The whole reply must match the entry's
-    /// anchored regex, and a reply over [`MAX_REPLY`] bytes is never matched.
+    /// anchored regex; a reply over [`MAX_REPLY`] bytes or with non-ASCII text
+    /// is never matched; the result is a valid version token or nothing.
     #[must_use]
-    pub fn match_version<'a>(&self, reply: &'a str) -> Option<&'a str> {
+    pub fn match_version<'a>(&self, reply: &'a Untrusted<String>) -> Option<&'a str> {
         self.version.pattern.version(reply)
     }
 
@@ -949,7 +1138,18 @@ fn untrusted_regex(pattern: &str) -> R<Regex> {
         .size_limit(REGEX_SIZE_LIMIT)
         .build()
         .map_err(|e| format!("pattern does not compile on its own within the size limit: {e}"))?;
-    RegexBuilder::new(&format!(r"\A(?:{pattern})\z"))
+    let wrapped = format!(r"\A(?:{pattern})\z");
+    // Unicode off where the pattern allows it, so `\d` and `\w` are ASCII. A pattern
+    // that cannot compile that way (it could match bytes that are not UTF-8) uses
+    // Unicode mode; every reply is ASCII-only either way (see `Pattern`).
+    if let Ok(re) = RegexBuilder::new(&wrapped)
+        .size_limit(REGEX_SIZE_LIMIT)
+        .unicode(false)
+        .build()
+    {
+        return Ok(re);
+    }
+    RegexBuilder::new(&wrapped)
         .size_limit(REGEX_SIZE_LIMIT)
         .build()
         .map_err(|e| format!("pattern does not compile within the size limit: {e}"))
@@ -988,6 +1188,10 @@ fn https_parts(url: &str) -> R<(&str, &str)> {
             "URL must have no credentials, query, fragment or spaces: {url}"
         ));
     }
+    // No percent-encoding at all: `%2e%2e` would hide a `..` from the path checks.
+    if rest.contains('%') {
+        return Err(format!("URL must not use % encoding: {url}"));
+    }
     let (host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
     let host_ok = !host.is_empty()
         && host.contains('.')
@@ -997,6 +1201,13 @@ fn https_parts(url: &str) -> R<(&str, &str)> {
     if !host_ok || path.contains("..") {
         return Err(format!(
             "URL host must be a lower-case name, no port: {url}"
+        ));
+    }
+    // A trailing dot (`example.com.`) or an empty label (`a..b`) is a different
+    // spelling of the same name; refuse it before any host rule looks at it.
+    if host.split('.').any(str::is_empty) {
+        return Err(format!(
+            "URL host must not end in a dot or have an empty label: {url}"
         ));
     }
     if internal_host(host) {
@@ -1181,10 +1392,10 @@ fn parse_call(t: &Table, form: &str, ctx: &str, binaries: &[String]) -> R<Option
                 }
                 no_endpoint_text(&format!("{ctx}.argv"), a, true)?;
             }
-            Some(Call::Cli {
+            Some(Call(CallKind::Cli {
                 argv,
                 run_as: RunAs::from_key(t, "run_as", ctx)?,
-            })
+            }))
         }
         "http" => {
             if string(t, "method", ctx)? != "GET" {
@@ -1217,10 +1428,10 @@ fn parse_call(t: &Table, form: &str, ctx: &str, binaries: &[String]) -> R<Option
             } else {
                 None
             };
-            Some(Call::Http {
+            Some(Call(CallKind::Http {
                 path: path.to_string(),
                 accept,
-            })
+            }))
         }
         "rpc" | "grpc" => {
             let m = string(t, "method", ctx)?;
@@ -1233,11 +1444,11 @@ fn parse_call(t: &Table, form: &str, ctx: &str, binaries: &[String]) -> R<Option
             }
             no_endpoint_text(&format!("{ctx}.method"), m, false)?;
             let method = m.to_string();
-            Some(if form == "rpc" {
-                Call::Rpc { method }
+            Some(Call(if form == "rpc" {
+                CallKind::Rpc { method }
             } else {
-                Call::Grpc { method }
-            })
+                CallKind::Grpc { method }
+            }))
         }
         _ => None,
     };
@@ -1281,21 +1492,28 @@ fn is_public_ipv6(token: &str) -> bool {
     }
 }
 
-fn collect_strings(path: &str, v: &Value, out: &mut Vec<(String, String)>) {
+/// Deepest TOML nesting the loader will walk. Entries are flat; anything deeper is refused.
+const MAX_DEPTH: usize = 32;
+
+fn collect_strings(path: &str, v: &Value, depth: usize, out: &mut Vec<(String, String)>) -> R<()> {
+    if depth > MAX_DEPTH {
+        return Err(format!("{path} is nested deeper than {MAX_DEPTH} levels"));
+    }
     match v {
         Value::String(s) => out.push((path.to_string(), s.clone())),
         Value::Array(a) => {
             for (i, x) in a.iter().enumerate() {
-                collect_strings(&format!("{path}[{i}]"), x, out);
+                collect_strings(&format!("{path}[{i}]"), x, depth + 1, out)?;
             }
         }
         Value::Table(t) => {
             for (k, x) in t {
-                collect_strings(&format!("{path}.{k}"), x, out);
+                collect_strings(&format!("{path}.{k}"), x, depth + 1, out)?;
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn is_fingerprint_path(path: &str) -> bool {
@@ -1306,7 +1524,7 @@ fn no_secret_shapes(t: &Table) -> R<()> {
     let fx = fixed()?;
     let mut all = Vec::new();
     for (k, v) in t {
-        collect_strings(&format!(".{k}"), v, &mut all);
+        collect_strings(&format!(".{k}"), v, 0, &mut all)?;
     }
     for (path, s) in all {
         for (name, re) in &fx.shapes {
@@ -1399,6 +1617,16 @@ fn check_image_pattern(img: &str) -> R<()> {
         return Err(format!(
             "image `{img}` must be in normalised form docker.io/namespace/repo, no tag or digest, `*` only at the end"
         ));
+    }
+    // A wildcard follows at least a whole `registry/namespace/repo` prefix: never
+    // `docker.io/*` or `docker.io/library*`, which would claim a whole namespace.
+    if img.ends_with('*') {
+        let segs: Vec<&str> = body.split('/').collect();
+        if segs.len() < 3 || segs.iter().any(|s| s.is_empty()) {
+            return Err(format!(
+                "image wildcard `{img}` must follow a full registry/namespace/repo prefix"
+            ));
+        }
     }
     Ok(())
 }
@@ -1496,7 +1724,7 @@ fn parse_entry(t: &Table, stem: &str) -> R<Entry> {
             platform: one_of(m, "platform", "platform_map", &PLATFORMS)?.to_string(),
             app_id: line(m, "app_id", "platform_map")?.to_string(),
             version_rule: one_of(m, "version_rule", "platform_map", &VERSION_RULES)?.to_string(),
-            note: m.get("note").and_then(Value::as_str).map(str::to_string),
+            note: opt_line(m, "note", "platform_map")?,
         });
     }
 
@@ -1647,6 +1875,12 @@ fn parse_recognize(
         } else {
             None
         };
+        if ports.iter().any(|q| q.port == port && q.proto == proto) {
+            return Err(format!(
+                "recognize.ports lists {port}/{} twice",
+                proto.as_str()
+            ));
+        }
         ports.push(Port {
             port,
             proto,
@@ -1841,7 +2075,8 @@ fn parse_version(
                 );
             }
         }
-        let got = pattern.version(raw);
+        let reply = Untrusted::new(raw.to_string());
+        let got = pattern.version(&reply);
         if got != Some(want) {
             return Err(format!(
                 "version.regex on example `{raw}` gives {got:?}, expected `{want}`"
@@ -1858,7 +2093,10 @@ fn parse_version(
     // No version regex reads plain versions of more than one major number: that would claim
     // any product's reply. A reviewed exception must still need it.
     let advisory_only = examples.iter().all(|e| e.advisory);
-    let majors = major_sweep().iter().filter(|p| pattern.matches(p)).count();
+    let majors = major_sweep()
+        .into_iter()
+        .filter(|p| pattern.matches(&Untrusted::new(p.clone())))
+        .count();
     let excepted = PLAIN_VERSION_OK.iter().any(|(e, _)| *e == id);
     if majors > 1 && !excepted {
         return Err(format!(
