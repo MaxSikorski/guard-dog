@@ -31,7 +31,7 @@ Those are the job of the never-have list and least privilege (threat model secti
 
 ## What the lab must supply
 
-Besides the files in the capture directory layout, the judge needs `pcap/tcpdump.log`: tcpdump's own closing summary (`N packets captured`, `N packets received by filter`, `N packets dropped by kernel`). `netns.sh` already writes tcpdump's messages to `tcpdump.log`; the lab piece stops tcpdump with SIGINT, waits for it to exit and keeps that file as `pcap/tcpdump.log`. A missing file, missing lines, any drop, or a packet count that differs from the pcap is F5. The recorder's addon should write a global `seq` number on every `http` and `tcp` event so requests on different connections can be put back in order (without it the line number is used).
+Besides the files in the capture directory layout, the judge needs `pcap/tcpdump.log`: tcpdump's own closing summary (`N packets captured`, `N packets received by filter`, `N packets dropped by kernel`). The lab piece (PR 2; its `netns.sh` is not in the repository yet) writes tcpdump's messages to `tcpdump.log`, stops tcpdump with SIGINT, waits for it to exit and keeps that file as `pcap/tcpdump.log`. A missing file, missing lines, any drop, or a packet count that differs from the pcap is F5. The recorder's addon should write a global `seq` number on every `http` and `tcp` event so requests on different connections can be put back in order (without it the line number is used).
 
 ## What is in this folder
 

@@ -1,4 +1,4 @@
-//! The 54 synthetic capture scenarios. Each expected report in
+//! The 61 synthetic capture scenarios. Each expected report in
 //! `tests/egress/synthetic/` was written before the code that makes it pass.
 //! None of these is a real capture.
 
