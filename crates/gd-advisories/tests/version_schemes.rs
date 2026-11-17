@@ -56,15 +56,15 @@ fn order_tag(a: &str, b: &str) -> Ordering {
 }
 
 fn git_advisory(ranges: Value, versions: Value) -> Advisory {
-    let mut e = json!({"package": {"ecosystem": "GIT", "name": "https://github.com/hoytech/strfry"}});
+    let mut e =
+        json!({"package": {"ecosystem": "GIT", "name": "https://github.com/hoytech/strfry"}});
     if ranges.as_array().is_some_and(|r| !r.is_empty()) {
         e["ranges"] = ranges;
     }
     if versions.as_array().is_some_and(|r| !r.is_empty()) {
         e["versions"] = versions;
     }
-    let record =
-        json!({"id": "x_test-1", "modified": "2026-11-17T00:00:00Z", "affected": [e]});
+    let record = json!({"id": "x_test-1", "modified": "2026-11-17T00:00:00Z", "affected": [e]});
     parse_advisory(record.to_string().as_bytes()).unwrap()
 }
 
@@ -244,7 +244,14 @@ fn cln_orders_numerically_never_lexically() {
 
 #[test]
 fn cln_legacy_forms() {
-    for ok in ["0.10.2", "v0.12.1", "v0.9.0rc1", "0.11.0rc2", "v0.0.1", "0.7.3"] {
+    for ok in [
+        "0.10.2",
+        "v0.12.1",
+        "v0.9.0rc1",
+        "0.11.0rc2",
+        "v0.0.1",
+        "0.7.3",
+    ] {
         assert!(cln(ok).is_legacy(), "{ok}");
     }
     for ok in ["22.11", "v24.11.1", "00.01", "99.12", "26.06rc1"] {
@@ -260,8 +267,18 @@ fn cln_legacy_forms() {
 #[test]
 fn cln_accepts_the_stated_shapes() {
     for ok in [
-        "24.11", "v24.11", "24.11.0", "24.11.1", "24.11rc1", "24.11.2rc3", "v26.06.9",
-        "25.09", "00.01", "99.12", "26.06rc0", "24.11.18446744073709551616",
+        "24.11",
+        "v24.11",
+        "24.11.0",
+        "24.11.1",
+        "24.11rc1",
+        "24.11.2rc3",
+        "v26.06.9",
+        "25.09",
+        "00.01",
+        "99.12",
+        "26.06rc0",
+        "24.11.18446744073709551616",
     ] {
         assert!(Calver.parse(ok).is_ok(), "{ok}");
     }
@@ -270,11 +287,42 @@ fn cln_accepts_the_stated_shapes() {
 #[test]
 fn cln_refuses_everything_else() {
     for bad in [
-        "", "v", "vv24.11", "V24.11", "26.13", "26.00", "24.1", "24.011", "2024.11", "24.",
-        "24", "24.11.", "24.11.01", "24.11.1.1", "24.11rc", "24.11-rc1", "24.11RC1",
-        "24.11rc01", "24.11rc1rc2", "24.11.rc1", " 24.11", "24.11 ", "24.11+build", "0.10",
-        "0.10.2.1", "0.01.2", "0.10.02", "1.2.3", "5.1", "0", "０.10.2", "２４.11",
-        "24.11\n", "24.11-12-gabc1234", "24.11-dirty", "v24.11-modded",
+        "",
+        "v",
+        "vv24.11",
+        "V24.11",
+        "26.13",
+        "26.00",
+        "24.1",
+        "24.011",
+        "2024.11",
+        "24.",
+        "24",
+        "24.11.",
+        "24.11.01",
+        "24.11.1.1",
+        "24.11rc",
+        "24.11-rc1",
+        "24.11RC1",
+        "24.11rc01",
+        "24.11rc1rc2",
+        "24.11.rc1",
+        " 24.11",
+        "24.11 ",
+        "24.11+build",
+        "0.10",
+        "0.10.2.1",
+        "0.01.2",
+        "0.10.02",
+        "1.2.3",
+        "5.1",
+        "0",
+        "０.10.2",
+        "２４.11",
+        "24.11\n",
+        "24.11-12-gabc1234",
+        "24.11-dirty",
+        "v24.11-modded",
     ] {
         assert_eq!(Calver.parse(bad), Err(VersionError::Malformed), "{bad:?}");
     }
@@ -332,7 +380,10 @@ fn cln_identity_is_the_canonical_form() {
     assert_eq!(Calver.same_identity(a, "v24.11-12-gabc1235"), Some(false));
     assert_eq!(Calver.same_identity(a, "v24.11-13-gabc1234"), Some(false));
     assert_eq!(Calver.same_identity(a, "v24.11"), Some(false));
-    assert_eq!(Calver.same_identity(a, "v24.11-12-gabc1234-modded"), Some(false));
+    assert_eq!(
+        Calver.same_identity(a, "v24.11-12-gabc1234-modded"),
+        Some(false)
+    );
     assert_eq!(
         Calver.same_identity("v24.08.2-modded", "24.08.2-modded"),
         Some(true)
@@ -393,7 +444,9 @@ fn cln_describe_forms_keep_every_field() {
     let d = Calver.parse_describe("v24.11-0-gabc1234").unwrap();
     assert_eq!(d.commit.unwrap().distance, "0");
 
-    let d = Calver.parse_describe("v0.12.1-5-g0123456789abcdef").unwrap();
+    let d = Calver
+        .parse_describe("v0.12.1-5-g0123456789abcdef")
+        .unwrap();
     assert!(d.tag.is_legacy());
 }
 
@@ -401,7 +454,11 @@ fn cln_describe_forms_keep_every_field() {
 fn cln_describe_hash_rules() {
     // 4 to 64 lowercase hex.
     assert!(Calver.parse_describe("v24.11-1-gabcd").is_ok());
-    assert!(Calver.parse_describe(&format!("v24.11-1-g{}", "a".repeat(64))).is_ok());
+    assert!(
+        Calver
+            .parse_describe(&format!("v24.11-1-g{}", "a".repeat(64)))
+            .is_ok()
+    );
     for bad in [
         "v24.11-1-gabc".to_string(),
         format!("v24.11-1-g{}", "a".repeat(65)),
@@ -426,7 +483,11 @@ fn cln_describe_hash_rules() {
 fn cln_parse_never_reads_a_describe_string_as_a_version() {
     // Boundaries and listed versions go through `parse`: a describe string is
     // not a release, so it can never become a range boundary.
-    for s in ["v24.11-12-gabc1234", "v24.11-12-gabc1234-modded", "v24.08.2-modded"] {
+    for s in [
+        "v24.11-12-gabc1234",
+        "v24.11-12-gabc1234-modded",
+        "v24.08.2-modded",
+    ] {
         assert_eq!(Calver.parse(s), Err(VersionError::Malformed), "{s}");
     }
 }
@@ -453,7 +514,11 @@ fn cln_candidate_exact_between_or_nothing() {
         "v24.11-dirty",
         "v24.11-12-gabc1234-dirty",
     ] {
-        assert_eq!(Calver.candidate(dirty), Err(VersionError::Malformed), "{dirty}");
+        assert_eq!(
+            Calver.candidate(dirty),
+            Err(VersionError::Malformed),
+            "{dirty}"
+        );
     }
     assert!(Calver.candidate("v24.13-1-gabc1234").is_err());
 }
@@ -466,7 +531,10 @@ fn describe_tags_use_semver_order() {
     assert_eq!(order_tag("1.0.0-alpha.10", "1.0.0-beta"), Ordering::Less);
     assert_eq!(order_tag("1.0.0-beta", "1.0.0"), Ordering::Less);
     assert_eq!(order_tag("1.0.0-alpha", "1.0.0-alpha.1"), Ordering::Less);
-    assert_eq!(order_tag("1.0.0-alpha.1", "1.0.0-alpha.beta"), Ordering::Less);
+    assert_eq!(
+        order_tag("1.0.0-alpha.1", "1.0.0-alpha.beta"),
+        Ordering::Less
+    );
     assert_eq!(order_tag("1.0.0-beta.2", "1.0.0-beta.11"), Ordering::Less);
     assert_eq!(order_tag("1.0.0-rc.1", "1.0.0"), Ordering::Less);
     assert_eq!(order_tag("1.1.2", "1.1.3"), Ordering::Less);
@@ -484,10 +552,7 @@ fn describe_tags_use_semver_order() {
 
 #[test]
 fn describe_tag_precedence_is_not_identity() {
-    assert_eq!(
-        GitDescribe.same_identity("1.0.0+a", "1.0.0+b"),
-        Some(false)
-    );
+    assert_eq!(GitDescribe.same_identity("1.0.0+a", "1.0.0+b"), Some(false));
     assert_eq!(GitDescribe.same_identity("1.0.0+a", "1.0.0+a"), Some(true));
     assert_eq!(GitDescribe.same_identity("1.1.2", "1.1.2"), Some(true));
     assert_eq!(GitDescribe.same_identity("1.1.2", "1.1.3"), Some(false));
@@ -498,11 +563,33 @@ fn describe_tag_precedence_is_not_identity() {
 #[test]
 fn describe_tag_refuses_what_semver_refuses() {
     for bad in [
-        "", "1", "1.2", "1.02.3", "01.2.3", "1.2.03", "1.2.3.4", "v1.1.2", "1.0.0-", "1.0.0-01",
-        "1.0.0-a..b", "1.0.0-.a", "1.0.0-a.", "1.0.0+", "1.0.0+a..b", "1.0.0 ", " 1.0.0",
-        "1.0.0-é", "１.0.0", "1.0.0-a_b", "1.0.0++a",
+        "",
+        "1",
+        "1.2",
+        "1.02.3",
+        "01.2.3",
+        "1.2.03",
+        "1.2.3.4",
+        "v1.1.2",
+        "1.0.0-",
+        "1.0.0-01",
+        "1.0.0-a..b",
+        "1.0.0-.a",
+        "1.0.0-a.",
+        "1.0.0+",
+        "1.0.0+a..b",
+        "1.0.0 ",
+        " 1.0.0",
+        "1.0.0-é",
+        "１.0.0",
+        "1.0.0-a_b",
+        "1.0.0++a",
     ] {
-        assert_eq!(GitDescribe.parse(bad), Err(VersionError::Malformed), "{bad:?}");
+        assert_eq!(
+            GitDescribe.parse(bad),
+            Err(VersionError::Malformed),
+            "{bad:?}"
+        );
     }
     // Numeric prerelease identifiers forbid leading zeros; build metadata allows them.
     assert!(GitDescribe.parse("1.0.0+001").is_ok());
@@ -551,7 +638,9 @@ fn describe_parse_from_the_right() {
     );
     assert!(!d.dirty);
 
-    let d = GitDescribe.parse_describe("1.1.2-148-g4cd3cf6-dirty").unwrap();
+    let d = GitDescribe
+        .parse_describe("1.1.2-148-g4cd3cf6-dirty")
+        .unwrap();
     assert!(d.dirty);
     assert_eq!(d.commit.unwrap().distance, "148");
 
@@ -565,12 +654,18 @@ fn describe_parse_from_the_right() {
     let d = GitDescribe.parse_describe("1.2.0-rc.1-5-gabcdef0").unwrap();
     assert_eq!(d.tag, tag("1.2.0-rc.1"));
     assert_eq!(d.commit.unwrap().distance, "5");
-    let d = GitDescribe.parse_describe("1.2.0-beta-12-g0123abcd-dirty").unwrap();
+    let d = GitDescribe
+        .parse_describe("1.2.0-beta-12-g0123abcd-dirty")
+        .unwrap();
     assert_eq!(d.tag, tag("1.2.0-beta"));
     assert!(d.dirty);
 
     // `-modded` is CLN's marker, not strfry's.
-    assert!(GitDescribe.parse_describe("1.1.2-148-g4cd3cf6-modded").is_err());
+    assert!(
+        GitDescribe
+            .parse_describe("1.1.2-148-g4cd3cf6-modded")
+            .is_err()
+    );
     // An unreadable tag or hash is an error, never a guess.
     let long_hash = format!("1.1.2-148-g{}", "a".repeat(65));
     for bad in [
@@ -641,13 +736,28 @@ fn describe_candidate_is_an_interval_or_nothing() {
 fn describe_identity_keeps_every_field() {
     let a = "1.1.2-148-g4cd3cf6";
     assert_eq!(GitDescribe.same_identity(a, a), Some(true));
-    assert_eq!(GitDescribe.same_identity(a, "1.1.2-148-g4cd3cf7"), Some(false));
-    assert_eq!(GitDescribe.same_identity(a, "1.1.2-149-g4cd3cf6"), Some(false));
+    assert_eq!(
+        GitDescribe.same_identity(a, "1.1.2-148-g4cd3cf7"),
+        Some(false)
+    );
+    assert_eq!(
+        GitDescribe.same_identity(a, "1.1.2-149-g4cd3cf6"),
+        Some(false)
+    );
     assert_eq!(GitDescribe.same_identity(a, "1.1.2"), Some(false));
-    assert_eq!(GitDescribe.same_identity(a, "1.1.2-148-g4cd3cf6-dirty"), Some(false));
-    assert_eq!(GitDescribe.same_identity(a, "1.1.3-148-g4cd3cf6"), Some(false));
+    assert_eq!(
+        GitDescribe.same_identity(a, "1.1.2-148-g4cd3cf6-dirty"),
+        Some(false)
+    );
+    assert_eq!(
+        GitDescribe.same_identity(a, "1.1.3-148-g4cd3cf6"),
+        Some(false)
+    );
     assert_eq!(GitDescribe.same_identity(a, "nope"), None);
-    assert_eq!(GitDescribe.same_identity("1.1.2-dirty", "1.1.2-dirty"), Some(true));
+    assert_eq!(
+        GitDescribe.same_identity("1.1.2-dirty", "1.1.2-dirty"),
+        Some(true)
+    );
 }
 
 #[test]
@@ -724,7 +834,10 @@ fn describe_dirty_or_unreadable_never_clears() {
             "{installed}"
         );
     }
-    let adv = git_advisory(json!([eco(json!([{"introduced": "0"}, {"fixed": "1.0.4"}]))]), json!([]));
+    let adv = git_advisory(
+        json!([eco(json!([{"introduced": "0"}, {"fixed": "1.0.4"}]))]),
+        json!([]),
+    );
     assert_eq!(
         reason(&evaluate_entry(&GitDescribe, &adv, 0, None)),
         UnknownReason::InstalledVersionUnknown
@@ -734,7 +847,10 @@ fn describe_dirty_or_unreadable_never_clears() {
 #[test]
 fn describe_list_and_git_range_paths() {
     // A GIT range is unknown whatever the scheme: no commit graph.
-    let adv = git_advisory(json!([{"type": "GIT", "events": [{"introduced": "0"}, {"fixed": "0123456789abcdef0123456789abcdef01234567"}]}]), json!([]));
+    let adv = git_advisory(
+        json!([{"type": "GIT", "events": [{"introduced": "0"}, {"fixed": "0123456789abcdef0123456789abcdef01234567"}]}]),
+        json!([]),
+    );
     assert_eq!(
         reason(&evaluate_entry(&GitDescribe, &adv, 0, Some(FIXTURE_STRFRY))),
         UnknownReason::NoCommitGraph
@@ -780,7 +896,15 @@ fn cln_ev(events: &str, installed: &str) -> VersionEvidence {
 #[test]
 fn cln_ranges_use_calendar_and_legacy_order() {
     let r = r#"[{"introduced":"0"},{"fixed":"26.06.8"}]"#;
-    for inside in ["v0.12.1", "25.09", "26.06", "26.06rc3", "26.06.7", "v26.06.7rc1", "26.06.8rc2"] {
+    for inside in [
+        "v0.12.1",
+        "25.09",
+        "26.06",
+        "26.06rc3",
+        "26.06.7",
+        "v26.06.7rc1",
+        "26.06.8rc2",
+    ] {
         assert_eq!(kind(&cln_ev(r, inside)), "in-range", "{inside}");
     }
     for outside in ["26.06.8", "26.06.9", "26.09", "v27.01", "26.06.10"] {
@@ -841,11 +965,9 @@ fn every_fixture_and_catalog_version_for_cln_and_strfry_parses() {
     assert!(GitDescribe.parse_describe(&v).is_ok());
     assert!(GitDescribe.candidate(&v).is_ok());
     // The old synthetic setup runs no strfry.
-    assert!(
-        !fixture_rows().iter().any(|r| r.table == "setup.service"
-            && r.setup == "lab-old-synthetic"
-            && r.fields.get("id").map(String::as_str) == Some("strfry"))
-    );
+    assert!(!fixture_rows().iter().any(|r| r.table == "setup.service"
+        && r.setup == "lab-old-synthetic"
+        && r.fields.get("id").map(String::as_str) == Some("strfry")));
 
     let examples = catalog_examples("core-lightning");
     assert!(!examples.is_empty());
@@ -930,7 +1052,11 @@ impl ClnSpec {
 
     /// The independent model: (era, a, b, patch, rc rank).
     fn key(&self) -> (u8, u32, u32, u32, (u8, u32)) {
-        let c = if self.legacy || !self.patch_written { 0 } else { self.c };
+        let c = if self.legacy || !self.patch_written {
+            0
+        } else {
+            self.c
+        };
         (
             u8::from(!self.legacy),
             self.a,
@@ -1173,7 +1299,10 @@ fn describe_check<S: VersionScheme>(scheme: &S) -> Result<(), String> {
     );
     let e = evaluate_entry(scheme, &adv, 0, Some(FIXTURE_STRFRY));
     if !matches!(e, VersionEvidence::Unknown { .. }) {
-        return Err(format!("introduced at the tag: expected unknown, got {}", kind(&e)));
+        return Err(format!(
+            "introduced at the tag: expected unknown, got {}",
+            kind(&e)
+        ));
     }
     let adv = git_advisory(
         json!([eco(json!([{"introduced": "0"}, {"fixed": "1.1.3"}]))]),
@@ -1181,7 +1310,10 @@ fn describe_check<S: VersionScheme>(scheme: &S) -> Result<(), String> {
     );
     let e = evaluate_entry(scheme, &adv, 0, Some(FIXTURE_STRFRY));
     if !matches!(e, VersionEvidence::Unknown { .. }) {
-        return Err(format!("fixed at 1.1.3: expected unknown, got {}", kind(&e)));
+        return Err(format!(
+            "fixed at 1.1.3: expected unknown, got {}",
+            kind(&e)
+        ));
     }
     Ok(())
 }
@@ -1195,12 +1327,14 @@ struct Sv {
 }
 impl Ord for Sv {
     fn cmp(&self, o: &Self) -> Ordering {
-        self.nums.cmp(&o.nums).then_with(|| match (&self.pre, &o.pre) {
-            (None, None) => Ordering::Equal,
-            (Some(_), None) => Ordering::Less,
-            (None, Some(_)) => Ordering::Greater,
-            (Some(a), Some(b)) => a.cmp(b),
-        })
+        self.nums
+            .cmp(&o.nums)
+            .then_with(|| match (&self.pre, &o.pre) {
+                (None, None) => Ordering::Equal,
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (Some(a), Some(b)) => a.cmp(b),
+            })
     }
 }
 impl PartialOrd for Sv {
@@ -1216,7 +1350,9 @@ impl VersionScheme for DescribeAsSemver {
             Some((c, p)) => (c, Some(p.to_string())),
             None => (raw, None),
         };
-        let mut it = core.split('.').map(|p| p.parse::<u64>().map_err(|_| VersionError::Malformed));
+        let mut it = core
+            .split('.')
+            .map(|p| p.parse::<u64>().map_err(|_| VersionError::Malformed));
         let nums = [
             it.next().ok_or(VersionError::Malformed)??,
             it.next().ok_or(VersionError::Malformed)??,
@@ -1331,7 +1467,10 @@ impl VersionScheme for Lexical {
 fn mutant_cln_legacy_misordered_is_caught() {
     assert_eq!(cln_legacy_check(&Calver), Ok(()));
     let err = cln_legacy_check(&LegacyAbove).unwrap_err();
-    assert!(err.contains("v0.12.1 < v22.11") || err.contains("v0.10.2"), "{err}");
+    assert!(
+        err.contains("v0.12.1 < v22.11") || err.contains("v0.10.2"),
+        "{err}"
+    );
     let err = cln_legacy_check(&Lexical).unwrap_err();
     assert!(err.starts_with("expected"), "{err}");
 }

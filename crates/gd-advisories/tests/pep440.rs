@@ -231,7 +231,10 @@ fn getters_report_the_parts() {
     assert_eq!(v.local().as_deref(), Some("abc.7"));
     let v = p("1.0");
     assert_eq!(v.epoch(), "0");
-    assert_eq!((v.pre(), v.post(), v.dev(), v.local()), (None, None, None, None));
+    assert_eq!(
+        (v.pre(), v.post(), v.dev(), v.local()),
+        (None, None, None, None)
+    );
     assert_eq!(p("1.0rc").pre(), Some(("rc", "0")));
     assert_eq!(p("1.0beta").pre(), Some(("b", "0")));
 }
@@ -332,19 +335,65 @@ fn numbers_beyond_64_bits_compare_exactly() {
         Ordering::Less
     );
     assert_eq!(order("1.18446744073709551616", "1.9"), Ordering::Greater);
-    assert_eq!(order("1.0a18446744073709551616", "1.0a9"), Ordering::Greater);
-    assert_eq!(order("1.0+18446744073709551616", "1.0+9"), Ordering::Greater);
+    assert_eq!(
+        order("1.0a18446744073709551616", "1.0a9"),
+        Ordering::Greater
+    );
+    assert_eq!(
+        order("1.0+18446744073709551616", "1.0+9"),
+        Ordering::Greater
+    );
 }
 
 #[test]
 fn refused_inputs() {
     for bad in [
-        "", " ", "v", "1.", ".1", "1..0", "1.0+", "1.0+a..b", "1.0+a.", "1.0+.a", "1!", "!1.0",
-        "a1", "1.0.0-", "1.0 1", "1.0xyz", "vv1.0", "1.0++a", "1.0.post1.post2", "1.0.dev1.dev2",
-        "1.0a1a2", "1.0-a-b", "1.0+a b", "1,0", "١.٠", "1.0\u{e9}", "1_0", "1.0.dev1.post1",
-        "1.0.post1a1", "1.0!1", "1!1!1.0", "-1.0", "+1.0", "1.0+-a", "1.0+a-", "1.0+_", "1.0 +a",
-        "1 .0", "1.0\u{0}", "\u{ff11}.0", "v 1.0", "1.0.0.0.", "1.0-", "1.0.",
-        "1.0a1+", "1.0rc1.",
+        "",
+        " ",
+        "v",
+        "1.",
+        ".1",
+        "1..0",
+        "1.0+",
+        "1.0+a..b",
+        "1.0+a.",
+        "1.0+.a",
+        "1!",
+        "!1.0",
+        "a1",
+        "1.0.0-",
+        "1.0 1",
+        "1.0xyz",
+        "vv1.0",
+        "1.0++a",
+        "1.0.post1.post2",
+        "1.0.dev1.dev2",
+        "1.0a1a2",
+        "1.0-a-b",
+        "1.0+a b",
+        "1,0",
+        "١.٠",
+        "1.0\u{e9}",
+        "1_0",
+        "1.0.dev1.post1",
+        "1.0.post1a1",
+        "1.0!1",
+        "1!1!1.0",
+        "-1.0",
+        "+1.0",
+        "1.0+-a",
+        "1.0+a-",
+        "1.0+_",
+        "1.0 +a",
+        "1 .0",
+        "1.0\u{0}",
+        "\u{ff11}.0",
+        "v 1.0",
+        "1.0.0.0.",
+        "1.0-",
+        "1.0.",
+        "1.0a1+",
+        "1.0rc1.",
     ] {
         assert_eq!(Pep440.parse(bad), Err(VersionError::Malformed), "{bad:?}");
     }
@@ -401,7 +450,10 @@ fn identity_is_the_normalized_text() {
 
 #[test]
 fn candidate_is_exact_and_flags_are_declared() {
-    assert_eq!(Pep440.candidate("0.21.0").unwrap(), Candidate::Exact(p("0.21.0")));
+    assert_eq!(
+        Pep440.candidate("0.21.0").unwrap(),
+        Candidate::Exact(p("0.21.0"))
+    );
     assert!(Pep440.candidate("0.21.0-").is_err());
     assert!(Pep440.orders());
     // A SEMVER range is not read in this scheme without a reviewed interpretation.
@@ -559,11 +611,27 @@ fn cashu_boundaries_follow_pep440() {
     let adv = corpus_record("PYSEC-2025-89");
     let at = |v: &str| kind(&evaluate_entry(&Pep440, &adv, 0, Some(v)));
     // Below the fix, by PEP 440 rules.
-    for v in ["0.0.1", "0.17.9", "0.18.0rc1", "0.18.0.dev1", "0.18.0a1", "0.17.0.post3", "V0.18.0RC2"] {
+    for v in [
+        "0.0.1",
+        "0.17.9",
+        "0.18.0rc1",
+        "0.18.0.dev1",
+        "0.18.0a1",
+        "0.17.0.post3",
+        "V0.18.0RC2",
+    ] {
         assert_eq!(at(v), "in-range", "{v}");
     }
     // At or above the fix.
-    for v in ["0.18.0", "0.18.0.0", "0.18.0.post1", "0.18.0+local", "0.18.1", "1!0.1", "0.21.0"] {
+    for v in [
+        "0.18.0",
+        "0.18.0.0",
+        "0.18.0.post1",
+        "0.18.0+local",
+        "0.18.1",
+        "1!0.1",
+        "0.21.0",
+    ] {
         assert_eq!(at(v), "out-of-range", "{v}");
     }
     // A version the scheme cannot read is unknown, never out of range.
@@ -627,10 +695,7 @@ fn pep_ranges_lists_and_scheme_gates() {
     );
     // An unreadable boundary poisons its range.
     let r = r#"[{"introduced":"0"},{"fixed":"2.0-"}]"#;
-    assert_eq!(
-        reason(&ev(r, "1.0")),
-        UnknownReason::UnparseableBoundary
-    );
+    assert_eq!(reason(&ev(r, "1.0")), UnknownReason::UnparseableBoundary);
 }
 
 // ------------------------------------------------------------- properties
@@ -808,7 +873,16 @@ impl Spec {
     /// packaging's comparison key, with small integers and class numbers for
     /// the infinities.
     #[allow(clippy::type_complexity)]
-    fn key(&self) -> (u32, Vec<u32>, (u8, u8, u32), (u8, u32), (u8, u32), Option<Vec<Seg>>) {
+    fn key(
+        &self,
+    ) -> (
+        u32,
+        Vec<u32>,
+        (u8, u8, u32),
+        (u8, u32),
+        (u8, u32),
+        Option<Vec<Seg>>,
+    ) {
         let mut rel = self.release.clone();
         while rel.last() == Some(&0) {
             rel.pop();
