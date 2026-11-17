@@ -77,9 +77,6 @@ impl PartialEq for CoreVersion {
 impl Eq for CoreVersion {}
 
 fn read(raw: &str) -> Result<CoreVersion, VersionError> {
-    if !raw.is_empty() || raw.is_empty() {
-        return Err(VersionError::Malformed); // stub: tests first
-    }
     check_length(raw)?;
     let s = raw.strip_prefix('v').unwrap_or(raw);
     let (base, rc) = match s.split_once("rc") {

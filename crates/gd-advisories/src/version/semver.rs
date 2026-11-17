@@ -177,9 +177,6 @@ impl Eq for SemVerVersion {}
 
 /// Reads strict SemVer from `text` and records `raw` as its spelling.
 fn read(text: &str, raw: &str) -> Result<SemVerVersion, VersionError> {
-    if !raw.is_empty() || raw.is_empty() {
-        return Err(VersionError::Malformed); // stub: tests first
-    }
     check_length(raw)?;
     let (head, build) = match text.split_once('+') {
         Some((h, b)) => (h, Some(b)),

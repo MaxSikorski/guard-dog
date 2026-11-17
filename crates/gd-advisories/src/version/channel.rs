@@ -150,9 +150,6 @@ impl ChannelScheme {
     }
 
     fn read(&self, raw: &str) -> Result<ChannelVersion, VersionError> {
-        if !raw.is_empty() || raw.is_empty() {
-            return Err(VersionError::Malformed); // stub: tests first
-        }
         check_length(raw)?;
         let s = raw.strip_prefix('v').unwrap_or(raw);
         let (core, rest) = match s.split_once('-') {
