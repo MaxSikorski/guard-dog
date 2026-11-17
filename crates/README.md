@@ -8,4 +8,6 @@ One line per crate: what it owns. A new crate arrives only when its first real c
 | `gd-core` | The shared types. `Untrusted<T>` is outside text as a type the compiler tracks: it can't be printed, compared or passed on except through `escape_for_terminal()`, `escape_for_html()` or a greppable `expose_untrusted()`, and every use of the last one needs a reviewer's OK. `Fact`, `Finding` and `Advisory` are placeholders until the inventory and the matcher are built. |
 | `gd-egress` | Judge C's tooling: makes the planted canary secrets and checks an egress capture against `allowlist.toml`, decoding gzip, deflate and brotli request bodies before it scans them. Test tooling only; never in a release. |
 
+The judge tests (Judges A, B and D) and the tests for `tools/record-setup.sh` live in `crates/gd-core/tests/` until a judges crate earns its place.
+
 Rules that hold in every crate: no `unsafe` (the workspace forbids it), no network access outside the allowlist, no shell commands built from outside text, and the core works with no AI model.

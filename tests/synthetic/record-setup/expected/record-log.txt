@@ -1,0 +1,44 @@
+record-setup.sh format 2
+mode redact-dir
+dropped apps/bitcoin/umbrel-app.yml 5
+dropped binaries-version.txt 2
+dropped docker-images.json 2
+dropped docker-ps.json 12
+dropped docker-version.json 2
+dropped replies/bitcoin-core/getnetworkinfo.json 2
+dropped replies/lnd/getinfo.json 6
+dropped replies/strfry/nip11.json 6
+dropped torrc 4
+replaced bearer-token 2 2
+replaced btc-address 2 2
+replaced container-name 1 1
+replaced domain 1 1
+replaced email 1 1
+replaced hex64 1 1
+replaced home-user 1 1
+replaced image 3 2
+replaced ipv4-private 3 2
+replaced ipv4-public 3 2
+replaced ipv6-global 3 1
+replaced ipv6-link-local 3 1
+replaced ipv6-ula 3 1
+replaced label-value 1 1
+replaced ln-invoice 1 1
+replaced mac 1 1
+replaced node-pubkey 1 1
+replaced nostr-entity 1 1
+replaced npub 1 1
+replaced nsec 1 1
+replaced onion 2 2
+replaced secret-value 2 2
+replaced seed-words 1 1
+replaced term 2 2
+replaced token 1 1
+replaced unit-name 1 1
+replaced url-userinfo 1 1
+replaced wif-key 1 1
+replaced xprv 1 1
+replaced xpub 1 1
+kept-domain docker.io
+kept-domain github.com
+secret-shaped-values-removed 13

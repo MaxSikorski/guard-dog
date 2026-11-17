@@ -1,0 +1,6 @@
+baseimage=raspios_arm64
+cpu=aarch64
+vm=0
+network=bitcoin
+chain=main
+lightning=lnd

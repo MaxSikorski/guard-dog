@@ -138,6 +138,83 @@ fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')
 }
 
+/// Files that hold the recorder's invented canary data on purpose, and so may
+/// hold the invented names below. Exact paths; an entry ending in `/` is a whole
+/// folder. Everywhere else the guard behaves as if this list did not exist.
+const SYNTHETIC_FILES: &[(&str, &str)] = &[
+    (
+        "tests/synthetic/",
+        "invented raw and expected recordings for the recorder's golden example",
+    ),
+    (
+        "crates/gd-core/tests/record_setup.rs",
+        "the recorder's tests plant invented names, node URIs and unit names",
+    ),
+    (
+        "crates/gd-core/tests/judge_a_setups.rs",
+        "the leak lint's tests plant invented names and unit names",
+    ),
+    (
+        "tests/README.md",
+        "describes those tests with their invented inputs",
+    ),
+    (
+        "fixtures/README.md",
+        "shows the commands a person types in their own home folder",
+    ),
+];
+
+/// Invented user names allowed in the files above (none is a person).
+const SYNTHETIC_HOME_NAMES: &[&str] = &["alicecanary", "canaryuser", "canaryhomer", "user-1"];
+
+/// Files named after the tilde in the files above.
+const SYNTHETIC_TILDE_NAMES: &[&str] = &[
+    ".curlrc",
+    "gd-recording",
+    "gni.json",
+    "lnd-version.json",
+    "cln-getinfo.json",
+];
+
+fn synthetic_file(path: &str) -> bool {
+    SYNTHETIC_FILES.iter().any(|(entry, _)| {
+        if entry.ends_with('/') {
+            path.starts_with(entry)
+        } else {
+            path == *entry
+        }
+    })
+}
+
+/// Is this finding one of the invented names, in a file that may hold them?
+fn synthetic_finding(reason: &str) -> bool {
+    let home = concat!("home path /ho", "me/");
+    if let Some(name) = reason.strip_prefix(home) {
+        return SYNTHETIC_HOME_NAMES.contains(&name.to_lowercase().as_str());
+    }
+    if let Some(name) = reason.strip_prefix("home path ~/") {
+        return SYNTHETIC_TILDE_NAMES.contains(&name);
+    }
+    if let Some(address) = reason.strip_prefix("email address ") {
+        // A systemd instance unit (an at sign, then a name ending in .service), a node URI
+        // (an at sign, then a host ending in .onion) and the canary mail domain.
+        return address.rsplit_once('@').is_some_and(|(_, domain)| {
+            domain.ends_with(".service") || domain.ends_with(".onion") || domain == "canarymail.com"
+        });
+    }
+    false
+}
+
+/// `check_line` for one file: the invented names are forgiven only in the files
+/// of `SYNTHETIC_FILES`.
+fn check_line_in(path: &str, line: &str) -> Vec<String> {
+    let mut found = check_line(line);
+    if synthetic_file(path) {
+        found.retain(|reason| !synthetic_finding(reason));
+    }
+    found
+}
+
 /// The deterministic checks. Reads no environment.
 fn check_line(line: &str) -> Vec<String> {
     let mut found = Vec::new();
@@ -480,7 +557,7 @@ fn scan_tree(root: &Path, who: &Identity) -> (usize, Vec<String>) {
         };
         scanned += 1;
         for (index, line) in text.lines().enumerate() {
-            for reason in check_line(line)
+            for reason in check_line_in(&path, line)
                 .into_iter()
                 .chain(check_identity(line, who))
             {
@@ -669,4 +746,36 @@ fn symlink_targets_are_text_and_only_a_missing_file_is_forgiven() {
         assert!(failure.is_err_and(|m| m.starts_with("sub:")));
     }
     std::fs::remove_dir_all(&dir).unwrap_or_default();
+}
+
+/// The invented recorder names are forgiven only in the files of
+/// `SYNTHETIC_FILES`: a node URI, a unit name or an invented home name anywhere
+/// else is still flagged, and a real-looking name is flagged everywhere.
+#[test]
+fn synthetic_names_are_forgiven_only_in_their_own_files() {
+    let key = "02".to_string() + &"ab".repeat(32);
+    let uri = format!("{key}@{}.{}:9735", "abcdefghijklmnop", "onion");
+    let unit = format!("{}@{}.{}", "tor", "default", "service");
+    let home = format!("{}{}", concat!("/ho", "me/"), "alicecanary");
+    for line in [&uri, &unit, &home] {
+        assert!(
+            !check_line_in("docs/index.html", line).is_empty(),
+            "not flagged in a public page: {line}"
+        );
+        assert!(
+            !check_line_in("README.md", line).is_empty(),
+            "not flagged in README.md: {line}"
+        );
+        assert!(
+            check_line_in("tests/synthetic/record-setup/raw/x.json", line).is_empty(),
+            "flagged in a synthetic file: {line}"
+        );
+        assert!(
+            check_line_in("crates/gd-core/tests/record_setup.rs", line).is_empty(),
+            "flagged in the recorder's tests: {line}"
+        );
+    }
+    // A name that is not on the invented list is flagged even there.
+    let real = format!("{}{}", concat!("/ho", "me/"), "someonereal");
+    assert!(!check_line_in("tests/synthetic/record-setup/raw/x.json", &real).is_empty());
 }

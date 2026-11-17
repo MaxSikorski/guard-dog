@@ -6,6 +6,9 @@ target/
 *.sqlite
 *.sqlite3
 
+# Real recordings from the maintainer's own node: private, never committed
+fixtures/private-setups/
+
 # The regtest lab's data
 lab/.data/
 lab/.lock*

@@ -1,0 +1,5 @@
+bitcoind.service loaded active running Bitcoin daemon
+lnd.service loaded active running LND Lightning Network Daemon
+tor@default.service loaded active running Anonymizing overlay network for TCP
+cron.service loaded active running Regular background program processing daemon
+canaryhost-7q-monitor.service loaded active running Monitor for canaryhost-7q run by canaryuser
