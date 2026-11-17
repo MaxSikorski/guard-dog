@@ -24,7 +24,7 @@ What you get from this phase is nothing to run yet, but a way to trust what come
 - **In progress: Judge B.** It will check advisory matching against real historical advisories, with the expected answers written down in advance. The corpus of past advisories is in, but it can't be run until Judge A's recorded setups exist.
 - **Not started: Judge A.** It will check Guard Dog against snapshots of real setups, with every identifier replaced by made-up values.
 - **Not started: Judge C.** It will record outbound network activity in CI and fail on any connection that isn't on the expected list, or that carries one of the planted test secrets.
-- **Not started: the lab.** A regtest lab (a throwaway Bitcoin network that can never touch real money) with the first few services.
+- **Done: the regtest lab.** A throwaway Bitcoin network that can never touch real money, with five real services pinned by digest and a funded channel, up in about a minute. A static test checks the lab's compose file for unsafe settings. A nightly CI run of the lab is written and waiting for review.
 
 ## Next: the first useful version
 
