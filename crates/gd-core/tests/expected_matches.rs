@@ -1059,7 +1059,7 @@ fn judge_b_matcher_baseline() {
     assert_eq!(
         s,
         Score {
-            expected_alerts: 10,
+            expected_alerts: 9,
             reported: 0,
             correct: 0
         }
@@ -1423,7 +1423,7 @@ fn every_broken_file_is_refused() {
             "evidence with a home path",
             "lab-old-synthetic",
             "evidence = \"description: ",
-            "evidence = \"~/lab: ",
+            "evidence = \"~/ lab: ",
             "evidence names a local path",
         ),
         (

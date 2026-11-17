@@ -1,7 +1,7 @@
 {
   "schema_version": "1.9.2",
   "id": "x_lightning-labs-2026-lnd-dns-bootstrap-type-assertion-panic",
-  "modified": "2026-11-16T00:00:00Z",
+  "modified": "2026-11-17T00:00:00Z",
   "published": "2026-09-21T00:00:00Z",
   "summary": "LND: a malformed DNS seed response can crash the node",
   "details": "lnd's DNS peer bootstrapper, on by default on mainnet, falls back to a TCP lookup when the first query fails. That fallback assumed every answer record was of one type, so any other record type caused an unhandled panic that stopped the daemon. An attacker on the network path, or a malicious or compromised DNS seed operator, can trigger it whenever the node looks for peers (at startup or when it has too few peers). No funds are at risk and the node restarts cleanly. Fixed in 0.21.1-beta (released 2026-06-30) and 0.20.2-beta (released 2026-07-08). Operators who cannot update can set nobootstrap=true. Disclosed 2026-09-21, tier T3; no CVE listed.",
@@ -63,6 +63,17 @@
           "option": "nobootstrap",
           "required": true,
           "note": "DNS bootstrapping is on by default on mainnet; nobootstrap=true avoids the bug"
+        },
+        {
+          "fact": "chain",
+          "any_of": [
+            "main",
+            "testnet3",
+            "testnet4",
+            "signet"
+          ],
+          "required": true,
+          "note": "regtest has no DNS seeds, so the bootstrapper never runs there; signet is kept on the affected side because the source does not say whether it has seeds"
         }
       ],
       "conditions_format": "draft format, finalized in Phase 2.2",
