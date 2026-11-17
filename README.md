@@ -22,6 +22,7 @@
 Guard Dog runs on your node, your relay server or a small box on your home network. It learns everything your setup depends on and keeps checking it. The moment any of it becomes dangerous, it tells you in plain English, with the exact steps to fix it.
 
 > **Status: pre-alpha.** There's nothing to install yet. Watch this repo for the first release.
+> See the [roadmap](ROADMAP.md) for what is, or could be, coming next.
 
 ## Install it with your AI agent
 

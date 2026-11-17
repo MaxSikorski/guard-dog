@@ -4,6 +4,8 @@ Thanks for being here. I'm building Guard Dog so that anyone running their own B
 
 Guard Dog is **pre-alpha**. There's no code to install yet, which makes this the best time to shape it.
 
+The [roadmap](ROADMAP.md) shows what's coming next and lists open questions where I'd love help. A good answer to one of those is a great first contribution.
+
 ## Ways to help
 
 - **Test it on your setup.** Umbrel, StartOS, RaspiBlitz, myNode, nix-bitcoin, plain Docker or bare Linux. Once there's something to run, I'll need people to try it and tell me what it found, what it missed and what confused them.
