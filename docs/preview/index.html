@@ -66,7 +66,7 @@ button{font:inherit;color:inherit}
 .muted{color:var(--muted)} .faint{color:var(--faint)}
 
 /* ---------- top bar ---------- */
-/* Fixed, always-frosted header like the weekly slide decks: content scrolls behind glass, never into the words. */
+/* Fixed, always-frosted header: content scrolls behind glass, never into the words. */
 .top{position:sticky;top:0;z-index:30;height:var(--top-h);display:flex;align-items:center;gap:16px;padding:0 28px;background:var(--glass-bg);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--border);white-space:nowrap}
 .top > *{flex-shrink:0}
 @media (max-width:1180px){.top .hide-lg{display:none}}
@@ -440,7 +440,7 @@ const D = {
       service: "Coldcard Mk4 (registered by you)", version: "firmware before the July 2026 fix", fixed: "the July 2026 patch", safest: "a new seed, made with dice", when: "registered 2 days ago",
       why: "Coldcard firmware from before the July 2026 fix could create predictable seeds. Updating the firmware does NOT fix a seed that already exists. Guard Dog needs one answer to know whether you're affected.",
       evidence: [ "Registered device: Coldcard Mk4, firmware 5.x (entered by you)", "Advisory range covers this model and firmware" ],
-      question: { text: "How was this wallet's seed created?", options: ["On the Coldcard itself", "With dice rolls", "Imported from somewhere else"] },
+      question: { text: "How was this wallet's seed created?", options: ["On the Coldcard itself", "With 50 or more dice rolls", "Imported from somewhere else"] },
       playbook: [
         "If the seed was made on the device: create a NEW seed on patched firmware, ideally with dice rolls.",
         "Move all funds from the old wallet to the new one.",
@@ -450,7 +450,7 @@ const D = {
       source: "Coinkite advisory (July 2026) · curated" },
     { id: "GD-SAMPLE-0003", sev: "high", status: "affected", area: "Bitcoin",
       title: "Bitcoin Core's control port answers on your home network",
-      service: "Bitcoin Core", version: "28.1", fixed: "a settings change", safest: "28.1 (you're on it)", when: "today",
+      service: "Bitcoin Core", version: "29.5", fixed: "a settings change", safest: "29.5 (you're on it)", when: "today",
       why: "Port 8332 (RPC) listens on every address, so any device on your Wi-Fi can try to talk to your node's control interface. Only your own apps on this box need it.",
       evidence: [ "Listener 0.0.0.0:8332 (bitcoind)", "Reachable from 192.0.2.0/24 according to the firewall rules" ],
       playbook: [ "Bind RPC to the local Docker network only (one tap below).", "Keep rpcallowip limited to the apps that need it." ],
@@ -458,7 +458,7 @@ const D = {
       source: "Guard Dog configuration check" },
     { id: "GD-SAMPLE-0004", sev: "medium", status: "possibly", area: "Scout",
       title: "A second Bitcoin node on your network runs a very old version",
-      service: "Bitcoin Core 0.21.1 at 192.0.2.40 (found by Scout)", version: "0.21.1", fixed: "25.0 and newer", safest: "28.1", when: "yesterday",
+      service: "Bitcoin Core 0.21.1 at 192.0.2.40 (found by Scout)", version: "0.21.1", fixed: "25.0 and newer", safest: "29.5", when: "yesterday",
       why: "Scout recognized it from its handshake (\"/Satoshi:0.21.1/\"). Versions older than 25.0 have publicly disclosed vulnerabilities. Is this an old node you forgot about?",
       evidence: [ "Bitcoin P2P version handshake on 192.0.2.40:8333 → /Satoshi:0.21.1/", "Device vendor: Raspberry Pi (from its hardware address)" ],
       question: { text: "Is this device yours?", options: ["Yes, I'll update or retire it", "No, I don't know it"] },
@@ -492,23 +492,23 @@ const D = {
       source: "Scout" },
     { id: "GD-SAMPLE-0099", sev: "high", status: "resolved", area: "Lightning",
       title: "LND was on a version with a published advisory",
-      service: "LND", version: "now v0.18.5-beta", fixed: "—", safest: "—", when: "resolved 3 days ago",
+      service: "LND", version: "now v0.20.2-beta", fixed: "—", safest: "—", when: "resolved 3 days ago",
       why: "Updated through Umbrel after Guard Dog's alert. A later scan confirmed the new version.", evidence: [], playbook: [], actions: [], source: "Sample" }
   ],
   inventory: [
     { group: "Bitcoin", icon: "i-btc", items: [
-      { name: "Bitcoin Core", v: "28.1", safest: "28.1", by: "RPC (read-only user)", level: "Understood", sev: "high", note: "RPC open to LAN" } ] },
+      { name: "Bitcoin Core", v: "29.5", safest: "29.5", by: "RPC (read-only user)", level: "Understood", sev: "high", note: "RPC open to LAN" } ] },
     { group: "Lightning", icon: "i-bolt", items: [
-      { name: "LND", v: "0.18.5-beta", safest: "0.18.5-beta", by: "read-only macaroon", level: "Understood", sev: "ok" },
+      { name: "LND", v: "0.20.2-beta", safest: "0.20.2-beta", by: "read-only macaroon", level: "Understood", sev: "ok" },
       { name: "Alby Hub", v: "1.18.2", safest: "1.24.0", by: "Umbrel app + image", level: "Understood", sev: "critical" },
       { name: "ThunderHub", v: "0.13.x", safest: "0.13.x", by: "Umbrel app", level: "Recognized", sev: "ok" } ] },
     { group: "Bitcoin services", icon: "i-layers", items: [
-      { name: "BTCPay Server", v: "2.0.8", safest: "2.0.8", by: "Greenfield API", level: "Recognized", sev: "ok" },
+      { name: "BTCPay Server", v: "2.4.7", safest: "2.4.7", by: "Greenfield API", level: "Recognized", sev: "ok" },
       { name: "Fulcrum", v: "1.12.0", safest: "1.12.0", by: "server.version", level: "Recognized", sev: "ok" },
       { name: "mempool", v: "3.2.1", safest: "3.2.1", by: "Umbrel app", level: "Recognized", sev: "ok" } ] },
     { group: "Ecash", icon: "i-coin", items: [
-      { name: "Cashu mint (Nutshell)", v: "0.16.5", safest: "0.16.5", by: "NUT-06 info", level: "Recognized", sev: "ok" },
-      { name: "Fedimint guardian", v: "0.7.2", safest: "0.7.2", by: "image", level: "Recognized", sev: "ok" } ] },
+      { name: "Cashu mint (Nutshell)", v: "0.18.0", safest: "0.18.0", by: "NUT-06 info", level: "Recognized", sev: "ok" },
+      { name: "Fedimint guardian", v: "0.11.2", safest: "0.11.2", by: "image", level: "Recognized", sev: "ok" } ] },
     { group: "Nostr", icon: "i-nostr", items: [
       { name: "strfry relay", v: "1.0.4", safest: "1.0.4", by: "NIP-11", level: "Recognized", sev: "ok" },
       { name: "Blossom server", v: "3.1.0", safest: "3.1.0", by: "image", level: "Recognized", sev: "ok" },
@@ -540,7 +540,7 @@ const D = {
   },
   devices: [
     { ip: "192.0.2.1", name: "Router", vendor: "Netgear", kind: "router", known: true, ports: "53, 80, 443, 1900", fp: "UPnP on" },
-    { ip: "192.0.2.20", name: "regtest-node.local (this node)", vendor: "Raspberry Pi", kind: "node", known: true, ports: "22, 80, 8080, 8333, 9735", fp: "Umbrel · Bitcoin Core 28.1 · LND" },
+    { ip: "192.0.2.20", name: "regtest-node.local (this node)", vendor: "Raspberry Pi", kind: "node", known: true, ports: "22, 80, 8080, 8333, 9735", fp: "Umbrel · Bitcoin Core 29.5 · LND" },
     { ip: "192.0.2.40", name: "Unknown Bitcoin node", vendor: "Raspberry Pi", kind: "btc", known: false, ports: "22, 8333", fp: "/Satoshi:0.21.1/" },
     { ip: "192.0.2.23", name: "Laptop", vendor: "Apple", kind: "laptop", known: true, ports: "—", fp: "" },
     { ip: "192.0.2.31", name: "Phone", vendor: "Apple", kind: "phone", known: true, ports: "—", fp: "" },
@@ -548,7 +548,7 @@ const D = {
     { ip: "192.0.2.44", name: "Printer", vendor: "HP", kind: "printer", known: true, ports: "80, 631, 9100", fp: "" },
     { ip: "192.0.2.50", name: "NAS", vendor: "Synology", kind: "nas", known: true, ports: "5000, 5001, 445", fp: "" },
     { ip: "192.0.2.57", name: "ESP_3C1A2B", vendor: "Espressif", kind: "iot", known: false, ports: "80", fp: "new today" },
-    { ip: "192.0.2.62", name: "Guest phone", vendor: "Samsung", kind: "phone", known: true, ports: "—", fp: "" }
+    { ip: "192.0.2.62", name: "Kitchen tablet", vendor: "Samsung", kind: "phone", known: true, ports: "—", fp: "" }
   ],
   attackChecks: [
     { t: "Gateway hardware address is steady", s: "Same MAC for 30 days (ARP-spoofing check)" },
@@ -559,9 +559,9 @@ const D = {
   timeline: [
     { t: "Today 09:12", e: "New device ESP_3C1A2B joined (192.0.2.57)", c: "warn" },
     { t: "Yesterday 21:40", e: "192.0.2.40 answered as Bitcoin Core 0.21.1", c: "warn" },
-    { t: "3 days ago", e: "LND updated to 0.18.5-beta; advisory resolved", c: "ok" },
+    { t: "3 days ago", e: "LND updated to 0.20.2-beta; advisory resolved", c: "ok" },
     { t: "5 days ago", e: "Router created UPnP mapping 8080 → 192.0.2.20", c: "warn" },
-    { t: "12 days ago", e: "Guest phone joined and was marked known", c: "" }
+    { t: "12 days ago", e: "Kitchen tablet joined and was marked known", c: "" }
   ],
   watch: {
     wallets: [
@@ -734,7 +734,7 @@ VIEWS.overview = () => {
     </div>
     <div class="grid g3">
       <div class="card"><h2>${icon("i-box")}Watching</h2><div class="stat"><span class="n" data-count="24">24</span><span class="l">services, devices and apps · <a href="#/inventory">inventory</a></span></div></div>
-      <div class="card"><h2>${icon("i-globe")}Reachable from the internet</h2><div class="stat"><span class="n" style="color:var(--crit)" data-count="1">1</span><span class="l">service (plus 2 onion services you chose) · <a href="#/exposure">exposure</a></span></div></div>
+      <div class="card"><h2>${icon("i-globe")}Reachable from the internet</h2><div class="stat"><span class="n" style="color:var(--crit)" data-count="${D.exposure.internet.length}">${D.exposure.internet.length}</span><span class="l">${D.exposure.internet.length === 1 ? "service" : "services"} (plus 2 onion services you chose) · <a href="#/exposure">exposure</a></span></div></div>
       <div class="card"><h2>${icon("i-radar")}On your network</h2><div class="stat"><span class="n" data-count="${D.devices.length}">${D.devices.length}</span><span class="l">devices, ${D.devices.filter(d => !d.known).length} unknown · <a href="#/scout">Scout</a></span></div></div>
     </div>
     <div class="grid g2">
@@ -1008,7 +1008,7 @@ VIEWS.settings = () => {
       ${D.settings.ai === "api" ? `<div class="grid g2" style="margin-top:14px"><label class="field">Endpoint<input type="text" value="https://ai-provider.example/v1"></label><label class="field">API key<input type="password" value="sample-not-a-real-key"></label></div>` : ""}
       <div class="setting" style="margin-top:12px"><div><div class="t">Redaction before anything leaves this box</div><div class="s">IPs, onion addresses, xpubs, npubs, names and tokens are replaced with placeholders.</div></div><label class="switch"><input type="checkbox" checked disabled aria-label="Redaction, always on"><span></span></label></div>
       <div class="setting"><div><div class="t">Changelog reader</div><div class="s">A small classifier on this box's CPU. It can only answer fixed questions, so text can't steer it.</div></div><span class="pill">Local · no text output</span></div>
-      <p class="faint" style="font-size:12.5px;margin:10px 0 0">Subscription sign-ins (OAuth) aren't supported: providers' terms forbid using them in other apps.</p></div>` : ""}
+      <p class="faint" style="font-size:12.5px;margin:10px 0 0">Subscription sign-ins (OAuth) aren't supported; use an API key or a model on your own hardware.</p></div>` : ""}
   ${settingsTab === "buddy" ? `
     <div class="card"><h2>${icon("i-heart")}Watching the watcher</h2>
       <div class="setting"><div><div class="t">Buddy: a friend's Guard Dog (sample)</div><div class="s">Paired 21 days ago · sees your heartbeat · probes you daily from outside · you do the same for them</div></div>${chip("ok", "Seen 1 min ago")}</div>
@@ -1106,7 +1106,7 @@ Checked 3 min ago · ${D.blindSpots.length} blind spots · No known issues is no
 }
 
 function approvalModal(f, act) {
-  const a = D.approvals[0];
+  const a = D.approvals[0] || { dry: ["Router: delete UPnP mapping TCP 8080 → 192.0.2.20:8080 (\"alby-hub\")", "Nothing else changes.", "Undo: re-create the mapping (offered for 24 h)."] };
   const dry = act.id === "act-upnp" ? a.dry
     : act.id === "act-update" ? ["Umbrel: update app \"Alby Hub\" 1.18.2 → 1.24.0", "Before: verify the release signature and image digest, back up the app's config", "After: rescan and confirm version and health; roll back if it fails"]
     : ["bitcoin.conf: rpcbind=0.0.0.0 → the local Docker network only", "Restart Bitcoin Core (about 1 minute)", "Undo: restore the previous bitcoin.conf (kept for 7 days)"];
@@ -1163,8 +1163,8 @@ function wizard(step = 0) {
 }
 
 function runScanAnimation() {
-  const lines = ["Platform: Umbrel 1.4", "Apps: 23 found through the read-only proxy", "Bitcoin Core 28.1 (RPC, read-only user)", "LND 0.18.5-beta · Alby Hub 1.18.2 · ThunderHub",
-    "BTCPay 2.0.8 · Fulcrum 1.12.0 · mempool 3.2.1", "Cashu mint 0.16.5 · Fedimint guardian 0.7.2", "strfry 1.0.4 · Blossom 3.1.0 · nsecBunker", "Listeners, firewall, router (UPnP: on, 1 mapping)",
+  const lines = ["Platform: Umbrel 1.4", "Apps: 23 found through the read-only proxy", "Bitcoin Core 29.5 (RPC, read-only user)", "LND 0.20.2-beta · Alby Hub 1.18.2 · ThunderHub",
+    "BTCPay 2.4.7 · Fulcrum 1.12.0 · mempool 3.2.1", "Cashu mint 0.18.0 · Fedimint guardian 0.11.2", "strfry 1.0.4 · Blossom 3.1.0 · nsecBunker", "Listeners, firewall, router (UPnP: on, 1 mapping)",
     "Scout (listening): 10 devices, 2 unknown", "Advisory feed: 1,284 entries, 2 of 3 trusted signers", "Matching… 7 findings"];
   let i = 0;
   const log = $("#scanLog"), bar = $("#scanBar");
@@ -1203,7 +1203,7 @@ document.addEventListener("click", (e) => {
     const f = D.findings.find(x => x.id === ds.id); const a = +ds.answer;
     if (f.id === "GD-SAMPLE-0002") {
       if (a === 0) { f.status = "affected"; f.sev = "critical"; toast("Affected. Follow the steps: new seed with dice, then move funds."); }
-      else { f.status = "resolved"; f.when = "resolved just now"; toast("Not affected: the seed wasn't made by the device."); }
+      else { f.status = "resolved"; f.when = "resolved just now"; toast("Not affected: this seed doesn't rest on the device's weak randomness alone."); }
     } else if (f.id === "GD-SAMPLE-0004") {
       if (a === 0) { f.status = "affected"; toast("Thanks. It stays open until it's updated or retired."); }
       else { f.status = "affected"; f.sev = "high"; toast("Treated as unknown: block it on your router, then look into it."); }
@@ -1235,7 +1235,7 @@ document.addEventListener("click", (e) => {
     modal("Accept the risk", `<p style="margin-top:0">Guard Dog will stop alerting about this until the date below, then ask again.</p>
       <label class="field">Why (for your future self)<textarea rows="3" placeholder="e.g. This port is only open while I'm travelling"></textarea></label>
       <label class="field" style="margin-top:10px">Ask me again in<select><option>7 days</option><option>30 days</option><option>90 days</option></select></label>`,
-      `<button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="button" data-close id="acceptSave">Accept for now</button>`);
+      `<button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="button" id="acceptSave">Accept for now</button>`);
     return;
   }
   if (ds.preview) { alertPreview(D.findings.find(x => x.id === ds.preview)); return; }
@@ -1244,6 +1244,7 @@ document.addEventListener("click", (e) => {
 
   switch (t.id) {
     case "logo-refresh": e.preventDefault(); if ((location.hash || "#/overview") === "#/overview") { location.reload(); } else { location.hash = "#/overview"; } return;
+    case "acceptSave": closeModal(); return toast("Accepted for now (mock). Guard Dog will ask again on the date you picked.");
     case "scanNow": return scanNow();
     case "previewAlert": case "previewAlert2": return alertPreview();
     case "theme-toggle": isDark = !isDark; return applyTheme(isDark);
@@ -1311,9 +1312,9 @@ function applyTheme(dark, animate = true) {
   if (animate && hasGsap()) gsap.fromTo(themeIcon, { rotation: 0, scale: 0.8 }, { rotation: 360, scale: 1, duration: 0.6, ease: "power2.out" });
 }
 
-/* Skins: Original (Sikorski) plus six optional themes */
+/* Skins: Original plus six optional themes */
 const SKINS = [
-  { id: "original", name: "Original (Sikorski)", vibe: "Black and white, glass and Inter. Light or dark.", light: null, sw: ["#000000", "#1c1c1e", "#ffffff", "#ff453a", "#30d158"] },
+  { id: "original", name: "Original", vibe: "Black and white, glass and Inter. Light or dark.", light: null, sw: ["#000000", "#1c1c1e", "#ffffff", "#ff453a", "#30d158"] },
   { id: "cyberpunk", name: "Cyberpunk", vibe: "Neon cyan and magenta on a deep night sky.", light: false, sw: ["#0b0217", "#19062d", "#00f0ff", "#ff2e63", "#39ff14"] },
   { id: "terminal", name: "Terminal", vibe: "Green phosphor, monospace, square corners.", light: false, sw: ["#020a02", "#031103", "#33ff66", "#ff5555", "#50fa7b"] },
   { id: "beach", name: "Beach", vibe: "Sand, sea and coral with soft, round corners.", light: true, sw: ["#fbf5ea", "#ffffff", "#0a8ea0", "#d93d3d", "#2e9e6a"] },
