@@ -388,6 +388,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "proptest",
+ "regex",
  "serde_json",
  "toml",
  "trybuild",

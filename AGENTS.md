@@ -33,5 +33,5 @@ From the repository root (rustup installs the pinned toolchain from `rust-toolch
 | `crates/` | The Rust code; which crate owns what: [crates/README.md](crates/README.md) |
 | `tests/README.md` | Every test and judge, one line each |
 | `lab/` | The regtest lab (`lab/up.sh`, `lab/down.sh`): [lab/README.md](lab/README.md) |
-| `advisories/` | The advisory corpus (23 OSV records) and its vendored schema, checked by `crates/gd-core/tests/advisory_corpus.rs` |
-| `catalog/` | Coming next: services as data |
+| `advisories/` | The advisory corpus (23 OSV records) and its vendored schema, checked by `crates/gd-core/tests/advisory_corpus.rs`: [advisories/README.md](advisories/README.md) |
+| `catalog/` | The service catalog, one TOML file per product: [catalog/README.md](catalog/README.md) |
