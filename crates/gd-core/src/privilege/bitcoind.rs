@@ -33,7 +33,7 @@ pub struct NarrowLogin {}
 impl NarrowLogin {
     /// What this proof does and does not show, in plain English.
     pub fn note(&self) -> &'static str {
-        "Guard Dog can't read your rpcwhitelist line; it should list only getnetworkinfo,getblockchaininfo."
+        "Guard Dog can't read your rpcwhitelist line; it should list only getnetworkinfo,getblockchaininfo. A whitelist with extra methods would still pass this check."
     }
 }
 
@@ -43,6 +43,9 @@ impl NarrowLogin {
 pub enum BitcoindRefusal {
     /// The user is `__cookie__`; refused without any call.
     CookieLogin,
+    /// A call Guard Dog needs was refused with 403: the login can't read what it
+    /// needs (or something other than `rpcwhitelist` is refusing it).
+    CannotReadWhatItNeeds,
     /// The canary call was allowed (HTTP 200).
     TooWide,
     /// The node said 401: wrong user or password.
@@ -57,6 +60,10 @@ impl fmt::Display for BitcoindRefusal {
             BitcoindRefusal::CookieLogin => f.write_str(
                 "That's Bitcoin Core's full-access cookie login, which can do anything on your node. Guard Dog won't use it. \
                  Create its own login with `rpcauth` and limit it with `rpcwhitelist=<user>:getnetworkinfo,getblockchaininfo` and `rpcwhitelistdefault=0`.",
+            ),
+            BitcoindRefusal::CannotReadWhatItNeeds => f.write_str(
+                "Guard Dog won't use this login, because this login can't read what Guard Dog needs: Bitcoin Core refused getnetworkinfo or getblockchaininfo. \
+                 Add `rpcwhitelist=<user>:getnetworkinfo,getblockchaininfo` and `rpcwhitelistdefault=0` to bitcoin.conf, and check `rpcallowip` and any proxy in front of Bitcoin Core allow Guard Dog.",
             ),
             BitcoindRefusal::TooWide => f.write_str(
                 "This login can call more than Guard Dog needs: Bitcoin Core answered a call it should have refused. \
@@ -77,6 +84,8 @@ impl std::error::Error for BitcoindRefusal {}
 
 /// Harmless, read-only methods that are not on the whitelist Guard Dog asks for.
 /// Each must get HTTP 403. Never a wallet or spending method.
+/// The calls Guard Dog needs; each must get HTTP 200 before the canaries mean anything.
+const NEEDED_METHODS: [&str; 2] = ["getnetworkinfo", "getblockchaininfo"];
 const CANARY_METHODS: [&str; 3] = ["getblockcount", "getbestblockhash", "uptime"];
 
 /// Proves a login narrow, or says why not. `user` is the RPC user name; it is
@@ -84,6 +93,14 @@ const CANARY_METHODS: [&str; 3] = ["getblockcount", "getbestblockhash", "uptime"
 pub fn check(user: &str, rpc: &mut dyn CanaryRpc) -> Result<NarrowLogin, BitcoindRefusal> {
     if user == "__cookie__" {
         return Err(BitcoindRefusal::CookieLogin);
+    }
+    for method in NEEDED_METHODS {
+        match rpc.call(method) {
+            CanaryReply::Status(200) => {}
+            CanaryReply::Status(403) => return Err(BitcoindRefusal::CannotReadWhatItNeeds),
+            CanaryReply::Status(401) => return Err(BitcoindRefusal::WrongPassword),
+            _ => return Err(BitcoindRefusal::CouldNotProve),
+        }
     }
     for method in CANARY_METHODS {
         match rpc.call(method) {

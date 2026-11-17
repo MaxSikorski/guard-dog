@@ -2,10 +2,10 @@
 //!
 //! # What is read
 //!
-//! The input is the macaroon file's bytes, or the hex text of them (hex is
-//! recognised only when every byte is an ASCII hex digit; the first byte of a
-//! binary macaroon is 0x02, never one).
-//! At most 4 KiB. The binary form is macaroon v2 (as in `macaroon.v2`):
+//! The input is the macaroon file's bytes, or the hex text of them (a first
+//! byte of 0x02 means binary, never trimmed; otherwise, if every byte is a hex
+//! digit or whitespace, it is hex, and whitespace around or inside it, such as
+//! the line wraps `xxd -p` writes, is ignored). At most 4 KiB. The binary form is macaroon v2 (as in `macaroon.v2`):
 //!
 //! ```text
 //! 0x02
@@ -40,6 +40,7 @@ const MAX_OPS: usize = 64;
 const MAX_ACTIONS: usize = 64;
 const MAX_NAME: u64 = 64;
 const MAX_CAVEATS: usize = 256;
+const BAD_NUMBER: &str = "a number in it is cut short or malformed";
 
 /// Permissions a macaroon can hold that Guard Dog knows by name, in the fixed
 /// order they are listed to the user. Anything else is "an unknown permission".
@@ -65,6 +66,11 @@ pub struct NarrowMacaroon {
 }
 
 impl NarrowMacaroon {
+    /// What this proof does and does not show, in plain English.
+    pub fn note(&self) -> &'static str {
+        "Guard Dog can't verify the signature; it reads the permissions the macaroon claims, and LND checks the signature when it's used."
+    }
+
     /// How many first-party caveats it carries (each can only narrow it).
     pub fn first_party_caveats(&self) -> usize {
         self.first_party
@@ -101,51 +107,60 @@ pub enum MacaroonRefusal {
         extra: Vec<&'static str>,
         /// Whether it also holds a permission not on Guard Dog's list.
         unknown: bool,
+        /// Whether it holds `info:read` as well as the extras.
+        has_info_read: bool,
     },
 }
 
 impl fmt::Display for MacaroonRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        const FIX: &str = "Bake one with only `info:read`: `lncli bakemacaroon info:read`";
+        const FIX: &str = "Bake one with only `info:read` (it reads your node's status and the public network graph; nothing that touches funds or channels): `lncli bakemacaroon info:read`";
         match self {
             MacaroonRefusal::Oversize => write!(
                 f,
-                "This macaroon file is too big to be one (over 4 KiB). {FIX}."
+                "This macaroon file is over 4 KiB of text (about 2 KiB of macaroon in hex), too big to be one. {FIX}."
             ),
-            MacaroonRefusal::Malformed { why } => {
-                write!(
-                    f,
-                    "This isn't a macaroon Guard Dog can read ({why}). Check you gave it the right file. {FIX}."
-                )
-            }
-            MacaroonRefusal::WrongVersion => {
-                write!(
-                    f,
-                    "This macaroon is in a format Guard Dog doesn't read (it expects an LND macaroon, format 2). {FIX}."
-                )
-            }
+            MacaroonRefusal::Malformed { why } => write!(
+                f,
+                "This isn't a macaroon Guard Dog can read ({why}). Check you gave it the right file. {FIX}."
+            ),
+            MacaroonRefusal::WrongVersion => write!(
+                f,
+                "This macaroon is in a format Guard Dog doesn't read (it expects an LND macaroon, format 2). {FIX}."
+            ),
             MacaroonRefusal::UncheckablePermissions => write!(
                 f,
                 "This macaroon has a permission set Guard Dog can't check (a `uri` permission), so it won't use it. {FIX}."
             ),
             MacaroonRefusal::EmptyOps => write!(
                 f,
-                "This macaroon allows nothing, so it can't read your node's version. {FIX}."
+                "This macaroon allows nothing, so it can't read your node's status. {FIX}."
             ),
             MacaroonRefusal::Admin => write!(
                 f,
-                "This macaroon can change things on your node (it has write permissions, as the admin macaroon does). Guard Dog only logs in with one that can read the node's version. {FIX}."
+                "This macaroon can change things on your node (it has write permissions, as the admin macaroon does). Guard Dog only logs in with one that can only read its status. {FIX}."
             ),
-            MacaroonRefusal::TooWide { extra, unknown } => {
-                write!(
-                    f,
-                    "This macaroon can do more than read your node's version: it also has "
-                )?;
+            MacaroonRefusal::TooWide {
+                extra,
+                unknown,
+                has_info_read,
+            } => {
                 let mut parts: Vec<String> = extra.iter().map(|name| format!("`{name}`")).collect();
                 if *unknown {
                     parts.push("an unknown permission".to_string());
                 }
-                write!(f, "{}. {FIX}.", parts.join(", "))
+                let list = parts.join(", ");
+                if *has_info_read {
+                    write!(
+                        f,
+                        "This macaroon can do more than Guard Dog needs: it also has {list}. {FIX}."
+                    )
+                } else {
+                    write!(
+                        f,
+                        "This macaroon doesn't have the one permission Guard Dog needs; it has {list} instead. {FIX}."
+                    )
+                }
             }
         }
     }
@@ -165,8 +180,18 @@ pub fn check(input: &[u8]) -> Result<NarrowMacaroon, MacaroonRefusal> {
     if input.is_empty() {
         return Err(bad("it is empty"));
     }
-    if input.iter().all(u8::is_ascii_hexdigit) {
-        let decoded = from_hex(input).ok_or(bad("its hex text has an odd number of digits"))?;
+    // A binary macaroon starts with 0x02 and is never trimmed: its signature
+    // may end in a byte that looks like whitespace.
+    if input.first() == Some(&2) {
+        return parse(input);
+    }
+    let is_space = |b: &u8| matches!(b, b' ' | b'\t' | b'\r' | b'\n');
+    if input.iter().all(|b| b.is_ascii_hexdigit() || is_space(b)) {
+        let digits: Vec<u8> = input.iter().copied().filter(|b| !is_space(b)).collect();
+        if digits.is_empty() {
+            return Err(bad("it is empty"));
+        }
+        let decoded = from_hex(&digits).ok_or(bad("its hex text has an odd number of digits"))?;
         parse(&decoded)
     } else {
         parse(input)
@@ -205,12 +230,12 @@ fn section<'a>(r: &mut Reader<'a>) -> Result<Option<Section<'a>>, MacaroonRefusa
     let mut seen = [false; 5];
     let mut first = true;
     loop {
-        let field = r.varint().ok_or(bad("it ends too early"))?;
+        let field = r.varint().ok_or(bad(BAD_NUMBER))?;
         if field == 0 {
             return Ok(if first { None } else { Some(out) });
         }
         first = false;
-        let len = r.varint().ok_or(bad("it ends too early"))?;
+        let len = r.varint().ok_or(bad(BAD_NUMBER))?;
         let data = r.take(len).ok_or(bad("a field is longer than the file"))?;
         let slot = match field {
             1 | 2 | 4 => {
@@ -412,6 +437,7 @@ fn classify(identifier: &[u8]) -> Result<(), MacaroonRefusal> {
         Err(MacaroonRefusal::TooWide {
             extra,
             unknown: perms.unknown,
+            has_info_read,
         })
     }
 }

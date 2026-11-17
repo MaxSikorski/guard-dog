@@ -106,6 +106,10 @@ impl<'a> Reader<'a> {
             }
             value |= low.checked_shl(7 * i)?;
             if b & 0x80 == 0 {
+                // A last byte of 0 after a continuation is a non-canonical number.
+                if i > 0 && b == 0 {
+                    return None;
+                }
                 return Some(value);
             }
         }

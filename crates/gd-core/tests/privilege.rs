@@ -1145,9 +1145,15 @@ fn no_refusal_or_acceptance_prints_the_credential() {
     for input in &rune_inputs {
         credentials.push(input.clone().into_bytes());
     }
+    // The fixed permission names are ordinary words that messages may use.
+    let vocabulary = format!(
+        "{} read write generate info:read macaroon:generate",
+        ENTITIES.join(" ")
+    );
     let needles: std::collections::BTreeSet<Vec<u8>> = credentials
         .iter()
         .flat_map(|c| c.windows(8).map(<[u8]>::to_vec))
+        .filter(|w| !contains(vocabulary.as_bytes(), w))
         .collect();
     assert!(needles.len() > 500);
     for text in &shown {
