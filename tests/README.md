@@ -50,6 +50,26 @@ The property tests use a fixed seed by default, so the same commit gives the sam
 
 **Live check (`lab/up.sh`, by hand; the nightly CI runs it too):** cold start to a funded LND→Core Lightning channel; every node says `regtest` or the lab removes itself (exit 3); the least-privileged logins (bitcoind `gdwatch`, LND `info:read`, the CLN `getinfo` rune) each read the version and are each refused a wider call; every service's own version matches its image label; the whole start finishes in 5 minutes or it fails (exit 4). Measured 2026-11-16 on the Mac (arm64): cold start with all five images pulled fresh 86 s, warm (images cached) 68 s, peak 449 MiB for all five containers. Design run: 69–72 s, 422–447 MiB.
 
+## Two back ends, views must agree
+
+After Super Testnet's `hedgehog_v3`, which runs one test both offline and on regtest and compares what each side thinks. A judge sees a setup through a back end; the same judge on two back ends that describe the same setup must see the same facts, or the test fails and prints every fact that differs. Three back ends describe the lab: `fixture` (the `lab-regtest` setup in `fixtures/expected-matches.toml`), `lab-recorded` (`fixtures/lab-recorded/manifest.toml`, written by a real `lab/up.sh` run) and `lab-live` (`lab/.data/manifest.toml`, the last manifest `lab/up.sh` wrote; `lab/down.sh` deletes it).
+
+Each back end says which kinds of fact it records, and each judge says which it reads. Judge B reads the chain, platform, arch, block storage, exposure, service versions and the packages inside them. The lab manifest records only the chain, platform, source and service versions, so arch, block storage, exposure and packages are **not compared** for the lab: the test lists them by name and pins that list, so the gap can't grow or shrink unnoticed. Judge A and Judge C plug in as a row in `JUDGES` naming what they read; each back end then records those facts (for the lab, a new key in `up.sh`'s manifest) or the pinned list grows. Judge D reads its corpus, not a setup.
+
+In `crates/gd-core/tests/two_backends.rs`:
+
+| Test | What it proves |
+|---|---|
+| `the_recorded_lab_agrees_with_the_fixtures` | On every `cargo test`: Judge B sees the same 7 facts (chain, platform and five service versions; the count is of facts actually compared) through the fixture and the recorded lab, with exactly the four known gaps. The recording's `# image` lines equal the images `lab/compose.yml` pins, one per service, so a changed image fails until the lab is re-recorded. The parser also requires `source = "lab"`. |
+| `the_live_lab_agrees_with_the_fixtures` | With `GD_LAB=1`: the same against the live lab's manifest (image lines included), failing if it is missing. Without it, it prints `SKIPPED` (shown even in a plain `cargo test`) and passes. Any value other than unset, empty, `0` or `1` fails, including one that isn't UTF-8. |
+| `disagreements_are_named_field_by_field` | A changed version, a missing service, an extra service, another chain, a package only one side has, and two differences at once (in sorted order) each give exactly the expected message; a kind of fact one back end doesn't record is listed as not compared. |
+| `a_good_manifest_is_read_exactly` | A manifest in `up.sh`'s shape reads back as exactly its facts and image lines. A second image line, a missing one, and an id line with a hidden bidi comment are each refused by line number, without echoing the line. |
+| `an_oversized_or_odd_file_is_never_read_whole` | A 64 KiB file is read only to 16 KiB plus one byte and refused; a missing file is "no lab"; a folder (or a symlink) is an error, never a skip. |
+| `every_broken_manifest_is_refused` | 27 broken manifests are each refused for their own reason: not TOML, unknown keys (one with a terminal escape, never printed), wrong format or recorder, a missing or odd chain, an odd source or one that isn't the lab, a description with a control character or a bidi override or over 200 characters, no services, too many, a missing or non-text version, ids outside `[a-z0-9-]`, versions outside `up.sh`'s `plain()` characters or over 64 long (space, escape, newline), duplicates and unsorted ids. |
+| `up_sh_still_writes_this_format` | `lab/up.sh` still writes the manifest lines this test reads, checks the chain and all five reported versions with `plain()`, and `lab/.data/` is still gitignored. |
+
+**Live check, 2026-11-16 (Mac, arm64):** with `lab/up.sh` up (cold start to funded channel in 68 s), `GD_LAB=1 cargo test --locked -p gd-core --test two_backends` passes: the fixture and the live lab agree on 7 of 7 compared facts, 4 kinds not compared. Changing one recorded version (Core Lightning 26.06.9 to 26.06.8) fails with that one fact named; changing one recorded image digest fails with "re-record it". With no lab, `GD_LAB=1` fails.
+
 ## Judges
 
 The judges measure outcomes from outside the code. They arrive next, each with a recorded baseline:
