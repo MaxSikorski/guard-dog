@@ -34,7 +34,7 @@ source = "lab/compose.yml"
 kind = "rpc"
 method = "getnetworkinfo"
 field = "subversion"
-match = '^/Satoshi:\d+\.\d+(?:\.\d+){0,2}(?:rc\d+)?/$'
+match = '^/Satoshi:[0-9][0-9A-Za-z.]*(?:\([^/]*\))?/$'
 
 [version]
 source = "rpc"

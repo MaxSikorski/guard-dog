@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 use gd_core::Untrusted;
 use gd_core::catalog::{
-    self, Catalog, Entry, Identified, IdentifiedBy, MAX_REPLY, OTHER_URLS, Pattern,
+    self, Catalog, EndpointKey, Entry, Identified, IdentifiedBy, MAX_REPLY, OTHER_URLS, Pattern,
     READ_ONLY_CALLS, RELATED_OTHER_OWNER, ReplyMatch, SHARED_PORTS, Unreadable, VersionMatch,
     normalise_image,
 };
@@ -164,28 +164,77 @@ fn validate(stem: &str, text: &str) -> Result<Table, String> {
     toml::from_str(text).map_err(|e| format!("{stem}: not valid TOML: {e}"))
 }
 
-/// A `source` is a file in the repo or an https URL (the loader checked the
-/// URL is under the upstream and the file name has no `..`).
-fn source_exists(field: &str, src: &str) -> Result<(), String> {
-    if src.starts_with("https://") || root().join(src).is_file() {
+/// Every regular file under `fixtures/`, `advisories/` and `lab/`, as a path
+/// relative to the repo root with `/` separators. Found with `symlink_metadata`,
+/// so a symlink is never followed and is not in the list: a citation cannot
+/// reach outside the repo through one.
+fn inventory() -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for top in ["fixtures", "advisories", "lab"] {
+        walk_files(&root().join(top), top, &mut out);
+    }
+    out
+}
+
+/// The regular files below `dir` (symlinks skipped, never followed), as `rel/...` paths.
+fn walk_files(dir: &Path, rel: &str, out: &mut BTreeSet<String>) {
+    let Ok(items) = fs::read_dir(dir) else { return };
+    for item in items.flatten() {
+        let name = item.file_name().to_string_lossy().into_owned();
+        let path = item.path();
+        let rel = format!("{rel}/{name}");
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            walk_files(&path, &rel, out);
+        } else if meta.is_file() {
+            out.insert(rel);
+        }
+    }
+}
+
+/// A `source` is a URL (the loader checked it is under the upstream and that a
+/// file name has no `..`) or a file in the trusted inventory, still inside the
+/// repo root once canonicalised. A failure names the field and the item's
+/// index only: the cited text is never used as a path or shown.
+fn source_exists(
+    inv: &BTreeSet<String>,
+    field: &str,
+    index: usize,
+    src: &str,
+) -> Result<(), String> {
+    if src.starts_with("https://") {
+        return Ok(());
+    }
+    let bad =
+        || format!("{field} (item {index}) must be a file in the repo or a URL under the upstream");
+    if !inv.contains(src) {
+        return Err(bad());
+    }
+    let root = fs::canonicalize(root()).map_err(|_| bad())?;
+    let real = fs::canonicalize(root.join(src)).map_err(|_| bad())?;
+    if real.starts_with(&root) && real.is_file() {
         Ok(())
     } else {
-        Err(format!(
-            "{field} must be a file in the repo or a URL under the upstream: {src}"
-        ))
+        Err(bad())
     }
 }
 
 /// The checks that read files: every port and example source exists, and an
 /// advisory example's version is in that advisory.
 fn check_files(e: &Entry) -> Result<(), String> {
-    for p in &e.recognize().ports {
+    let inv = inventory();
+    for (i, p) in e.recognize().ports.iter().enumerate() {
         if let Some(s) = &p.source {
-            source_exists("recognize.ports.source", s)?;
+            source_exists(&inv, "recognize.ports.source", i, s)?;
         }
     }
-    for ex in e.version_call().examples() {
-        source_exists("version.examples.source", &ex.source)?;
+    for (i, ex) in e.version_call().examples().iter().enumerate() {
+        source_exists(&inv, "version.examples.source", i, &ex.source)?;
         if ex.advisory {
             advisory_has_version(&ex.source, &ex.version, &e.advisories().osv_packages)?;
         }
@@ -992,7 +1041,7 @@ fn broken_entries_are_refused() {
     l(
         "server_name = \"localhost\"",
         "server_name = \"localhost\"\nskip_verify = true",
-        "unknown key `skip_verify`",
+        "an unknown key",
     );
     refused(
         "lnd",
@@ -1065,18 +1114,14 @@ fn broken_entries_are_refused() {
     c(
         "format = 1\n",
         "format = 1\nsurprise = 1\n",
-        "unknown key `surprise`",
+        "an unknown key",
     );
-    c(
-        "[review]\n",
-        "[review]\nextra = true\n",
-        "unknown key `extra`",
-    );
+    c("[review]\n", "[review]\nextra = true\n", "an unknown key");
     c("money = true\n", "", "missing key `money`");
     c(
         "licence = \"MIT\"\n",
         "licence = \"MIT\"\npurl = \"pkg:x/y\"\n",
-        "unknown key `purl`",
+        "an unknown key",
     );
 
     // URLs
@@ -1269,7 +1314,7 @@ fn broken_entries_are_refused() {
     );
 
     // 9. blind spot: no GHSA and no machine-readable feed needs one
-    k("blind_spot = ", "note = ", "unknown key `note`");
+    k("blind_spot = ", "note = ", "an unknown key");
     refused(
         "core-lightning",
         &cln.lines()
@@ -1924,9 +1969,14 @@ const IDENTITY_REPLIES: [(&str, &str); 4] = [
     ("strfry", "git+https://github.com/hoytech/strfry.git"),
 ];
 
+/// The key of the one endpoint the tests observe.
+fn ep() -> EndpointKey {
+    EndpointKey::new("host-a.test", 7777)
+}
+
 /// The proof of identity for an entry, from its probe reply; panics when it is not `Read`.
 fn identified<'e>(e: &'e Entry, reply: &str) -> Identified<'e> {
-    match e.identify_endpoint(&[u(reply)]) {
+    match e.identify_endpoint(&ep(), &[u(reply)]) {
         ReplyMatch::Read(i) => i,
         other => panic!("{}: not identified: {other:?}", e.id()),
     }
@@ -1938,20 +1988,23 @@ fn identity_comes_before_the_version() {
     let cat = catalog::embedded().unwrap();
     let fry = cat.get("strfry").unwrap();
     assert!(matches!(
-        fry.identify_endpoint(&[u("other-relay")]),
+        fry.identify_endpoint(&ep(), &[u("other-relay")]),
         ReplyMatch::NoMatch
     ));
     let id = identified(fry, "git+https://github.com/hoytech/strfry.git");
-    assert_eq!(id.read_version(&u("1.1.2")), VersionMatch::Read("1.1.2"));
+    assert_eq!(
+        id.read_version(&ep(), &u("1.1.2")),
+        VersionMatch::Read("1.1.2")
+    );
     assert_eq!(id.entry().id(), "strfry");
     assert_eq!(id.by(), IdentifiedBy::Probes);
     // The wrong number of replies, or none, is missing evidence.
     assert!(matches!(
-        fry.identify_endpoint(&[]),
+        fry.identify_endpoint(&ep(), &[]),
         ReplyMatch::Unreadable(Unreadable::MissingEvidence)
     ));
     assert!(matches!(
-        fry.identify_endpoint(&[u("a"), u("b")]),
+        fry.identify_endpoint(&ep(), &[u("a"), u("b")]),
         ReplyMatch::Unreadable(Unreadable::MissingEvidence)
     ));
 
@@ -1959,7 +2012,7 @@ fn identity_comes_before_the_version() {
     let core = cat.get("bitcoin-core").unwrap();
     let id = identified(core, "/Satoshi:32.1.0/");
     assert_eq!(
-        id.read_version(&u("/Satoshi:32.1.0/")),
+        id.read_version(&ep(), &u("/Satoshi:32.1.0/")),
         VersionMatch::Read("32.1")
     );
     for raw in [
@@ -1968,7 +2021,10 @@ fn identity_comes_before_the_version() {
         "/Satoshi:32.1.0/ ",
     ] {
         assert!(
-            matches!(core.identify_endpoint(&[u(raw)]), ReplyMatch::NoMatch),
+            matches!(
+                core.identify_endpoint(&ep(), &[u(raw)]),
+                ReplyMatch::NoMatch
+            ),
             "{raw}"
         );
     }
@@ -1977,7 +2033,7 @@ fn identity_comes_before_the_version() {
     let lnd = cat.get("lnd").unwrap();
     let by_probe = identified(lnd, "SERVER_ACTIVE");
     assert_eq!(
-        by_probe.read_version(&u("0.21.6-beta")),
+        by_probe.read_version(&ep(), &u("0.21.6-beta")),
         VersionMatch::Read("0.21.6-beta")
     );
     let by_image = match lnd.identify_image(&u("lightninglabs/lnd:v0.21.6-beta")) {
@@ -1986,7 +2042,10 @@ fn identity_comes_before_the_version() {
     };
     assert_eq!(by_image.by(), IdentifiedBy::Image);
     assert_eq!(
-        by_image.read_version(&u("0.21.6-beta")),
+        by_image.read_version(
+            &EndpointKey::for_image(&u("lightninglabs/lnd:v0.21.6-beta")),
+            &u("0.21.6-beta")
+        ),
         VersionMatch::Unreadable(Unreadable::MissingEvidence)
     );
     let cln = cat.get("core-lightning").unwrap();
@@ -1995,19 +2054,29 @@ fn identity_comes_before_the_version() {
         other => panic!("{other:?}"),
     };
     assert_eq!(
-        cln_image.read_version(&u("v26.06.9")),
+        cln_image.read_version(
+            &EndpointKey::for_image(&u("elementsproject/lightningd:v26.06.9")),
+            &u("v26.06.9")
+        ),
         VersionMatch::Read("26.06.9")
     );
     assert!(matches!(
-        cln.identify_endpoint(&[]),
+        cln.identify_endpoint(&ep(), &[]),
         ReplyMatch::Unreadable(Unreadable::MissingEvidence)
     ));
 
     // identify_image.
     let tapd = cat.get("tapd").unwrap();
+    // An entry with no images cannot be identified by image: cannot tell, not "no".
     assert!(matches!(
         tapd.identify_image(&u("docker.io/lightninglabs/tapd")),
-        ReplyMatch::NoMatch
+        ReplyMatch::Unreadable(Unreadable::MissingEvidence)
+    ));
+    assert!(matches!(
+        cat.get("alby-hub")
+            .unwrap()
+            .identify_image(&u("getalby/hub:v1.19.0")),
+        ReplyMatch::Unreadable(Unreadable::MissingEvidence)
     ));
     assert!(matches!(
         lnd.identify_image(&u("docker.io/evil/lnd")),
@@ -2105,24 +2174,24 @@ fn an_identified_product_with_an_unreadable_version_is_kept() {
     let id = identified(lnd, "SERVER_ACTIVE");
     for raw in ["", "garbage", "0.21.6"] {
         assert_eq!(
-            id.read_version(&u(raw)),
+            id.read_version(&ep(), &u(raw)),
             VersionMatch::Unreadable(Unreadable::NotAVersion),
             "{raw:?}"
         );
     }
     assert_eq!(
-        id.read_version(&u(&"1".repeat(MAX_REPLY + 1))),
+        id.read_version(&ep(), &u(&"1".repeat(MAX_REPLY + 1))),
         VersionMatch::Unreadable(Unreadable::TooLong)
     );
     assert_eq!(
-        id.read_version(&u("١.٢.٣-beta")),
+        id.read_version(&ep(), &u("١.٢.٣-beta")),
         VersionMatch::Unreadable(Unreadable::NonAscii)
     );
     // A release candidate is identified by Bitcoin Core's probe, and its version is unread.
     let core = cat.get("bitcoin-core").unwrap();
     let rc = identified(core, "/Satoshi:0.21.0rc1/");
     assert_eq!(
-        rc.read_version(&u("/Satoshi:0.21.0rc1/")),
+        rc.read_version(&ep(), &u("/Satoshi:0.21.0rc1/")),
         VersionMatch::Unreadable(Unreadable::NotAVersion)
     );
     // Every network-source entry: an identified read of a 257-byte reply is TooLong.
@@ -2144,7 +2213,7 @@ fn an_identified_product_with_an_unreadable_version_is_kept() {
         let id = identified(e, reply);
         let long = format!("{}{}", "1".repeat(MAX_REPLY), ".0.0");
         assert_eq!(
-            id.read_version(&u(&long)),
+            id.read_version(&ep(), &u(&long)),
             VersionMatch::Unreadable(Unreadable::TooLong),
             "{}",
             e.id()
@@ -2531,6 +2600,34 @@ fn plain_version_sweep_refuses_wide_regexes() {
         &with("^(?P<version>0\\.\\d+\\.\\d+)?(?:5\\.\\d+)?$", "0.5.1"),
         "major",
     );
+    // Opus r3 LOW 1: minors and patches past 12 are sampled too.
+    refused(
+        "tapd",
+        &with("^(?P<version>\\d+\\.[1-9]\\d\\.\\d+)$", "0.18.3"),
+        "more than one major",
+    );
+    refused(
+        "tapd",
+        &with("^(?P<version>\\d+\\.\\d\\.[1-9]\\d\\d)$", "0.1.123"),
+        "more than one major",
+    );
+    // Codex r3 MED 3: an optional separator or an alternation in the pinned part does
+    // not get past the structural check, and the sweep and the match-time major check
+    // agree on `1.12.7` (see also the unit test in the loader for `112.7`).
+    refused(
+        "tapd",
+        &with("^(?P<version>0\\.?12\\.7)$", "0.12.7"),
+        "must pin that major",
+    );
+    refused(
+        "alby-hub",
+        &replaced(
+            &text_of("alby-hub"),
+            "regex = '^(?P<version>1\\.\\d+\\.\\d+)$'",
+            "regex = '^(?P<version>(?:1|2)\\.19\\.0)$'",
+        ),
+        "must pin that major",
+    );
     // A regex pinned to one major still loads (the shipped 0.x and 2.x entries).
     validate("tapd", &tapd).unwrap();
 }
@@ -2907,6 +3004,70 @@ fn trust_roots_are_on_a_reviewed_forge_in_a_fixed_shape() {
         "upstream.release_feed must be a release feed",
     );
     validate("lnd", &lnd).unwrap();
+
+    // Opus r3 MED 2: a ref anyone can write (an abbreviated commit reachable from a
+    // fork, a pull-request ref, HEAD in any case) is not a trust root.
+    for bad in [
+        "tree/1a2b3c4d5e6f/scripts/keys",
+        "tree/1A2B/scripts/keys",
+        "tree/pull/1/head/keys",
+        "tree/Pull/1/head/keys",
+        "blob/HEAD/SECURITY.md",
+        "blob/head/SECURITY.md",
+        "tree/refs/pull/1/head",
+    ] {
+        let url = format!("https://github.com/lightningnetwork/lnd/{bad}");
+        let text = replaced(&lnd, keys, &format!("keys_url = \"{url}\""));
+        refused("lnd", &text, "signing.keys_url must be a release feed");
+        let policy = replaced(&lnd, feed, &format!("{feed}\nsecurity_policy = \"{url}\""));
+        refused(
+            "lnd",
+            &policy,
+            "upstream.security_policy must be a release feed",
+        );
+    }
+    // Branch and tag shaped names still load.
+    for ok in ["master", "v0.21.6-beta", "release-0.20", "abc"] {
+        let url = format!("https://github.com/lightningnetwork/lnd/tree/{ok}/scripts/keys");
+        validate(
+            "lnd",
+            &replaced(&lnd, keys, &format!("keys_url = \"{url}\"")),
+        )
+        .unwrap();
+    }
+
+    // Opus r3 MED 1 and Codex r3 MED 4: on a code host the website is the repo, so it
+    // never rescues a URL that fails the repo's path shape.
+    let base = synthetic("cb-svc").replace("github.com", "codeberg.org");
+    let repo = "repo = \"https://codeberg.org/o/cb-svc\"";
+    let with = |extra: &str| {
+        replaced(
+            &base,
+            repo,
+            &format!("{repo}\nwebsite = \"https://codeberg.org/o/cb-svc\"\n{extra}"),
+        )
+    };
+    validate(
+        "cb-svc",
+        &with("release_feed = \"https://codeberg.org/o/cb-svc/releases.atom\""),
+    )
+    .unwrap();
+    for bad in ["/issues/1", "/wiki/Home", "/pulls/3"] {
+        refused(
+            "cb-svc",
+            &with(&format!(
+                "release_feed = \"https://codeberg.org/o/cb-svc{bad}\""
+            )),
+            "upstream.release_feed must be a release feed",
+        );
+        refused(
+            "cb-svc",
+            &with(&format!(
+                "security_policy = \"https://codeberg.org/o/cb-svc{bad}\""
+            )),
+            "upstream.security_policy must be a release feed",
+        );
+    }
 }
 
 #[test]
@@ -3044,6 +3205,34 @@ fn errors_never_quote_untrusted_values() {
         catalog::load_all(&[("one-svc", &one), ("two-svc", &two)]).unwrap_err(),
         "recognize.images",
     );
+    // Codex r3 MED 5: an unknown key is shown as a fixed placeholder, in the loader's
+    // own message and in the paths the secret scan builds.
+    check(
+        load(
+            "lnd",
+            &replaced(&lnd, "format = 1\n", "format = 1\nQZXMARK = true\n"),
+        ),
+        "an unknown key",
+    );
+    check(
+        load(
+            "lnd",
+            &replaced(&lnd, "[review]\n", "[review]\nQZXMARK = true\n"),
+        ),
+        "an unknown key in review",
+    );
+    let token = format!("ghp_{}", "a1B2".repeat(10));
+    check(
+        load(
+            "lnd",
+            &replaced(
+                &lnd,
+                "format = 1\n",
+                &format!("format = 1\nQZXMARK = \"{token}\"\n"),
+            ),
+        ),
+        "<key> has a secret shape",
+    );
     let e = load(
         "lnd",
         &replaced(&lnd, "releases.atom\"", "releases\u{202e}.atom\""),
@@ -3099,12 +3288,12 @@ fn probes_read_the_recorded_replies() {
     ];
     for (id, probe_reply, version_reply, expected) in &cases {
         let e = cat.get(id).unwrap();
-        let proof = match e.identify_endpoint(std::slice::from_ref(probe_reply)) {
+        let proof = match e.identify_endpoint(&ep(), std::slice::from_ref(probe_reply)) {
             ReplyMatch::Read(i) => i,
             other => panic!("{id}: {other:?}"),
         };
         assert_eq!(
-            proof.read_version(version_reply),
+            proof.read_version(&ep(), version_reply),
             VersionMatch::Read(expected),
             "{id}"
         );
@@ -3115,7 +3304,7 @@ fn probes_read_the_recorded_replies() {
     let lnd = cat.get("lnd").unwrap();
     let fry_software = recorded_field("strfry/nip11.json", "software");
     assert!(matches!(
-        lnd.identify_endpoint(&[fry_software]),
+        lnd.identify_endpoint(&ep(), &[fry_software]),
         ReplyMatch::NoMatch
     ));
 }
@@ -3184,5 +3373,272 @@ fn reviewed_url_exceptions_are_each_needed() {
             "{id}: no related repo is owned by {owner}"
         );
         assert_ne!(owner_of(&e.upstream().repo), *owner, "{id}");
+    }
+}
+
+#[test]
+fn identity_matches_the_product_marker_only() {
+    // Opus r3 MED 3 and Codex r3 MED 1: a probe recognises the product by its own
+    // marker, never by the version form, so an odd version is "version unknown"
+    // with the product kept, not "not this product".
+    let cat = catalog::embedded().unwrap();
+    let core = cat.get("bitcoin-core").unwrap();
+    let id = identified(core, "/Satoshi:28.1.0(mynode)/");
+    assert_eq!(
+        id.read_version(&ep(), &u("/Satoshi:28.1.0(mynode)/")),
+        VersionMatch::Unreadable(Unreadable::NotAVersion)
+    );
+    for ok in ["/Satoshi:32.1.0/", "/Satoshi:28.0.0rc1/", "/Satoshi:30.2/"] {
+        assert!(identified(core, ok).entry().id() == "bitcoin-core", "{ok}");
+    }
+    for raw in [
+        "/Knots:20250305/",
+        "/Satoshi:28.1.0/Knots:20250305/",
+        "/Other:28.1.0/",
+        "/Satoshi:/",
+        "/Satoshi:x28/",
+    ] {
+        assert!(
+            matches!(
+                core.identify_endpoint(&ep(), &[u(raw)]),
+                ReplyMatch::NoMatch
+            ),
+            "{raw}"
+        );
+    }
+    let nut = cat.get("nutshell").unwrap();
+    let id = identified(nut, "Nutshell/0.21.0-rc1");
+    assert_eq!(
+        id.read_version(&ep(), &u("Nutshell/0.21.0-rc1")),
+        VersionMatch::Unreadable(Unreadable::NotAVersion)
+    );
+    assert_eq!(
+        identified(nut, "Nutshell/0.21.0").read_version(&ep(), &u("Nutshell/0.21.0")),
+        VersionMatch::Read("0.21.0")
+    );
+    for raw in [
+        "Other/0.21.0",
+        "nutshell/0.21.0",
+        "Nutshell/",
+        "Nutshell/0.21.0 ",
+    ] {
+        assert!(
+            matches!(nut.identify_endpoint(&ep(), &[u(raw)]), ReplyMatch::NoMatch),
+            "{raw}"
+        );
+    }
+}
+
+#[test]
+fn identity_is_bound_to_one_observation() {
+    // Opus r3 LOW 3 and Codex r3 MED 2: proof from one endpoint is not used for another's reply.
+    let cat = catalog::embedded().unwrap();
+    let fry = cat.get("strfry").unwrap();
+    let a = EndpointKey::new("relay-a.test", 7777);
+    let b = EndpointKey::new("relay-b.test", 7777);
+    assert!(a == EndpointKey::new("RELAY-A.test", 7777));
+    assert!(a != b);
+    assert!(a != EndpointKey::new("relay-a.test", 7778));
+    let proof = match fry.identify_endpoint(&a, &[u("git+https://github.com/hoytech/strfry.git")]) {
+        ReplyMatch::Read(i) => i,
+        other => panic!("{other:?}"),
+    };
+    // B reports other software; A's proof with B's key (and B's reply) is not a read.
+    assert!(matches!(
+        fry.identify_endpoint(&b, &[u("other-relay")]),
+        ReplyMatch::NoMatch
+    ));
+    assert_eq!(
+        proof.read_version(&b, &u("1.1.2")),
+        VersionMatch::Unreadable(Unreadable::MissingEvidence)
+    );
+    assert_eq!(
+        proof.read_version(&a, &u("1.1.2")),
+        VersionMatch::Read("1.1.2")
+    );
+    // The key shows nothing of its contents.
+    assert_eq!(format!("{a:?}"), "EndpointKey(..)");
+    // An image proof is bound to the image (tag and digest do not matter).
+    let cli = cat.get("core-lightning").unwrap();
+    let img = u("elementsproject/lightningd:v26.06.9");
+    let by_image = match cli.identify_image(&img) {
+        ReplyMatch::Read(i) => i,
+        other => panic!("{other:?}"),
+    };
+    let same = EndpointKey::for_image(&u("docker.io/elementsproject/lightningd:v26.06.8"));
+    assert_eq!(
+        by_image.read_version(&same, &u("v26.06.9")),
+        VersionMatch::Read("26.06.9")
+    );
+    assert_eq!(
+        by_image.read_version(
+            &EndpointKey::for_image(&u("lightninglabs/lnd")),
+            &u("v26.06.9")
+        ),
+        VersionMatch::Unreadable(Unreadable::MissingEvidence)
+    );
+    assert_eq!(
+        by_image.read_version(&a, &u("v26.06.9")),
+        VersionMatch::Unreadable(Unreadable::MissingEvidence)
+    );
+}
+
+#[test]
+fn image_references_are_checked_before_they_are_normalised() {
+    // Codex r3 MED 7 and Opus r3 NIT: a reference with a missing tag or digest, `..` or an
+    // odd path is not well formed, so it never identifies anything.
+    let cat = catalog::embedded().unwrap();
+    let cln = cat.get("core-lightning").unwrap();
+    for bad in [
+        "elementsproject/lightningd@",
+        "elementsproject/lightningd:",
+        "elementsproject/lightningd@sha256:abc@def",
+        "elementsproject//lightningd",
+        "/elementsproject/lightningd",
+        "elementsproject/lightningd/",
+        "elementsproject/../lightningd",
+        "elementsproject/./lightningd",
+        "docker.io/elementsproject/lightningd:a:b",
+        ":v1",
+    ] {
+        assert!(
+            matches!(
+                cln.identify_image(&u(bad)),
+                ReplyMatch::Unreadable(Unreadable::BadToken)
+            ),
+            "{bad}"
+        );
+    }
+    for ok in [
+        "elementsproject/lightningd",
+        "elementsproject/lightningd:v26.06.9",
+        "elementsproject/lightningd@sha256:0123abcd",
+        "docker.io/elementsproject/lightningd:v26.06.9@sha256:0123abcd",
+    ] {
+        assert!(cln.identify_image(&u(ok)).is_read(), "{ok}");
+    }
+    // A wildcard covers one more repo name, never a deeper path or `..`.
+    let wild = catalog::load(
+        "one-svc",
+        &replaced(
+            &synthetic("one-svc"),
+            "images = [\"docker.io/o/one-svc\"]",
+            "images = [\"docker.io/o/one-svc-*\"]",
+        ),
+    )
+    .unwrap();
+    assert!(wild.identify_image(&u("o/one-svc-x:1")).is_read());
+    for deeper in ["o/one-svc-x/y", "docker.io/o/one-svc-x/y/z"] {
+        assert!(
+            matches!(wild.identify_image(&u(deeper)), ReplyMatch::NoMatch),
+            "{deeper}"
+        );
+    }
+    assert!(matches!(
+        wild.identify_image(&u("o/one-svc-x/../y")),
+        ReplyMatch::Unreadable(Unreadable::BadToken)
+    ));
+    // A registry port is fine.
+    assert!(matches!(
+        cln.identify_image(&u("localhost:5000/elementsproject/lightningd:v1")),
+        ReplyMatch::NoMatch
+    ));
+}
+
+#[test]
+fn a_secret_in_a_comment_is_refused() {
+    // Codex r3 HIGH: comments are never parsed, but the file is embedded as written, so
+    // the credential-shape scan runs over the raw text, every line.
+    let lnd = text_of("lnd");
+    let token = format!("ghp_{}", "a1B2".repeat(10));
+    let lines = lnd.lines().count();
+    let in_comment = format!("{lnd}# note: {token}\n");
+    let e = load_error("lnd", &in_comment);
+    assert!(
+        e.contains(&format!("line {} has a secret shape", lines + 1)),
+        "{e}"
+    );
+    assert!(!e.contains(&token[..8]), "{e}");
+    // A trailing comment on a value line, and a comment above the first line.
+    refused(
+        "lnd",
+        &replaced(&lnd, "money = true", &format!("money = true # {token}")),
+        "has a secret shape",
+    );
+    refused(
+        "lnd",
+        &format!("# {token}\n{lnd}"),
+        "line 1 has a secret shape",
+    );
+    let e = catalog::scan_secret_shapes(&in_comment)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("has a secret shape"), "{e}");
+    assert!(!format!("{e:?}").contains(&token), "{e}");
+    // The same for a 40-hex string in a comment (a fingerprint is only allowed as a value).
+    refused(
+        "lnd",
+        &format!("{lnd}# {}\n", &"0123456789abcdef".repeat(3)[..40]),
+        "has a secret shape",
+    );
+    // A catalog of files refuses it too, naming the file's slug.
+    let err = catalog::load_all(&[("lnd", &in_comment)])
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("lnd") && err.contains("secret shape"), "{err}");
+    // Plain comments are fine.
+    validate(
+        "lnd",
+        &format!("{lnd}# a plain note, version 2.4.1 at 12:30\n"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn embedded_files_pass_the_raw_secret_scan() {
+    // The text compiled into the binary is the raw file, comments included.
+    for (id, text) in catalog::embedded_files() {
+        catalog::scan_secret_shapes(text).unwrap_or_else(|e| panic!("{id}: {e}"));
+    }
+}
+
+#[test]
+fn citations_resolve_only_against_the_trusted_inventory() {
+    // Codex r3 MED 6: an example or port `source` is looked up in the inventory of
+    // repo files (found without following symlinks); it is never joined to a path
+    // or shown in a failure.
+    let inv = inventory();
+    assert!(inv.contains("lab/compose.yml"));
+    assert!(inv.contains("fixtures/lab-recorded/manifest.toml"));
+    source_exists(&inv, "version.examples.source", 0, "lab/compose.yml").unwrap();
+    source_exists(&inv, "version.examples.source", 0, "https://github.com/o/p").unwrap();
+    for bad in [
+        "fixtures/QZXMARK",
+        "../etc/passwd",
+        "/etc/passwd",
+        "fixtures/../Cargo.toml",
+        "Cargo.toml",
+        "fixtures",
+    ] {
+        let e = source_exists(&inv, "version.examples.source", 3, bad).unwrap_err();
+        assert!(e.starts_with("version.examples.source (item 3)"), "{e}");
+        assert!(
+            !e.to_lowercase().contains("qzxmark") && !e.contains("passwd"),
+            "{e}"
+        );
+    }
+    // A symlink is not in the inventory, whatever it points at.
+    #[cfg(unix)]
+    {
+        let dir = std::env::temp_dir().join(format!("gd-inventory-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("real.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(root().join("Cargo.toml"), dir.join("sub/link.txt")).unwrap();
+        std::os::unix::fs::symlink(dir.join("sub"), dir.join("linkdir")).unwrap();
+        let mut found = BTreeSet::new();
+        walk_files(&dir, "x", &mut found);
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(found, BTreeSet::from(["x/real.txt".to_string()]));
     }
 }

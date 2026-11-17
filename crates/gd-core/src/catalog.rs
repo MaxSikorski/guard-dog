@@ -409,6 +409,28 @@ fn is_version_token(s: &str) -> bool {
 #[derive(Clone, Debug)]
 pub struct Pattern {
     re: Regex,
+    /// The majors a plain version (`1.2`, `28.1.0`) may have when this pattern
+    /// reads one. `None` for a pattern with no such rule. Set by the loader.
+    majors: Option<BTreeSet<u64>>,
+}
+
+/// The leading number of a plain version: two or more dot-separated runs of
+/// ASCII digits and nothing else (`28.1.0`). A number too big for `u64` reads as
+/// `u64::MAX`. `None` when the token is not a plain version.
+fn plain_major(token: &str) -> Option<u64> {
+    let mut parts = token.split('.');
+    let first = parts.next()?;
+    let mut rest = 0usize;
+    for p in parts {
+        if p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        rest += 1;
+    }
+    if rest == 0 || first.is_empty() || !first.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(first.parse::<u64>().unwrap_or(u64::MAX))
 }
 
 impl Pattern {
@@ -418,7 +440,7 @@ impl Pattern {
     /// The reason, when the pattern is unanchored, too long, uses inline flags
     /// or does not compile within the size limit.
     pub fn new(pattern: &str) -> Result<Self, String> {
-        untrusted_regex(pattern).map(|re| Self { re })
+        untrusted_regex(pattern).map(|re| Self { re, majors: None })
     }
 
     /// Like [`Pattern::new`], and the pattern needs a group named `version`.
@@ -475,7 +497,16 @@ impl Pattern {
             return ReplyMatch::NoMatch;
         };
         match caps.name("version").map(|m| m.as_str()) {
-            Some(v) if is_version_token(v) => ReplyMatch::Read(v),
+            Some(v) if is_version_token(v) => {
+                // A plain version must have a major the entry permits, however the
+                // regex is spelled.
+                match (&self.majors, plain_major(v)) {
+                    (Some(set), Some(m)) if !set.contains(&m) => {
+                        ReplyMatch::Unreadable(Unreadable::NotAVersion)
+                    }
+                    _ => ReplyMatch::Read(v),
+                }
+            }
             _ => ReplyMatch::Unreadable(Unreadable::BadToken),
         }
     }
@@ -489,13 +520,15 @@ pub enum Unreadable {
     /// Has a non-ASCII character.
     NonAscii,
     /// The reply matched, but what the `version` group read is not a valid
-    /// version token.
+    /// version token (or an image reference is not well formed).
     BadToken,
     /// The product was identified, but its version reply is not in a form the
     /// entry reads (empty, a release candidate the regex skips, an unknown build).
     NotAVersion,
     /// No identity evidence fits this read: the wrong number of probe replies,
-    /// no identity probe, or evidence of a kind this version source cannot use.
+    /// no identity probe, an entry with no images to identify by, evidence of a
+    /// kind this version source cannot use, or evidence taken from a different
+    /// endpoint or image than the reply it is used with.
     MissingEvidence,
 }
 
@@ -573,15 +606,47 @@ pub enum IdentifiedBy {
     Image,
 }
 
+/// Which observation a piece of evidence came from: one host and port, or one
+/// container image. The caller builds it where it takes the reply, and the same
+/// key must go to [`Entry::identify_endpoint`] and [`Identified::read_version`],
+/// so identity proved on one endpoint is never used to read another's reply.
+/// Opaque: it can be compared, and nothing of its contents can be shown.
+#[derive(Clone, PartialEq, Eq)]
+pub struct EndpointKey(String);
+
+impl EndpointKey {
+    /// The key of a network endpoint (host as the scanner dialled it, and port).
+    #[must_use]
+    pub fn new(host: &str, port: u16) -> Self {
+        Self(format!("ep:{}:{port}", host.to_ascii_lowercase()))
+    }
+
+    /// The key of a container image (the reference the runtime reports,
+    /// normalised, so tag and digest do not matter).
+    #[must_use]
+    pub fn for_image(image: &Untrusted<String>) -> Self {
+        // expose_untrusted: normalised into an opaque key that is only compared.
+        Self(format!("img:{}", normalise_image(image.expose_untrusted())))
+    }
+}
+
+impl fmt::Debug for EndpointKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "EndpointKey(..)")
+    }
+}
+
 /// Proof that one endpoint or container was identified as one entry. Only
-/// [`Entry::identify_endpoint`] and [`Entry::identify_image`] make one.
+/// [`Entry::identify_endpoint`] and [`Entry::identify_image`] make one. It
+/// remembers the [`EndpointKey`] of the observation it came from.
 ///
 /// `Unreadable` from [`Identified::read_version`] is version unknown with the
 /// product kept: never not affected, never not installed.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Identified<'e> {
     entry: &'e Entry,
     by: IdentifiedBy,
+    key: EndpointKey,
 }
 
 impl fmt::Debug for Identified<'_> {
@@ -609,6 +674,8 @@ impl<'e> Identified<'e> {
     }
 
     /// Reads the version from a reply, for a product already identified.
+    /// `key` is the key of the endpoint (or image) the reply came from; if it
+    /// is not the one the product was identified on, `Unreadable(MissingEvidence)`.
     /// The evidence must fit the entry's version source (`rpc`, `grpc`, `http`
     /// and `nip11` need probes; `image-label` and a `cli` run in the container
     /// need the image); otherwise `Unreadable(MissingEvidence)`. The whole reply
@@ -617,7 +684,11 @@ impl<'e> Identified<'e> {
     /// non-ASCII text is `Unreadable(TooLong)` or `Unreadable(NonAscii)`. A read
     /// result is a valid version token. `Unreadable` is version unknown with
     /// the product kept: never not affected, never not installed.
-    pub fn read_version<'a>(&self, reply: &'a Untrusted<String>) -> VersionMatch<'a> {
+    pub fn read_version<'a>(
+        &self,
+        key: &EndpointKey,
+        reply: &'a Untrusted<String>,
+    ) -> VersionMatch<'a> {
         let v = &self.entry.version;
         let fits = match v.source {
             Source::Rpc | Source::Grpc | Source::Http | Source::Nip11 => {
@@ -636,7 +707,7 @@ impl<'e> Identified<'e> {
             }
             Source::PlatformManifest => false,
         };
-        if !fits {
+        if !fits || *key != self.key {
             return VersionMatch::Unreadable(Unreadable::MissingEvidence);
         }
         match v.pattern.version(reply) {
@@ -1078,12 +1149,17 @@ impl Entry {
             .collect()
     }
 
-    /// Does this endpoint belong to this product? `replies[i]` is the field
-    /// value of `identity_probes()[i]`, taken from the same host and port the
-    /// version call goes to, in the same scan. Any probe that does not match is
-    /// `NoMatch`; the wrong number of replies, no identity probe or a source
-    /// with no endpoint is `Unreadable(MissingEvidence)`.
-    pub fn identify_endpoint(&self, replies: &[Untrusted<String>]) -> ReplyMatch<Identified<'_>> {
+    /// Does this endpoint belong to this product? `key` names the endpoint, and
+    /// `replies[i]` is the field value of `identity_probes()[i]`, taken from that
+    /// same host and port, which is where the version call goes, in the same
+    /// scan. Any probe that does not match is `NoMatch`; the wrong number of
+    /// replies, no identity probe or a source with no endpoint is
+    /// `Unreadable(MissingEvidence)`.
+    pub fn identify_endpoint(
+        &self,
+        key: &EndpointKey,
+        replies: &[Untrusted<String>],
+    ) -> ReplyMatch<Identified<'_>> {
         if !matches!(
             self.version.source,
             Source::Rpc | Source::Grpc | Source::Http | Source::Nip11
@@ -1111,13 +1187,21 @@ impl Entry {
         ReplyMatch::Read(Identified {
             entry: self,
             by: IdentifiedBy::Probes,
+            key: key.clone(),
         })
     }
 
     /// Does this container image (the reference the container runtime reports)
-    /// belong to this product? An entry with no images always gives `NoMatch`.
+    /// belong to this product? An entry with no images cannot be identified by
+    /// image, so it gives `Unreadable(MissingEvidence)` (cannot tell), never
+    /// `NoMatch`. A reference that is not well formed (an empty tag after `:`,
+    /// an empty digest after `@`, `..`, an empty or odd path segment) is
+    /// `Unreadable(BadToken)`. The proof carries the image's [`EndpointKey`].
     pub fn identify_image(&self, image: &Untrusted<String>) -> ReplyMatch<Identified<'_>> {
-        // expose_untrusted: checked for length and characters, then normalised and
+        if self.recognize.images.is_empty() {
+            return ReplyMatch::Unreadable(Unreadable::MissingEvidence);
+        }
+        // expose_untrusted: checked for length, characters and shape, then normalised and
         // compared with the entry's own image names; nothing is returned.
         let text = image.expose_untrusted();
         if text.len() > MAX_REPLY {
@@ -1129,6 +1213,7 @@ impl Entry {
         if !text
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | ':' | '@' | '-'))
+            || !image_reference_ok(text)
         {
             return ReplyMatch::Unreadable(Unreadable::BadToken);
         }
@@ -1139,12 +1224,18 @@ impl Entry {
             .iter()
             .any(|i| match i.strip_suffix('*') {
                 None => *i == n,
-                Some(prefix) => n.len() > prefix.len() && n.starts_with(prefix),
+                // A wildcard covers one more repo name, never a deeper path.
+                Some(prefix) => {
+                    n.len() > prefix.len()
+                        && n.starts_with(prefix)
+                        && n.get(prefix.len()..).is_some_and(|r| !r.contains('/'))
+                }
             });
         if hit {
             ReplyMatch::Read(Identified {
                 entry: self,
                 by: IdentifiedBy::Image,
+                key: EndpointKey::for_image(image),
             })
         } else {
             ReplyMatch::NoMatch
@@ -1211,11 +1302,22 @@ impl Catalog {
 /// The first rule the entry breaks, with the entry's name.
 pub fn load(name: &str, text: &str) -> Result<Entry, CatalogError> {
     check_size(text).map_err(|e| CatalogError::entry(name, e))?;
-    let t = parse_toml(text).map_err(|e| CatalogError::entry(name, e))?;
-    // The secret scan runs first, so nothing below ever sees (or reports) a
-    // value that looks like a secret. Every error names a field path only.
-    no_secret_shapes(&t).map_err(|e| CatalogError::entry(name, e))?;
+    let t = scanned(text).map_err(|e| CatalogError::entry(name, e))?;
     parse_entry(&t, name).map_err(|e| CatalogError::entry(name, e))
+}
+
+/// Parses a file after the secret scans. The raw text (comments included) is
+/// scanned first; the decoded values are scanned too, and their message, which
+/// names a field path, wins when both find something. So nothing after this
+/// ever sees (or reports) a value that looks like a secret.
+fn scanned(text: &str) -> R<Table> {
+    let raw = raw_secret_shapes(text);
+    let t = parse_toml(text);
+    if let Ok(t) = &t {
+        no_secret_shapes(t)?;
+    }
+    raw?;
+    t
 }
 
 fn check_size(text: &str) -> R<()> {
@@ -1279,7 +1381,8 @@ pub fn embedded() -> Result<Catalog, CatalogError> {
 fn check_keys(t: &Table, ctx: &str, required: &[&str], optional: &[&str]) -> R<()> {
     for k in t.keys() {
         if !required.contains(&k.as_str()) && !optional.contains(&k.as_str()) {
-            return Err(format!("unknown key `{}` in {ctx}", key_label(k)));
+            // The key is never shown: it is outside text and may be a secret.
+            return Err(format!("an unknown key in {ctx}"));
         }
     }
     for k in required {
@@ -1290,14 +1393,86 @@ fn check_keys(t: &Table, ctx: &str, required: &[&str], optional: &[&str]) -> R<(
     Ok(())
 }
 
-/// A TOML key as shown in an error or a path: itself when it is a plain name,
-/// otherwise a stand-in, so an odd (quoted) key can never smuggle text through.
+/// Every key the catalog format knows. Only these are ever shown in an error or
+/// a path; any other key is outside text and shows as `<key>`.
+const KNOWN_KEYS: [&str; 71] = [
+    "accept",
+    "advisories",
+    "aliases",
+    "app_id",
+    "argv",
+    "binaries",
+    "blind_spot",
+    "bundles",
+    "call",
+    "cert_source",
+    "checked",
+    "credential",
+    "endpoint_port",
+    "examples",
+    "exposure",
+    "feeds",
+    "field",
+    "fingerprint",
+    "fork_of",
+    "format",
+    "ghsa",
+    "id",
+    "images",
+    "images_signed",
+    "keys",
+    "keys_url",
+    "kind",
+    "last_reviewed",
+    "level",
+    "licence",
+    "match",
+    "method",
+    "min_signatures",
+    "money",
+    "name",
+    "note",
+    "osv_packages",
+    "path",
+    "platform",
+    "platform_map",
+    "port",
+    "ports",
+    "probes",
+    "proto",
+    "raw",
+    "recognize",
+    "regex",
+    "related_repos",
+    "release_feed",
+    "repo",
+    "reproducible",
+    "review",
+    "run_as",
+    "scheme",
+    "security_policy",
+    "server_name",
+    "signing",
+    "source",
+    "source_kind",
+    "sources",
+    "summary",
+    "tls",
+    "todo",
+    "units",
+    "upstream",
+    "url",
+    "version",
+    "version_rule",
+    "website",
+    "what",
+    "who",
+];
+
+/// A TOML key as shown in a path: itself when the format knows it, otherwise a
+/// stand-in, so an unknown or quoted key can never smuggle text through.
 fn key_label(k: &str) -> String {
-    if !k.is_empty()
-        && k.len() <= 40
-        && k.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
+    if KNOWN_KEYS.contains(&k) {
         k.to_string()
     } else {
         "<key>".to_string()
@@ -1657,9 +1832,18 @@ fn trust_segment(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-/// `<ref>`: one segment of `[A-Za-z0-9._-]{1,64}` that is not `refs` and not `.`.
+/// `<ref>`: one segment of `[A-Za-z0-9._-]{1,64}`, shaped like a branch or tag
+/// name. Not `.`, not `refs`, `pull` or `HEAD` (any case: pull-request and
+/// fork-reachable refs), and not all hex of 4 or more characters (an abbreviated
+/// commit, which GitHub also serves from any fork).
 fn trust_ref(s: &str) -> bool {
-    s.len() <= 64 && s != "refs" && trust_segment(s)
+    let all_hex = s.len() >= 4 && s.bytes().all(|b| b.is_ascii_hexdigit());
+    s.len() <= 64
+        && !all_hex
+        && !["refs", "pull", "head"]
+            .iter()
+            .any(|bad| s.eq_ignore_ascii_case(bad))
+        && trust_segment(s)
 }
 
 /// Does `rest` (the URL after the matched repo base: empty, or starting with
@@ -1732,7 +1916,9 @@ fn check_under_upstream(
         && let Ok((wh, _)) = https_parts(w)
         && !PAGES_SUFFIXES.iter().any(|s| on_host(wh, s))
     {
-        bases.push((w, false));
+        // On a code host the website is the repo itself: it gets the repo's shape rules.
+        let on_forge = https_parts(w).is_ok_and(|(h, _)| FORGE_HOSTS.contains(&h));
+        bases.push((w, on_forge));
     }
     bases.extend(
         OTHER_URLS
@@ -2004,6 +2190,29 @@ fn is_fingerprint_path(path: &str) -> bool {
     path.starts_with("signing.keys[") && path.ends_with("].fingerprint")
 }
 
+/// The first secret shape in `s`, by name. The 40-hex shape is left to the caller.
+fn shape_hit(fx: &Fixed, s: &str) -> Option<&'static str> {
+    for (name, re) in &fx.shapes {
+        for m in re.find_iter(s) {
+            let flagged = match *name {
+                "IPv6 candidate" => is_public_ipv6(m.as_str()),
+                "IPv4 address" => !["192.0.2.", "198.51.100.", "203.0.113."]
+                    .iter()
+                    .any(|p| m.as_str().starts_with(p)),
+                _ => true,
+            };
+            if flagged {
+                return Some(if *name == "IPv6 candidate" {
+                    "IPv6 address"
+                } else {
+                    name
+                });
+            }
+        }
+    }
+    None
+}
+
 fn no_secret_shapes(t: &Table) -> R<()> {
     let fx = fixed()?;
     let mut all = Vec::new();
@@ -2011,29 +2220,34 @@ fn no_secret_shapes(t: &Table) -> R<()> {
         collect_strings(&key_label(k), v, 0, &mut all)?;
     }
     for (path, s) in all {
-        for (name, re) in &fx.shapes {
-            for m in re.find_iter(&s) {
-                let flagged = match *name {
-                    "IPv6 candidate" => is_public_ipv6(m.as_str()),
-                    "IPv4 address" => !["192.0.2.", "198.51.100.", "203.0.113."]
-                        .iter()
-                        .any(|p| m.as_str().starts_with(p)),
-                    _ => true,
-                };
-                if flagged {
-                    let name = if *name == "IPv6 candidate" {
-                        "IPv6 address"
-                    } else {
-                        name
-                    };
-                    return Err(format!("{path} has a secret shape: {name}"));
-                }
-            }
+        if let Some(name) = shape_hit(fx, &s) {
+            return Err(format!("{path} has a secret shape: {name}"));
         }
         if fx.forty_hex.is_match(&s) && !is_fingerprint_path(&path) {
             return Err(format!(
                 "{path} has a secret shape: 40-hex outside signing.keys.fingerprint"
             ));
+        }
+    }
+    Ok(())
+}
+
+/// The same scan over the raw source text, line by line, comments included: a
+/// comment is never parsed, but `include_str!` ships it. A 40-hex string is
+/// only looked for in a comment (after a `#`), because a key fingerprint may
+/// sit in a value; the decoded-value scan covers values. The error names the
+/// line number only.
+fn raw_secret_shapes(text: &str) -> R<()> {
+    let fx = fixed()?;
+    for (i, line) in text.lines().enumerate() {
+        let n = i + 1;
+        if shape_hit(fx, line).is_some() {
+            return Err(format!("line {n} has a secret shape"));
+        }
+        if let Some((_, comment)) = line.split_once('#')
+            && fx.forty_hex.is_match(comment)
+        {
+            return Err(format!("line {n} has a secret shape"));
         }
     }
     Ok(())
@@ -2049,11 +2263,43 @@ fn no_secret_shapes(t: &Table) -> R<()> {
 /// The first value with a secret shape, or text that is not TOML.
 pub fn scan_secret_shapes(text: &str) -> Result<(), CatalogError> {
     check_size(text).map_err(CatalogError::whole)?;
-    let t = parse_toml(text).map_err(CatalogError::whole)?;
-    no_secret_shapes(&t).map_err(CatalogError::whole)
+    scanned(text).map(|_| ()).map_err(CatalogError::whole)
 }
 
 // ---------- images ----------
+
+/// Is this runtime-reported image reference well formed, before its tag and
+/// digest are stripped? `[registry[:port]/]path[:tag][@digest]`: at most one
+/// `@` with a digest after it, no empty tag after a `:` in the last segment, no
+/// empty, `.` or `..` path segment, and a `:` only as a registry port (first
+/// segment) or the tag (last segment).
+fn image_reference_ok(image: &str) -> bool {
+    let (name, digest) = match image.split_once('@') {
+        Some((n, d)) => (n, Some(d)),
+        None => (image, None),
+    };
+    if digest.is_some_and(|d| d.is_empty() || d.contains('@')) {
+        return false;
+    }
+    let segs: Vec<&str> = name.split('/').collect();
+    let last = segs.len().saturating_sub(1);
+    for (i, seg) in segs.iter().enumerate() {
+        if seg.is_empty() || *seg == "." || *seg == ".." {
+            return false;
+        }
+        let colons = seg.matches(':').count();
+        let allowed = i == last || (i == 0 && last > 0);
+        if colons > 1 || (colons == 1 && !allowed) {
+            return false;
+        }
+        if let Some((n, tag)) = seg.split_once(':')
+            && (n.is_empty() || tag.is_empty())
+        {
+            return false;
+        }
+    }
+    true
+}
 
 /// The one image-name normaliser: lower case, no digest, no tag, `docker.io/`
 /// when no registry is given, and `library/` for Docker Hub's single names. A
@@ -2134,11 +2380,12 @@ fn check_image_pattern(img: &str) -> R<()> {
 }
 
 /// How many plain versions the sweep generates, at most.
-const PLAIN_SWEEP_MAX: usize = 28_000;
+const PLAIN_SWEEP_MAX: usize = 40_000;
 
 /// Plain versions a regex must not read for more than one major: every major 0
 /// to 99 as 2-, 3- and 4-part forms with minors and patches 0 to 12 (the
-/// 4-part form uses a sample of them to stay small), and, for majors 100 to 999,
+/// 4-part form uses a sample of them to stay small) plus the sampled minors and
+/// patches 13, 18, 25, 50, 99, 100 and 123, and, for majors 100 to 999,
 /// 2000 to 2099 and a few larger ones (1000, 1024, 4242, 9999, 10000, 65535,
 /// 99999, 4294967295), three forms each: `a.0`, `a.1.2` and `a.1.2.3`. A regex
 /// that reads these for several majors claims some other product's plain reply,
@@ -2154,6 +2401,7 @@ fn plain_sweep() -> Vec<String> {
         v.push(format!("{a}.1.2"));
         v.push(format!("{a}.1.2.3"));
     }
+    const BIG: [u32; 7] = [13, 18, 25, 50, 99, 100, 123];
     for a in 0..=99u32 {
         for b in 0..=12u32 {
             v.push(format!("{a}.{b}"));
@@ -2166,6 +2414,18 @@ fn plain_sweep() -> Vec<String> {
                 for d in [0u32, 1, 5] {
                     v.push(format!("{a}.{b}.{c}.{d}"));
                 }
+            }
+        }
+        // Sampled larger minors and patches, so a regex that only reads those is seen too.
+        for b in BIG {
+            v.push(format!("{a}.{b}"));
+            for c in [0u32, 1, 7, 12].into_iter().chain(BIG) {
+                v.push(format!("{a}.{b}.{c}"));
+            }
+        }
+        for b in [0u32, 1, 2, 7, 12] {
+            for c in BIG {
+                v.push(format!("{a}.{b}.{c}"));
             }
         }
     }
@@ -2612,7 +2872,7 @@ fn parse_version(
         None
     };
     let regex = string(v, "regex", "version")?.to_string();
-    let pattern = Pattern::new_version(&regex)?;
+    let mut pattern = Pattern::new_version(&regex)?;
     let example_tables = tables(v, "examples", "version")?;
     if example_tables.is_empty() {
         return Err("version.examples needs at least one example".into());
@@ -2690,11 +2950,21 @@ fn parse_version(
     // than one major number: that would claim any product's reply. A regex pinned
     // to one major (`^2\.\d+\.\d+$`) is allowed. A reviewed exception must still need it.
     let advisory_only = examples.iter().all(|e| e.advisory);
-    let plain_majors: BTreeSet<String> = plain_sweep()
+    // The majors it reads are those the sweep sees, and those of its own plain
+    // examples whose raw reply is the bare version (so a regex the sweep misses
+    // still has its major counted).
+    let mut plain_majors: BTreeSet<u64> = plain_sweep()
         .into_iter()
         .filter(|p| pattern.matches(&Untrusted::new(p.clone())).is_read())
-        .filter_map(|p| p.split('.').next().map(str::to_string))
+        .filter_map(|p| plain_major(&p))
         .collect();
+    for e in &examples {
+        if e.raw.expose_untrusted() == &e.version
+            && let Some(m) = plain_major(&e.version)
+        {
+            plain_majors.insert(m);
+        }
+    }
     let reads_plain = plain_majors.len() > 1;
     let excepted = PLAIN_VERSION_OK.iter().any(|(e, _)| *e == id);
     // A regex that reads one major must pin it as written, so it cannot be a
@@ -2707,12 +2977,19 @@ fn parse_version(
         let body_ok = regex
             .strip_prefix(&head)
             .and_then(|r| r.strip_suffix(")$"))
-            .is_some_and(|b| !b.contains(['(', ')', '|']));
+            .is_some_and(|b| !b.contains(['(', ')', '|']) && !b.starts_with(['?', '*', '+', '{']));
         if !body_ok {
             return Err(format!(
                 "version.regex reads plain versions of major {m}, so it must pin that major as written: ^(?P<version>{m}\\. then no group or alternation, then )$"
             ));
         }
+    }
+    // At match time too: a plain version read must have one of these majors, so no
+    // spelling of the regex can read a major the entry does not permit. A regex with
+    // a prefix around the version (`/Satoshi:...`, `Nutshell/...`) reads no bare
+    // plain reply, so it has no majors to enforce here.
+    if !excepted && !plain_majors.is_empty() {
+        pattern.majors = Some(plain_majors.clone());
     }
     if reads_plain && !excepted {
         return Err(
@@ -3037,4 +3314,43 @@ fn check_links(entries: &BTreeMap<String, Entry>) -> R<()> {
 #[must_use]
 pub fn embedded_files() -> &'static [(&'static str, &'static str)] {
     FILES
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn reply(s: &str) -> Untrusted<String> {
+        Untrusted::new(s.to_string())
+    }
+
+    #[test]
+    fn a_plain_version_must_have_a_permitted_major_at_match_time() {
+        // Codex catalog r3 MED 3: `^(?P<version>1\.?12\.7)$` reads `1.12.7` and `112.7`;
+        // with the permitted major {1} the second reads nothing.
+        let mut p = Pattern::new_version(r"^(?P<version>1\.?12\.7)$").unwrap();
+        assert_eq!(p.version(&reply("112.7")), ReplyMatch::Read("112.7"));
+        p.majors = Some(BTreeSet::from([1]));
+        assert_eq!(p.version(&reply("1.12.7")), ReplyMatch::Read("1.12.7"));
+        assert_eq!(
+            p.version(&reply("112.7")),
+            ReplyMatch::Unreadable(Unreadable::NotAVersion)
+        );
+        // A token that is not a plain version is not held to the rule.
+        let mut q = Pattern::new_version(r"^v(?P<version>\d+\.\d+-beta)$").unwrap();
+        q.majors = Some(BTreeSet::from([1]));
+        assert_eq!(q.version(&reply("v9.1-beta")), ReplyMatch::Read("9.1-beta"));
+        // `(?:1|2)\.19\.0` with only major 1 permitted cannot read 2.19.0.
+        let mut r = Pattern::new_version(r"^(?P<version>(?:1|2)\.19\.0)$").unwrap();
+        r.majors = Some(BTreeSet::from([1]));
+        assert_eq!(r.version(&reply("1.19.0")), ReplyMatch::Read("1.19.0"));
+        assert!(!r.version(&reply("2.19.0")).is_read());
+        // Helper edge cases.
+        assert_eq!(plain_major("28.1.0"), Some(28));
+        assert_eq!(plain_major("99999999999999999999.1"), Some(u64::MAX));
+        for not in ["28", "28.", ".1", "1..2", "1.2-beta", "v1.2", "", "1.a"] {
+            assert_eq!(plain_major(not), None, "{not}");
+        }
+    }
 }

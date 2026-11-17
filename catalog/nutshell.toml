@@ -29,7 +29,7 @@ method = "GET"
 path = "/v1/info"
 port = 3338
 field = "version"
-match = '^Nutshell/\d+\.\d+\.\d+$'
+match = '^Nutshell/[0-9A-Za-z.+~-]{1,64}$'
 
 [version]
 source = "http"
