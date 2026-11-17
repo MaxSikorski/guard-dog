@@ -1482,6 +1482,12 @@ fn every_advisory_condition_fact_has_a_claim() {
             },
         ),
         (
+            // The LND DNS-bootstrap advisory's `chain` condition (Judge B setup
+            // facts) reads the node's own chain fact.
+            "chain",
+            Claim::Chain(Observed::Seen(Chain::Main)),
+        ),
+        (
             "port_exposed_to_internet",
             Claim::Exposure {
                 port: 9735,
