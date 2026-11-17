@@ -449,10 +449,27 @@ dependencies = [
  "libc",
  "proptest",
  "regex",
+ "serde",
  "serde_json",
  "toml",
  "trybuild",
  "yaml-rust2",
+]
+
+[[package]]
+name = "gd-demo"
+version = "0.0.1"
+dependencies = [
+ "gd-core",
+ "gd-egress",
+ "serde_json",
+]
+
+[[package]]
+name = "gd-demo-wasm"
+version = "0.0.1"
+dependencies = [
+ "gd-demo",
 ]
 
 [[package]]

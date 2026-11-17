@@ -683,6 +683,8 @@ fn dual_check_rc_before_the_fix_stays_possible() {
         ),
         VersionEvidence::InRange(_)
     ));
+    // Calling the primitive with GoTag for an LND value is the misuse
+    // `evaluate_entry`'s doc forbids; this shows why.
     assert_eq!(
         evaluate_entry(&GoTag, &adv, 0, Some("0.20.0-beta.rc1")),
         VersionEvidence::OutOfRange
@@ -864,17 +866,19 @@ const LND_PKG: (&str, &str) = ("Go", "github.com/lightningnetwork/lnd");
 const LIT_PKG: (&str, &str) = ("Go", "github.com/lightninglabs/lightning-terminal");
 const TAPD_PKG: (&str, &str) = ("Go", "github.com/lightninglabs/taproot-assets");
 
-/// Every range event value (as written) of every entry for `pkg`, with its kind.
-fn endpoints(raw: &Value, pkg: (&str, &str)) -> Vec<(String, String)> {
+/// Every range event value (as written) of every entry for `pkg`, with its
+/// position: (entry, range, event, kind, value). The positions are numbers
+/// only, so a failure message never repeats advisory text.
+fn endpoints(raw: &Value, pkg: (&str, &str)) -> Vec<(usize, usize, usize, String, String)> {
     let mut out = Vec::new();
-    for e in raw["affected"].as_array().into_iter().flatten() {
+    for (ei, e) in raw["affected"].as_array().into_iter().flatten().enumerate() {
         if e["package"]["ecosystem"] != pkg.0 || e["package"]["name"] != pkg.1 {
             continue;
         }
-        for r in e["ranges"].as_array().into_iter().flatten() {
-            for ev in r["events"].as_array().into_iter().flatten() {
+        for (ri, r) in e["ranges"].as_array().into_iter().flatten().enumerate() {
+            for (vi, ev) in r["events"].as_array().into_iter().flatten().enumerate() {
                 for (k, v) in ev.as_object().unwrap() {
-                    out.push((k.clone(), v.as_str().unwrap().to_string()));
+                    out.push((ei, ri, vi, k.clone(), v.as_str().unwrap().to_string()));
                 }
             }
         }
@@ -885,31 +889,46 @@ fn endpoints(raw: &Value, pkg: (&str, &str)) -> Vec<(String, String)> {
 #[test]
 fn every_corpus_endpoint_of_core_lnd_lit_and_tapd_parses() {
     let (mut core_n, mut lnd_n, mut lit_n, mut tapd_n) = (0, 0, 0, 0);
-    for (name, _, raw) in corpus() {
-        for (kind, v) in endpoints(&raw, CORE_PKG) {
+    for (i, (_, _, raw)) in corpus().into_iter().enumerate() {
+        for (e, r, v, _, text) in endpoints(&raw, CORE_PKG) {
             core_n += 1;
-            assert!(v == "0" || core().parse(&v).is_ok(), "{name} {kind} {v}");
+            assert!(
+                text == "0" || core().parse(&text).is_ok(),
+                "Core advisory #{i} entry {e} range {r} event {v}"
+            );
         }
-        for (kind, v) in endpoints(&raw, LND_PKG) {
+        for (e, r, v, _, text) in endpoints(&raw, LND_PKG) {
             lnd_n += 1;
             assert!(
-                v == "0" || ChannelScheme::beta().parse(&v).is_ok(),
-                "{name} {kind} {v}"
+                text == "0" || ChannelScheme::beta().parse(&text).is_ok(),
+                "LND advisory #{i} entry {e} range {r} event {v} (channel)"
             );
-            assert!(v == "0" || GoTag.parse(&v).is_ok(), "{name} {kind} {v}");
+            assert!(
+                text == "0" || GoTag.parse(&text).is_ok(),
+                "LND advisory #{i} entry {e} range {r} event {v} (Go tag)"
+            );
         }
-        for (kind, v) in endpoints(&raw, LIT_PKG) {
+        for (e, r, v, _, text) in endpoints(&raw, LIT_PKG) {
             lit_n += 1;
             assert!(
-                v == "0" || ChannelScheme::alpha().parse(&v).is_ok(),
-                "{name} {kind} {v}"
+                text == "0" || ChannelScheme::alpha().parse(&text).is_ok(),
+                "LiT advisory #{i} entry {e} range {r} event {v} (channel)"
             );
-            assert!(v == "0" || GoTag.parse(&v).is_ok(), "{name} {kind} {v}");
+            assert!(
+                text == "0" || GoTag.parse(&text).is_ok(),
+                "LiT advisory #{i} entry {e} range {r} event {v} (Go tag)"
+            );
         }
-        for (kind, v) in endpoints(&raw, TAPD_PKG) {
+        for (e, r, v, _, text) in endpoints(&raw, TAPD_PKG) {
             tapd_n += 1;
-            assert!(v == "0" || SemVer.parse(&v).is_ok(), "{name} {kind} {v}");
-            assert!(v == "0" || GoTag.parse(&v).is_ok(), "{name} {kind} {v}");
+            assert!(
+                text == "0" || SemVer.parse(&text).is_ok(),
+                "tapd advisory #{i} entry {e} range {r} event {v} (SemVer)"
+            );
+            assert!(
+                text == "0" || GoTag.parse(&text).is_ok(),
+                "tapd advisory #{i} entry {e} range {r} event {v} (Go tag)"
+            );
         }
     }
     // Counted so a corpus change is noticed here (CVE-2026-117346 has two
@@ -1024,23 +1043,56 @@ fn every_fixture_version_of_core_and_lnd_parses() {
     assert_eq!(seen, 4, "two setups, two products each");
 }
 
+/// The two reviewed platform notes of CVE-2026-117346's Core entries.
+const PLATFORM_64: &str = "64-bit systems, including Windows";
+const PLATFORM_32: &str = "32-bit systems, or blocks stored on a FAT32 file system";
+
 /// The entries of `adv` that belong to the product and apply to the fixture
 /// setups (64-bit, blocks on tmpfs): the 32-bit or FAT32 entry waits for the
-/// later scope step, as the design says (scope before OR, a later PR).
-fn applicable_entries(adv: &Advisory, pkg: (&str, &str)) -> Vec<usize> {
-    adv.affected
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| {
-            e.package.ecosystem.expose_untrusted() == pkg.0
-                && e.package.name.expose_untrusted() == pkg.1
-                && e.scope
-                    .platform
-                    .as_ref()
-                    .is_none_or(|p| !p.expose_untrusted().contains("32-bit"))
-        })
-        .map(|(i, _)| i)
-        .collect()
+/// later scope step, as the design says (scope before OR, a later PR). The
+/// platform note must be absent or exactly one of the two reviewed strings;
+/// anything else is `Err(entry index)`, never the text.
+fn applicable_entries_checked(adv: &Advisory, pkg: (&str, &str)) -> Result<Vec<usize>, usize> {
+    let mut out = Vec::new();
+    for (i, e) in adv.affected.iter().enumerate() {
+        if e.package.ecosystem.expose_untrusted() != pkg.0
+            || e.package.name.expose_untrusted() != pkg.1
+        {
+            continue;
+        }
+        match e
+            .scope
+            .platform
+            .as_ref()
+            .map(|p| p.expose_untrusted().as_str())
+        {
+            None | Some(PLATFORM_64) => out.push(i),
+            Some(PLATFORM_32) => {}
+            Some(_) => return Err(i),
+        }
+    }
+    Ok(out)
+}
+
+fn applicable_entries(adv: &Advisory, adv_index: usize, pkg: (&str, &str)) -> Vec<usize> {
+    match applicable_entries_checked(adv, pkg) {
+        Ok(v) => v,
+        Err(e) => panic!("advisory #{adv_index} entry {e} has an unreviewed platform note"),
+    }
+}
+
+#[test]
+fn an_unreviewed_platform_note_on_a_core_entry_is_rejected() {
+    let (_, adv, raw) = corpus()
+        .into_iter()
+        .find(|(n, _, _)| n == "CVE-2026-117346.json")
+        .unwrap();
+    assert_eq!(applicable_entries_checked(&adv, CORE_PKG), Ok(vec![0]));
+    let mut changed = raw.clone();
+    changed["affected"][1]["database_specific"]["platform"] = json!("32-bit or 64-bit systems");
+    let bytes = serde_json::to_vec(&changed).unwrap();
+    let adv = parse_advisory_from(&bytes, Source::GuardDogCorpus).unwrap();
+    assert_eq!(applicable_entries_checked(&adv, CORE_PKG), Err(1));
 }
 
 fn subresult(e: &VersionEvidence) -> &'static str {
@@ -1063,11 +1115,12 @@ fn union(results: &[VersionEvidence]) -> &'static str {
     }
 }
 
-/// The fixture pairs whose version subresult changes once Core's installed value
-/// is read as a subversion (no `rcN`): the answer key says `out-of-range`, the
-/// derived answer is `unknown` (design 2.1 section 2). Each is a pair where the
-/// fixed version equals the installed one. Judge B's key files are not edited
-/// here.
+/// The fixture pairs whose version subresult changes when Core's installed
+/// value is read as a subversion (`RcEvidence::Unknown`, no `rcN`): the answer
+/// key says `out-of-range` (its versions are full versions, `Reported`), the
+/// subversion reading is `unknown` (design 2.1 section 2). Each is a pair where
+/// the fixed version equals the installed one. Judge B's key files are not
+/// edited; the live expectations (J1) must list exactly these pairs.
 const SUBVERSION_UNKNOWN: &[(&str, &str, &str, &str)] = &[
     ("lab-regtest", "bitcoin-core", "32.1", "CVE-2026-117346"),
     ("lab-regtest", "bitcoin-core", "32.1", "CVE-2026-117349"),
@@ -1080,30 +1133,79 @@ fn fixture_pairs_give_the_expected_version_subresult() {
     let expects = fixture_expects(&text);
     let docs = corpus();
     let mut checked: Vec<String> = Vec::new();
-    for (setup, advisory, expected) in &expects {
-        let Some((_, adv, _)) = docs
+    let mut subversion_unknown = 0;
+    for (xi, (setup, advisory, expected)) in expects.iter().enumerate() {
+        let Some((ai, (_, adv, _))) = docs
             .iter()
-            .find(|(n, _, _)| n.strip_suffix(".json") == Some(advisory.as_str()))
+            .enumerate()
+            .find(|(_, (n, _, _))| n.strip_suffix(".json") == Some(advisory.as_str()))
         else {
-            panic!("no corpus record for {advisory}");
+            panic!("expectation #{xi} names no corpus record");
         };
         for svc in services.iter().filter(|s| &s.setup == setup) {
             let (pkg, got) = match svc.product.as_str() {
                 "bitcoin-core" => {
-                    let idx = applicable_entries(adv, CORE_PKG);
-                    // The fixture values come from `/Satoshi:X.Y.Z/`, which is
-                    // `getnetworkinfo.subversion`: it drops any `rcN`, so a final-
-                    // looking value is only known to be that release or one of
-                    // its release candidates (design 2.1 section 2).
-                    let c = BitcoinCore::new(RcEvidence::Unknown);
+                    let idx = applicable_entries(adv, ai, CORE_PKG);
+                    // The key's Core versions come from the lab's pinned image
+                    // (`versions_from`) or are stated (synthetic): full versions,
+                    // so `Reported`. A live scan reads `subversion` instead
+                    // (`Unknown`); the second pass below covers that.
+                    let c = BitcoinCore::new(RcEvidence::Reported);
                     let rs: Vec<_> = idx
                         .iter()
                         .map(|&i| evaluate_entry(&c, adv, i, Some(&svc.version)))
                         .collect();
+                    // The same pairs read as `subversion`: they equal the key
+                    // except exactly the listed pairs, which are `unknown`.
+                    let sub = BitcoinCore::new(RcEvidence::Unknown);
+                    let srs: Vec<_> = idx
+                        .iter()
+                        .map(|&i| evaluate_entry(&sub, adv, i, Some(&svc.version)))
+                        .collect();
+                    let listed = SUBVERSION_UNKNOWN.iter().any(|(s, p, v, a)| {
+                        (*s, *p, *v, *a)
+                            == (
+                                setup.as_str(),
+                                "bitcoin-core",
+                                svc.version.as_str(),
+                                advisory.as_str(),
+                            )
+                    });
+                    if !idx.is_empty() {
+                        if listed {
+                            subversion_unknown += 1;
+                            assert_eq!(
+                                expected, "out-of-range",
+                                "the key's value, expectation #{xi}"
+                            );
+                            assert_eq!(union(&srs), "unknown", "expectation #{xi}");
+                            let unknowns: Vec<_> = srs
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, r)| subresult(r) == "unknown")
+                                .collect();
+                            assert_eq!(unknowns.len(), 1, "expectation #{xi}");
+                            let (ui, u) = unknowns[0];
+                            assert_eq!(
+                                idx[ui], 0,
+                                "expectation #{xi}: the unknown entry is entry 0"
+                            );
+                            assert_eq!(reason(u), UnknownReason::CandidateIsAnInterval);
+                            let VersionEvidence::Unknown { question, .. } = u else {
+                                unreachable!()
+                            };
+                            assert_eq!(
+                                question,
+                                "What full version does bitcoind report, including any rcN?"
+                            );
+                        } else {
+                            assert_eq!(union(&srs), expected, "expectation #{xi} as subversion");
+                        }
+                    }
                     ("bitcoin-core", (!idx.is_empty()).then(|| union(&rs)))
                 }
                 "lnd" => {
-                    let idx = applicable_entries(adv, LND_PKG);
+                    let idx = applicable_entries(adv, ai, LND_PKG);
                     let rs: Vec<_> = idx
                         .iter()
                         .map(|&i| {
@@ -1120,29 +1222,11 @@ fn fixture_pairs_give_the_expected_version_subresult() {
                 _ => continue,
             };
             let Some(got) = got else { continue };
-            // The answer key (Judge B) was written for full versions. Where the
-            // fix is the installed release itself, a subversion value cannot
-            // tell an rc (affected) from the final (fixed): possibly affected.
-            let changed = SUBVERSION_UNKNOWN.iter().any(|(s, p, v, a)| {
-                (*s, *p, *v, *a) == (setup.as_str(), pkg, svc.version.as_str(), advisory.as_str())
-            });
-            if changed {
-                assert_eq!(expected, "out-of-range", "the key's old value");
-                assert_eq!(
-                    got, "unknown",
-                    "{setup} {pkg} {} against {advisory}",
-                    svc.version
-                );
-            } else {
-                assert_eq!(
-                    got, expected,
-                    "{setup} {pkg} {} against {advisory}",
-                    svc.version
-                );
-            }
+            assert_eq!(got, expected, "{pkg} expectation #{xi}");
             checked.push(format!("{setup}/{pkg}/{advisory}"));
         }
     }
+    assert_eq!(subversion_unknown, SUBVERSION_UNKNOWN.len());
     // Core: 8 advisories x 2 setups; LND: 5 advisories x 2 setups.
     assert_eq!(
         checked
@@ -1562,8 +1646,8 @@ fn mutant_core_rc_flag_lost_is_caught() {
 
 #[test]
 fn mutant_single_order_channel_answer_is_caught() {
-    // Mutant: trust the channel order alone (skip the SemVer side). An
-    // ECOSYSTEM range is the form the channel scheme reads on its own.
+    // Mutant: trust the channel order alone (skip the SemVer side). Unguarded
+    // removes the scheme's own refusal, as a bypassing caller would.
     let adv = entry(
         "Go",
         "github.com/lightningnetwork/lnd",
@@ -1887,8 +1971,8 @@ fn a_channel_scheme_alone_never_answers_a_go_ecosystem_range() {
 }
 
 #[test]
-fn go_tag_refuses_a_dirty_installed_build_but_not_a_dirty_boundary_order() {
-    // Codex H2.
+fn go_tag_refuses_installed_build_metadata_except_incompatible() {
+    // Codex H2 (round 2) and C-H3 (round 4).
     let adv = entry(
         "Go",
         "github.com/example/project",
@@ -1901,14 +1985,34 @@ fn go_tag_refuses_a_dirty_installed_build_but_not_a_dirty_boundary_order() {
     for dirty in ["v1.2.3+dirty", "v1.2.3+build.dirty", "1.2.3+Dirty"] {
         assert!(GoTag.candidate(dirty).is_err(), "{dirty}");
     }
-    // Ordinary metadata is unchanged: precedence ignores it.
+    // Any other build metadata is refused too: it is not the clean tag.
+    let e = evaluate_entry(&GoTag, &adv, 0, Some("v1.2.3+build5"));
+    assert_eq!(reason(&e), UnknownReason::InstalledVersionUnparseable);
+    assert!(GoTag.candidate("v1.2.3+build5").is_err());
+    // Go's own `+incompatible` is the one exception, and only exactly so.
+    assert!(GoTag.candidate("v2.0.0+incompatible").is_ok());
+    for bad in ["v2.0.0+INCOMPATIBLE", "v2.0.0+incompatible.build5"] {
+        assert!(GoTag.candidate(bad).is_err(), "{bad}");
+    }
+    let inc = |fixed: &str| {
+        entry(
+            "Go",
+            "github.com/example/project",
+            range("SEMVER", json!([{"introduced": "0"}, {"fixed": fixed}])),
+            json!([]),
+        )
+    };
+    assert!(matches!(
+        evaluate_entry(&GoTag, &inc("v2.0.1"), 0, Some("v2.0.0+incompatible")),
+        VersionEvidence::InRange(_)
+    ));
     assert_eq!(
-        evaluate_entry(&GoTag, &adv, 0, Some("v1.2.3+build5")),
+        evaluate_entry(&GoTag, &inc("v2.0.0"), 0, Some("v2.0.0+incompatible")),
         VersionEvidence::OutOfRange
     );
-    assert!(GoTag.candidate("v1.2.3+build5").is_ok());
-    // Strict SemVer keeps its ordinary rules.
+    // Strict SemVer and boundaries keep ordinary metadata rules.
     assert!(SemVer.candidate("1.2.3+dirty").is_ok());
+    assert!(GoTag.parse("v1.2.3+build5").is_ok());
 }
 
 #[test]
@@ -1981,4 +2085,186 @@ proptest! {
         prop_assert!(core().parse(&co).is_err(), "{co}");
         prop_assert!(ChannelScheme::beta().parse(&ch).is_err(), "{ch}");
     }
+}
+
+// ------------------------------------------------- fix round 4 (2026-11-17)
+
+#[test]
+fn dual_check_reads_each_range_with_its_own_literal_parser() {
+    let lnd = "github.com/lightningnetwork/lnd";
+    let two = entry(
+        "Go",
+        lnd,
+        json!([
+            {"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "v0.20.0-beta"}]},
+            {"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "0.19.0-beta"}]},
+        ]),
+        json!([]),
+    );
+    let semver_only = entry(
+        "Go",
+        lnd,
+        range(
+            "SEMVER",
+            json!([{"introduced": "0"}, {"fixed": "v0.20.0-beta"}]),
+        ),
+        json!([]),
+    );
+    let want = Place::Range {
+        range: 0,
+        event: Some(1),
+    };
+    for adv in [&two, &semver_only] {
+        let e = dual(adv, "0.21.0-beta");
+        assert_ne!(e, VersionEvidence::OutOfRange);
+        assert_eq!(reason(&e), UnknownReason::UnparseableBoundary);
+        assert_eq!(place(&e), want);
+    }
+    // Control: GoTag reads the Go boundary's `v`; SemVer reads the plain one.
+    let control = entry(
+        "Go",
+        lnd,
+        json!([
+            {"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "0.20.0-beta"}]},
+            {"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "v0.19.0-beta"}]},
+        ]),
+        json!([]),
+    );
+    assert_eq!(dual(&control, "0.21.0-beta"), VersionEvidence::OutOfRange);
+}
+
+#[test]
+fn a_channel_scheme_alone_answers_no_entry() {
+    let lnd = "github.com/lightningnetwork/lnd";
+    let miss = entry("Go", lnd, json!([]), json!(["0.20.0-beta.rc2"]));
+    let hit = entry("Go", lnd, json!([]), json!(["0.20.0-beta.rc1"]));
+    for adv in [&miss, &hit] {
+        let e = evaluate_entry(&ChannelScheme::beta(), adv, 0, Some("0.20.0-beta.rc1"));
+        assert_eq!(reason(&e), UnknownReason::SchemeMismatch);
+        assert_eq!(place(&e), Place::Entry);
+    }
+    // Through the public entry both identities miss, so it is out of range.
+    assert_eq!(dual(&miss, "0.20.0-beta.rc1"), VersionEvidence::OutOfRange);
+    let lit = entry(
+        "Go",
+        "github.com/lightninglabs/lightning-terminal",
+        json!([]),
+        json!(["0.15.0-alpha.rc2"]),
+    );
+    let e = evaluate_entry(&ChannelScheme::alpha(), &lit, 0, Some("0.15.0-alpha.rc1"));
+    assert_eq!(reason(&e), UnknownReason::SchemeMismatch);
+    assert_eq!(place(&e), Place::Entry);
+}
+
+#[test]
+fn a_refused_installed_value_never_matches_the_list() {
+    let git = entry(
+        "GIT",
+        "https://github.com/bitcoin/bitcoin",
+        json!([]),
+        json!(["28.0rc1"]),
+    );
+    let e = evaluate_entry(
+        &BitcoinCore::new(RcEvidence::Unknown),
+        &git,
+        0,
+        Some("28.0rc1"),
+    );
+    assert_eq!(reason(&e), UnknownReason::InstalledVersionUnparseable);
+    assert_eq!(place(&e), Place::Entry);
+    assert_eq!(
+        evaluate_entry(
+            &BitcoinCore::new(RcEvidence::Reported),
+            &git,
+            0,
+            Some("28.0rc1")
+        ),
+        VersionEvidence::InRange(gd_advisories::Location {
+            entry: 0,
+            place: Place::Listed { index: 0 },
+        })
+    );
+    let go = entry(
+        "Go",
+        "github.com/example/project",
+        json!([]),
+        json!(["v1.2.3+dirty"]),
+    );
+    let e = evaluate_entry(&GoTag, &go, 0, Some("v1.2.3+dirty"));
+    assert_eq!(reason(&e), UnknownReason::InstalledVersionUnparseable);
+}
+
+#[test]
+fn canonical_text_fits_the_limit_and_round_trips() {
+    let nines = |n: usize| "9".repeat(n);
+    let ones = |n: usize| "1".repeat(n);
+    let c = BitcoinCore::new(RcEvidence::Reported);
+    assert_eq!(
+        c.parse(&format!("{}.1", nines(254))).unwrap_err(),
+        VersionError::TooLong
+    );
+    let v = c.parse(&format!("{}.1", nines(252))).unwrap();
+    assert_eq!(v.to_string().len(), 256);
+    assert_eq!(c.parse(&v.to_string()).unwrap().to_string(), v.to_string());
+    assert_eq!(c.parse(&v.to_string()).unwrap(), v);
+
+    let beta = ChannelScheme::beta();
+    assert_eq!(
+        beta.parse(&format!("{}.0.0-rc1", ones(248))).unwrap_err(),
+        VersionError::TooLong
+    );
+    let v = beta.parse(&format!("{}.0.0-rc1", ones(243))).unwrap();
+    assert_eq!(v.to_string().len(), 256);
+    assert_eq!(beta.parse(&v.to_string()).unwrap(), v);
+    assert_eq!(
+        beta.parse(&v.to_string()).unwrap().to_string(),
+        v.to_string()
+    );
+
+    let alpha = ChannelScheme::alpha();
+    assert_eq!(
+        alpha.parse(&format!("{}.0.0-rc1", ones(243))).unwrap_err(),
+        VersionError::TooLong
+    );
+    let v = alpha.parse(&format!("{}.0.0-rc1", ones(242))).unwrap();
+    assert_eq!(v.to_string().len(), 256);
+    assert_eq!(alpha.parse(&v.to_string()).unwrap(), v);
+    assert_eq!(
+        alpha.parse(&v.to_string()).unwrap().to_string(),
+        v.to_string()
+    );
+}
+
+#[test]
+fn go_tag_refuses_git_describe_installed_values() {
+    for bad in [
+        "v0.18.3-beta-12-gabc1234",
+        "v0.18.3-beta-dirty",
+        "v1.2.3-12-gabc1234",
+        "v1.2.3-12-gabc1234-dirty",
+        "v1.2.3-dirty",
+        "v1.2.3-0-gDEADBEEF",
+    ] {
+        assert!(GoTag.candidate(bad).is_err(), "{bad}");
+    }
+    for good in [
+        "v0.0.0-20240101000000-abcdef123456",
+        "v1.2.4-0.20240101000000-abcdef123456",
+        "v1.2.3-beta.rc1",
+        "v1.2.3-rc.1-2",
+        "v1.2.3-12-g12",
+    ] {
+        assert!(GoTag.candidate(good).is_ok(), "{good}");
+    }
+    let adv = entry(
+        "Go",
+        "github.com/example/project",
+        range("SEMVER", json!([{"introduced": "1.2.3"}])),
+        json!([]),
+    );
+    let e = evaluate_entry(&GoTag, &adv, 0, Some("v1.2.3-5-gabc1234"));
+    assert_ne!(e, VersionEvidence::OutOfRange);
+    assert_eq!(reason(&e), UnknownReason::InstalledVersionUnparseable);
+    let e = dual(&lnd_fix("0.20.0-beta"), "v0.18.3-beta-12-gabc1234");
+    assert_eq!(reason(&e), UnknownReason::InstalledVersionUnparseable);
 }

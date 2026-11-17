@@ -206,13 +206,21 @@ impl VersionScheme for GoTag {
         read(raw.strip_prefix('v').unwrap_or(raw), raw)
     }
 
-    /// An installed Go version whose build metadata says `dirty` was built from
-    /// uncommitted changes, so the tag it carries says nothing about its code:
-    /// it is refused, never ordered as the clean tag. (Advisory boundaries go
-    /// through `parse` and keep ordinary metadata rules.)
+    /// An installed Go value carries no build metadata except Go's own
+    /// `+incompatible`: a canonical Go module version has none, and any other
+    /// (`+dirty`, `+build5`) says nothing about which code was built, so it is
+    /// refused, never ordered as the clean tag.
+    ///
+    /// A git-describe value (`<tag>-<N>-g<hash>`, or a `-dirty` build) is not a
+    /// release and must never be ordered as a SemVer prerelease (design 2.1
+    /// section 2), so it is refused. (Advisory boundaries and listed versions go
+    /// through `parse` and keep ordinary rules.)
     fn candidate(&self, raw: &str) -> Result<Candidate<SemVerVersion>, VersionError> {
         let v = self.parse(raw)?;
-        if v.build.iter().any(|id| id.eq_ignore_ascii_case("dirty")) {
+        if !v.build.is_empty() && v.build.as_slice() != ["incompatible"] {
+            return Err(VersionError::Malformed);
+        }
+        if is_describe_form(&v.pre) {
             return Err(VersionError::Malformed);
         }
         Ok(Candidate::Exact(v))
@@ -230,4 +238,36 @@ impl VersionScheme for GoTag {
     fn orders(&self) -> bool {
         true
     }
+}
+
+/// Whether a prerelease reads as git-describe output: it ends in `dirty`, or in
+/// `<digits>-g<4 to 64 hex digits>` (the prerelease text split on `-`).
+fn is_describe_form(pre: &[PreId]) -> bool {
+    if pre.is_empty() {
+        return false;
+    }
+    let text = pre
+        .iter()
+        .map(|id| match id {
+            PreId::Numeric(n) => n.to_string(),
+            PreId::Text(t) => t.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(".");
+    let parts: Vec<&str> = text.split('-').collect();
+    let Some(last) = parts.last() else {
+        return false;
+    };
+    if last.eq_ignore_ascii_case("dirty") {
+        return true;
+    }
+    let hash_like = last
+        .strip_prefix('g')
+        .is_some_and(|h| (4..=64).contains(&h.len()) && h.bytes().all(|b| b.is_ascii_hexdigit()));
+    let count_like = parts
+        .len()
+        .checked_sub(2)
+        .and_then(|i| parts.get(i))
+        .is_some_and(|c| !c.is_empty() && c.bytes().all(|b| b.is_ascii_digit()));
+    parts.len() >= 2 && count_like && hash_like
 }

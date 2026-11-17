@@ -1,0 +1,73 @@
+name: Advisory submission (public advisories only)
+description: Suggest a public security advisory that Guard Dog should know about.
+title: "Advisory: "
+labels: ["type: advisory", "status: needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Guard Dog keeps real, public advisories as OSV records in `advisories/corpus/`. How they're curated is in [advisories/README.md](https://github.com/MaxSikorski/guard-dog/blob/main/advisories/README.md).
+
+        **Public advisories only.** If the problem hasn't been disclosed by the project yet, stop here and report it privately to that project's maintainers. If it's in Guard Dog itself, see [SECURITY.md](https://github.com/MaxSikorski/guard-dog/blob/main/SECURITY.md). We never write about undisclosed vulnerabilities.
+
+        If you don't know an answer, say "not in the source". We never guess version ranges.
+  - type: checkboxes
+    id: public
+    attributes:
+      label: Before you post
+      options:
+        - label: The project or a public database (GitHub, OSV, CVE) has already published this advisory.
+          required: true
+        - label: Nothing below contains seeds, keys, tokens, passwords, IP addresses or onion addresses.
+          required: true
+  - type: input
+    id: product
+    attributes:
+      label: Product
+      description: Ideally its catalog id (the file name in `catalog/`).
+      placeholder: "e.g. lnbits"
+    validations:
+      required: true
+  - type: input
+    id: ids
+    attributes:
+      label: Advisory ids
+      placeholder: "e.g. CVE-2026-12345, GHSA-xxxx-xxxx-xxxx"
+  - type: input
+    id: primary-source
+    attributes:
+      label: Primary source
+      description: The project's own advisory page, GitHub Security Advisory or release note, as an https link. A news report only if the project hasn't published one.
+    validations:
+      required: true
+  - type: textarea
+    id: versions
+    attributes:
+      label: Affected and fixed versions
+      description: Exactly as the source writes them, per release line if there are several.
+      placeholder: |
+        Affected: before 1.7.0
+        Fixed: 1.7.0
+    validations:
+      required: true
+  - type: textarea
+    id: conditions
+    attributes:
+      label: When does it matter?
+      description: Conditions beyond the version, for example "only if the admin UI is reachable from the internet" or "only with the X extension enabled".
+  - type: textarea
+    id: playbook
+    attributes:
+      label: What should someone do about it?
+      description: Two to four plain-English steps a non-expert could follow, in your own words (not copied from the source).
+      placeholder: |
+        1. Update to 1.7.0 or later.
+        2. Rotate your admin key and any API keys.
+  - type: dropdown
+    id: exploited
+    attributes:
+      label: Is it known to be exploited?
+      options:
+        - "Yes, the source says so"
+        - "No, not that I know of"
+        - Not sure

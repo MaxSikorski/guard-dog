@@ -1,0 +1,71 @@
+# Fedimint gateway (gatewayd). Format: catalog/README.md. Checked by crates/gd-core/tests/catalog.rs.
+format = 1
+id = "gatewayd"
+name = "Fedimint gateway (gatewayd)"
+kind = "service"
+aliases = []
+summary = "A Fedimint gateway, the server that moves funds between a federation and Lightning."
+money = true
+licence = "unknown"
+
+[upstream]
+repo = "https://github.com/fedimint/fedimint"
+
+[recognize]
+images = []
+binaries = ["gatewayd"]
+units = []
+
+[version]
+source = "image-label"
+credential = "none"
+regex = '^(?P<version>0\.\d+\.\d+)$'
+scheme = "semver"
+
+[version.call]
+field = "org.opencontainers.image.version"
+
+[[version.examples]]
+raw = "0.10.1"
+version = "0.10.1"
+source = "advisories/corpus/x_fedimint-2026-v0.11.2-security-fixes.json"
+source_kind = "advisory"
+
+[[version.examples]]
+raw = "0.11.2"
+version = "0.11.2"
+source = "advisories/corpus/x_fedimint-2026-v0.11.2-security-fixes.json"
+source_kind = "advisory"
+
+[advisories]
+osv_packages = ["GIT https://github.com/fedimint/fedimint"]
+ghsa = false
+feeds = []
+blind_spot = "Security fixes are in release notes with no CVE. The gateway and the guardian share one repo, one release train and one OSV package. Whether the project has GitHub advisories or a feed a machine can read has not been checked."
+
+[signing]
+level = "unknown"
+
+[review]
+last_reviewed = 2026-11-17
+sources = [
+  "https://github.com/fedimint/fedimint/releases/tag/v0.11.2",
+  "https://github.com/fedimint/fedimint/releases/tag/v0.10.1",
+  "https://github.com/fedimint/fedimint/releases/tag/v0.12.0",
+]
+todo = [
+  "licence: read the upstream LICENSE file",
+  "summary: from the advisory (gateway, Lightning contracts, loses funds to a counterparty); confirm the project's own one-liner",
+  "upstream.website, upstream.release_feed, upstream.security_policy: none recorded in the repo",
+  "images: no image name is recorded; add it with a recorded reply (the version source assumes a container image)",
+  "binaries: gatewayd appears in the corpus only as a service id and in the playbook; confirm the installed executable name",
+  "units: no systemd unit name is recorded",
+  "version: a host-installed binary has no image label; reading its version there needs a cli source (and a reviewed read-only call) later",
+  "ports: no port is named in the repo",
+  "recorded-reply: 0.10.1 and 0.11.2 are the advisory's fixed versions, not recorded replies; record a real label value",
+  "version.regex: pinned to the 0.x series the advisory shows (a bare x.y.z pattern is refused); older releases are not read; widen it when a real label is recorded",
+  "sibling: fedimintd has the same repo, release train and OSV package; the two can only be told apart by binary name, which the version fields cannot express",
+  "advisories.ghsa: unverified; check the project's Security tab",
+  "signing: level, method and keys are not recorded",
+  "platform_map: app ids on UmbrelOS, StartOS, RaspiBlitz and myNode",
+]
