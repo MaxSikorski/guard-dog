@@ -30,7 +30,8 @@ use std::path::{Path, PathBuf};
 
 use gd_core::Untrusted;
 use gd_core::catalog::{
-    self, Catalog, Entry, MAX_REPLY, Pattern, READ_ONLY_CALLS, SHARED_PORTS, normalise_image,
+    self, Catalog, Entry, MAX_REPLY, Pattern, READ_ONLY_CALLS, ReplyMatch, SHARED_PORTS,
+    Unreadable, normalise_image,
 };
 use regex::Regex;
 use toml::{Table, Value};
@@ -243,7 +244,7 @@ fn version_regex(v: &Table) -> Result<Pattern, String> {
 
 /// Runs a version regex on a raw reply. Replies over `MAX_REPLY` bytes are refused.
 fn extract(re: &Pattern, raw: &str) -> Option<String> {
-    re.version(&u(raw)).map(str::to_string)
+    re.version(&u(raw)).read().map(str::to_string)
 }
 
 // ---------- cross-source checks ----------
@@ -351,7 +352,7 @@ fn check_negative(entries: &BTreeMap<String, Table>, rec: &[Recorded]) -> Result
         }
         for (what, re) in &patterns {
             for (owner, raw) in &raws {
-                if owner != id && re.matches(&u(raw)) {
+                if owner != id && re.matches(&u(raw)).is_read() {
                     return Err(format!(
                         "{id}: the {what} also matches {owner}'s reply `{raw}`"
                     ));
@@ -764,9 +765,9 @@ fn probe_patterns_are_bounded() {
     let mut probes = 0;
     for e in all_loaded().unwrap().entries() {
         for p in &e.recognize().probes {
-            if p.pattern().is_some() {
-                probes += 1;
-            }
+            // Every probe has a pattern (a patternless probe is refused at load).
+            let _ = p.pattern();
+            probes += 1;
         }
     }
     assert!(probes >= 2, "strfry and nutshell have probes with patterns");
@@ -919,7 +920,7 @@ fn broken_entries_are_refused() {
         &replaced(
             &fry,
             "path = \"/\"\naccept = \"application/nostr+json\"\nfield = \"version\"",
-            "path = \"http://10.0.0.5/\"\nfield = \"version\"",
+            "path = \"http://printer/\"\nfield = \"version\"",
         ),
         "local path",
     );
@@ -960,7 +961,7 @@ fn broken_entries_are_refused() {
     c(
         cred,
         "credential = \"abcdefghijklmnop.onion\"",
-        "must not name",
+        "secret shape: onion",
     );
     // 4. the field read, TLS server name
     c(
@@ -999,7 +1000,7 @@ fn broken_entries_are_refused() {
     c(
         regex,
         r"regex = '^/Satoshi:(?P<version>\d+)\.\d+\.0/$'",
-        "expected `32.1`",
+        "version.examples[0].raw",
     );
     c(
         regex,
@@ -1022,7 +1023,7 @@ fn broken_entries_are_refused() {
     c(
         regex,
         r"regex = '^nomatch|(?P<version>\d+\.\d+)\.0/$'",
-        "expected `32.1`",
+        "version.examples[0].raw",
     );
     refused(
         "strfry",
@@ -1134,7 +1135,7 @@ fn broken_entries_are_refused() {
     );
     c(
         "website = \"https://bitcoincore.org/\"",
-        "website = \"https://192.168.1.5/\"",
+        "website = \"https://127.1/\"",
         "internal host",
     );
     c(
@@ -1468,7 +1469,7 @@ fn advisory_examples_are_refused_when_unbacked() {
     );
     a(
         "[version]",
-        "[[recognize.probes]]\nkind = \"http\"\nmethod = \"GET\"\npath = \"/\"\n\n[version]",
+        "[[recognize.probes]]\nkind = \"http\"\nmethod = \"GET\"\npath = \"/\"\nfield = \"x\"\nmatch = '^x$'\n\n[version]",
         "no images, probes or ports yet",
     );
 }
@@ -1767,12 +1768,26 @@ fn broken_catalogs_are_refused() {
         "images = [\"docker.io/lightninglabs/lnd\"]",
         "overlap",
     );
-    load_refused(
-        "strfry",
-        "images = [\"ghcr.io/hoytech/strfry\"]",
-        "images = [\"docker.io/lightninglabs/ln*\"]",
-        "overlap",
-    );
+    // A wildcard covers a later image of the same prefix: strfry claims `lnd-*`,
+    // lnd's own image becomes `lnd-x`.
+    let mut files = entry_files();
+    for (stem, from, to) in [
+        (
+            "strfry",
+            "images = [\"ghcr.io/hoytech/strfry\"]",
+            "images = [\"docker.io/lightninglabs/lnd-*\"]",
+        ),
+        (
+            "lnd",
+            "images = [\"docker.io/lightninglabs/lnd\"]",
+            "images = [\"docker.io/lightninglabs/lnd-x\"]",
+        ),
+    ] {
+        let f = files.iter_mut().find(|(s, _)| s == stem).unwrap();
+        f.1 = replaced(&f.1, from, to);
+    }
+    let err = catalog::load_all(&pairs(&files)).unwrap_err().to_string();
+    assert!(err.contains("overlap"), "{err}");
     // A port shared outside SHARED_PORTS (lnd's gRPC port).
     load_refused(
         "strfry",
@@ -1886,48 +1901,81 @@ fn entries_on_port_finds_entries_sorted_by_id() {
 fn match_version_refuses_long_replies_and_partial_matches() {
     let cat = catalog::embedded().unwrap();
     let core = cat.get("bitcoin-core").unwrap();
-    assert_eq!(core.match_version(&u("/Satoshi:32.1.0/")), Some("32.1"));
+    assert_eq!(
+        core.match_version(&u("/Satoshi:32.1.0/")),
+        ReplyMatch::Read("32.1")
+    );
     // Anchored: junk before or after is not a match, nor is a second product.
-    assert_eq!(core.match_version(&u("x/Satoshi:32.1.0/")), None);
-    assert_eq!(core.match_version(&u("/Satoshi:32.1.0/ ")), None);
+    assert_eq!(
+        core.match_version(&u("x/Satoshi:32.1.0/")),
+        ReplyMatch::NoMatch
+    );
+    assert_eq!(
+        core.match_version(&u("/Satoshi:32.1.0/ ")),
+        ReplyMatch::NoMatch
+    );
     assert_eq!(
         core.match_version(&u("/Satoshi:28.1.0/Knots:20250305/")),
-        None
+        ReplyMatch::NoMatch
     );
-    // The reply cap: 256 bytes are read, 257 never are, whatever the pattern says.
+    // The reply cap: 256 bytes are read, 257 are Unreadable (version unknown),
+    // never NoMatch, whatever the pattern says.
     let fry = cat.get("strfry").unwrap();
-    assert_eq!(fry.match_version(&u("1.1.2")), Some("1.1.2"));
+    assert_eq!(fry.match_version(&u("1.1.2")), ReplyMatch::Read("1.1.2"));
     let pat = Pattern::new(r"^(?P<version>\d+)$").unwrap();
-    // (A 256-digit token is past the 64-character version limit, so a long run reads as nothing.)
-    assert_eq!(pat.version(&u(&"7".repeat(MAX_REPLY + 1))), None);
-    assert!(!pat.matches(&u(&"7".repeat(MAX_REPLY + 1))));
-    assert!(pat.matches(&u(&"7".repeat(MAX_REPLY))));
+    assert_eq!(
+        pat.version(&u(&"7".repeat(MAX_REPLY + 1))),
+        ReplyMatch::Unreadable(Unreadable::TooLong)
+    );
+    assert_eq!(
+        pat.matches(&u(&"7".repeat(MAX_REPLY + 1))),
+        ReplyMatch::Unreadable(Unreadable::TooLong)
+    );
+    assert_eq!(
+        pat.matches(&u(&"7".repeat(MAX_REPLY))),
+        ReplyMatch::Read(())
+    );
+    // A matching reply whose token is too long (256 digits) is a bad token, not a no-match.
+    assert_eq!(
+        pat.version(&u(&"7".repeat(MAX_REPLY))),
+        ReplyMatch::Unreadable(Unreadable::BadToken)
+    );
     // An alternation cannot match part of a reply (the \A(?:...)\z wrapper).
     let alt = Pattern::new(r"^nomatch|(?P<version>\d+)\.0$").unwrap();
-    assert_eq!(alt.version(&u("junk 9.0")), None);
-    assert_eq!(alt.version(&u("9.0")), Some("9"));
-    // No reply of any real entry's pattern is read when it is 257 bytes long.
+    assert_eq!(alt.version(&u("junk 9.0")), ReplyMatch::NoMatch);
+    assert_eq!(alt.version(&u("9.0")), ReplyMatch::Read("9"));
+    // No real entry's pattern reads a 257-byte reply: it is Unreadable for every one.
     for e in cat.entries() {
         let long = format!("{}{}", "1".repeat(MAX_REPLY), ".0.0");
-        assert_eq!(e.match_version(&u(&long)), None, "{}", e.id());
+        assert_eq!(
+            e.match_version(&u(&long)),
+            ReplyMatch::Unreadable(Unreadable::TooLong),
+            "{}",
+            e.id()
+        );
     }
 }
 
 #[test]
 fn match_version_returns_only_ascii_version_tokens() {
     let cat = catalog::embedded().unwrap();
-    // Arabic-Indic digits are not versions: strfry's and LND's patterns give nothing.
+    // Arabic-Indic digits are not versions: strfry's and LND's patterns give
+    // Unreadable (non-ASCII), which is version unknown and never a match.
     for id in ["strfry", "lnd"] {
         let e = cat.get(id).unwrap();
-        assert_eq!(e.match_version(&u("١.٢.٣")), None, "{id}");
-        assert_eq!(e.match_version(&u("١.٢.٣-beta")), None, "{id}");
-        assert_eq!(e.match_version(&u("1.2.٣")), None, "{id}");
+        for raw in ["١.٢.٣", "١.٢.٣-beta", "1.2.٣"] {
+            assert_eq!(
+                e.match_version(&u(raw)),
+                ReplyMatch::Unreadable(Unreadable::NonAscii),
+                "{id}"
+            );
+        }
     }
     // Even a pattern that accepts any text gives out only a clean token.
     let any = Pattern::new(r"^(?P<version>.+)$").unwrap();
     assert_eq!(
         any.version(&u("1.2.3-rc.1+build~5")),
-        Some("1.2.3-rc.1+build~5")
+        ReplyMatch::Read("1.2.3-rc.1+build~5")
     );
     for bad in [
         "1 2",
@@ -1938,15 +1986,29 @@ fn match_version_returns_only_ascii_version_tokens() {
         "١.٢",
         "é",
         "\u{1b}[31m",
+        "--rpc-file",
+        "..",
+        "-1",
+        ".1",
+        "+1",
+        "~1",
     ] {
-        assert_eq!(any.version(&u(bad)), None, "{bad:?}");
-        assert!(!any.matches(&u(bad)) || bad.is_ascii(), "{bad:?}");
+        assert!(!any.version(&u(bad)).is_read(), "{bad:?}");
     }
-    assert_eq!(any.version(&u(&"1".repeat(64))).map(str::len), Some(64));
-    assert_eq!(any.version(&u(&"1".repeat(65))), None);
-    // `\d` is ASCII in a catalog pattern.
+    assert_eq!(
+        any.version(&u(&"1".repeat(64))).read().map(str::len),
+        Some(64)
+    );
+    assert_eq!(
+        any.version(&u(&"1".repeat(65))),
+        ReplyMatch::Unreadable(Unreadable::BadToken)
+    );
+    // `\d` is ASCII in a catalog pattern: non-ASCII digits are Unreadable.
     let digits = Pattern::new(r"^(?P<version>\d+)$").unwrap();
-    assert!(!digits.matches(&u("١٢٣")));
+    assert_eq!(
+        digits.matches(&u("١٢٣")),
+        ReplyMatch::Unreadable(Unreadable::NonAscii)
+    );
 }
 
 #[test]
@@ -1981,7 +2043,7 @@ fn synthetic(id: &str) -> String {
     format!(
         r#"format = 1
 id = "{id}"
-name = "Synthetic"
+name = "Synthetic {id}"
 kind = "service"
 aliases = []
 summary = "A made-up product for a test."
@@ -2118,11 +2180,13 @@ fn hardening_cases_are_refused() {
     ] {
         c(images, &format!("images = [\"{bad}\"]"), "image");
     }
-    validate(
-        "bitcoin-core",
-        &replaced(&core, images, "images = [\"docker.io/bitcoin/bit*\"]"),
-    )
-    .unwrap();
+    // A wildcard in the middle of a repo name is refused too (round 2: only after a
+    // whole repo name and one of `-`, `_`, `.`).
+    c(
+        images,
+        "images = [\"docker.io/bitcoin/bit*\"]",
+        "image wildcard",
+    );
 
     // A (port, proto) twice in one entry; the same port on another protocol is fine.
     let ports = "[[recognize.ports]]\nport = 7777\nproto = \"PROTO\"\nwhat = \"again\"\nexposure = \"lan\"\n\n[version]\n";
@@ -2171,4 +2235,411 @@ fn hardening_cases_are_refused() {
         ),
         "cert_source must be one of",
     );
+}
+
+// ---------- round 2: no echo, sweep, wildcards, hosts, advisories, display text ----------
+
+/// The loader's error for an entry text, as the whole message a user would see.
+fn load_error(stem: &str, text: &str) -> String {
+    catalog::load(stem, text).unwrap_err().to_string()
+}
+
+#[test]
+fn errors_name_the_field_and_never_echo_values() {
+    let lnd = text_of("lnd");
+    let feed = "release_feed = \"https://github.com/lightningnetwork/lnd/releases.atom\"";
+    // A URL with user info: refused, and neither the user nor the token is in the message.
+    let e = load_error(
+        "lnd",
+        &replaced(
+            &lnd,
+            feed,
+            "release_feed = \"https://alice:t0kenvalue\u{40}github.com/lightningnetwork/lnd/releases.atom\"",
+        ),
+    );
+    assert!(!e.contains("t0kenvalue") && !e.contains("alice"), "{e}");
+    assert!(e.contains("upstream.release_feed"), "{e}");
+    // An example's raw text holding an xprv-shaped value: caught by the scan first,
+    // naming only the field path.
+    let xprv = format!("xprv{}", "Abcdefghjkmnpqrstuvwx");
+    let e = load_error(
+        "lnd",
+        &replaced(&lnd, "raw = \"0.21.6-beta\"", &format!("raw = \"{xprv}\"")),
+    );
+    assert!(!e.contains(&xprv) && !e.contains("Abcdefghjkm"), "{e}");
+    assert!(e.contains("version.examples[0].raw"), "{e}");
+    // A raw that is not secret-shaped but does not read: no raw text either.
+    let e = load_error(
+        "lnd",
+        &replaced(&lnd, "raw = \"0.21.6-beta\"", "raw = \"zq-9.9.9-beta\""),
+    );
+    assert!(!e.contains("zq-9.9.9"), "{e}");
+    assert!(e.contains("version.examples[0].raw"), "{e}");
+    // A bad pattern: its text is not in the message.
+    let e = load_error(
+        "lnd",
+        &replaced(
+            &lnd,
+            "regex = '^(?P<version>\\d+\\.\\d+\\.\\d+-beta(?:\\.rc\\d+)?)$'",
+            "regex = '(?P<version>toppatterntext)'",
+        ),
+    );
+    assert!(!e.contains("toppatterntext"), "{e}");
+    // Invalid TOML around a secret: toml's own message would quote the text.
+    let e = load_error("lnd", &format!("name = \"{xprv}\" oops\n"));
+    assert!(!e.contains(&xprv), "{e}");
+    let e = catalog::scan_secret_shapes(&format!("name = \"{xprv}\" oops\n"))
+        .unwrap_err()
+        .to_string();
+    assert!(!e.contains(&xprv), "{e}");
+    // A quoted key cannot imitate the fingerprint path to borrow its 40-hex exemption.
+    let fp = "0123456789abcdef0123456789abcdef01234567";
+    let sneaky = format!("[signing]\n\"keys[0].fingerprint\" = \"{fp}\"\n");
+    assert!(catalog::scan_secret_shapes(&sneaky).is_err());
+    // The same value in a real fingerprint is fine.
+    let real =
+        format!("[[signing.keys]]\nwho = \"x\"\nfingerprint = \"{fp}\"\nchecked = 2026-11-17\n");
+    assert!(catalog::scan_secret_shapes(&real).is_ok());
+}
+
+#[test]
+fn plain_version_sweep_refuses_wide_regexes() {
+    let tapd = text_of("tapd");
+    let rx = "regex = '^(?P<version>0\\.\\d+\\.\\d+)$'";
+    let ex = "raw = \"0.5.1\"\nversion = \"0.5.1\"";
+    let with = |regex: &str, raw: &str| {
+        let t = replaced(&tapd, rx, &format!("regex = '{regex}'"));
+        replaced(&t, ex, &format!("raw = \"{raw}\"\nversion = \"{raw}\""))
+    };
+    // Minor 2 is left out and the minor class skips it: the old sweep missed this.
+    refused(
+        "tapd",
+        &with("^(?P<version>\\d+\\.[013-9]\\.\\d+)$", "0.5.1"),
+        "more than one major",
+    );
+    // Two-part, three-part and four-part plain forms.
+    refused(
+        "tapd",
+        &with("^(?P<version>\\d+\\.\\d+)$", "0.5"),
+        "more than one major",
+    );
+    refused(
+        "tapd",
+        &with("^(?P<version>\\d+\\.\\d+\\.\\d+\\.\\d+)$", "192.0.2.1"),
+        "more than one major",
+    );
+    refused(
+        "tapd",
+        &with("^(?P<version>[1-9]\\d*\\.\\d+\\.\\d+)$", "5.1.1"),
+        "more than one major",
+    );
+    // A regex pinned to one major still loads (the shipped 0.x and 2.x entries).
+    validate("tapd", &tapd).unwrap();
+}
+
+#[test]
+fn wildcard_images_follow_a_whole_repo_name() {
+    let lnd = text_of("lnd");
+    let images = "images = [\"docker.io/lightninglabs/lnd\"]";
+    for ok in [
+        "docker.io/lightninglabs/lnd-*",
+        "docker.io/lightninglabs/lnd_*",
+        "docker.io/lightninglabs/lnd.*",
+    ] {
+        validate(
+            "lnd",
+            &replaced(&lnd, images, &format!("images = [\"{ok}\"]")),
+        )
+        .unwrap();
+    }
+    for bad in [
+        "docker.io/library/a*",
+        "docker.io/library/nginx-*",
+        "docker.io/lightninglabs/l*",
+        "docker.io/lightninglabs/lnd*",
+        "docker.io/lightninglabs/-*",
+        "docker.io/light*/lnd-*",
+        "docker.io/lightning-*/lnd",
+        "docker.io/bitcoin/bit*",
+    ] {
+        refused(
+            "lnd",
+            &replaced(&lnd, images, &format!("images = [\"{bad}\"]")),
+            "image",
+        );
+    }
+}
+
+#[test]
+fn website_never_vouches_for_keys_or_feeds_and_shared_hosts_are_refused() {
+    let core = text_of("bitcoin-core");
+    let site = "website = \"https://bitcoincore.org/\"";
+    for bad in [
+        "https://github.com/bitcoin/bitcoin",
+        "https://www.github.com/",
+        "https://gist.github.com/x",
+        "https://raw.githubusercontent.com/",
+        "https://objects.githubusercontent.com/",
+        "https://gitlab.com/bitcoin/bitcoin",
+        "https://foo.gitlab.com/",
+        "https://bitbucket.org/bitcoin/bitcoin",
+        "https://bitcoin.readthedocs.io/",
+    ] {
+        refused(
+            "bitcoin-core",
+            &replaced(&core, site, &format!("website = \"{bad}\"")),
+            "shared code host",
+        );
+    }
+    // The website does not vouch for keys_url or an advisory feed.
+    let keys = "keys_url = \"https://github.com/bitcoin-core/guix.sigs/tree/main/builder-keys\"";
+    refused(
+        "bitcoin-core",
+        &replaced(&core, keys, "keys_url = \"https://bitcoincore.org/keys\""),
+        "website does not vouch",
+    );
+    let feeds = "feeds = [{ kind = \"markdown-repo\", url = \"https://github.com/bitcoin-core/bitcoincore.org\" }]";
+    refused(
+        "bitcoin-core",
+        &replaced(
+            &core,
+            feeds,
+            "feeds = [{ kind = \"atom\", url = \"https://bitcoincore.org/feed.xml\" }]",
+        ),
+        "website does not vouch",
+    );
+    // A related repo of the same owner still can.
+    validate(
+        "bitcoin-core",
+        &replaced(
+            &core,
+            keys,
+            "keys_url = \"https://github.com/bitcoin-core/bitcoincore.org/keys\"",
+        ),
+    )
+    .unwrap();
+    // A github.io website is allowed as a website only: it vouches for nothing.
+    let pages = replaced(&core, site, "website = \"https://bitcoin.github.io/\"");
+    validate("bitcoin-core", &pages).unwrap();
+    refused(
+        "bitcoin-core",
+        &replaced(
+            &pages,
+            "release_feed = \"https://github.com/bitcoin/bitcoin/releases.atom\"",
+            "release_feed = \"https://bitcoin.github.io/releases.atom\"",
+        ),
+        "not under upstream",
+    );
+}
+
+#[test]
+fn related_repos_share_the_owner_and_odd_hosts_are_refused() {
+    let core = text_of("bitcoin-core");
+    refused(
+        "bitcoin-core",
+        &replaced(
+            &core,
+            "https://github.com/bitcoin-core/guix.sigs\",\n",
+            "https://github.com/other/guix.sigs\",\n",
+        ),
+        "same code host and owner",
+    );
+    let site = "website = \"https://bitcoincore.org/\"";
+    for bad in [
+        "https://0x7f.example.com/",
+        "https://example.0x7f/",
+        "https://example.123abc/",
+        "https://xn--bcher-kva.example.com/",
+        "https://example.xn--p1ai/",
+    ] {
+        refused(
+            "bitcoin-core",
+            &replaced(&core, site, &format!("website = \"{bad}\"")),
+            "URL host must not use",
+        );
+    }
+}
+
+#[test]
+fn advisories_need_a_package_and_a_known_ecosystem() {
+    let lnd = text_of("lnd");
+    let core = text_of("bitcoin-core");
+    let pkg = "osv_packages = [\"Go github.com/lightningnetwork/lnd\"]";
+    // No package and no blind_spot: nothing can match, and nothing says so.
+    refused(
+        "lnd",
+        &replaced(&lnd, pkg, "osv_packages = []"),
+        "blind_spot",
+    );
+    // With a blind_spot, an empty list is an honest statement.
+    let with_spot = replaced(
+        &lnd,
+        pkg,
+        "osv_packages = []\nblind_spot = \"No OSV package.\"",
+    );
+    validate("lnd", &with_spot).unwrap();
+    // Ecosystem names are OSV's, exactly.
+    for bad in ["go", "Gp", "Cargo", "PYPI", "Docker"] {
+        refused(
+            "lnd",
+            &replaced(
+                &lnd,
+                pkg,
+                &format!("osv_packages = [\"{bad} github.com/lightningnetwork/lnd\"]"),
+            ),
+            "ecosystem must be one of",
+        );
+    }
+    for ok in [
+        "Go",
+        "PyPI",
+        "npm",
+        "crates.io",
+        "Maven",
+        "NuGet",
+        "RubyGems",
+        "Packagist",
+        "Hex",
+        "Pub",
+        "SwiftURL",
+        "Debian",
+        "Alpine",
+        "Ubuntu",
+    ] {
+        validate(
+            "lnd",
+            &replaced(
+                &lnd,
+                pkg,
+                &format!("osv_packages = [\"{ok} some-package\"]"),
+            ),
+        )
+        .unwrap();
+    }
+    // GIT: the name is the repo or a related repo.
+    let git = "osv_packages = [\"GIT https://github.com/bitcoin/bitcoin\"]";
+    refused(
+        "bitcoin-core",
+        &replaced(
+            &core,
+            git,
+            "osv_packages = [\"GIT https://github.com/bitcoin/other\"]",
+        ),
+        "GIT package must be",
+    );
+    validate(
+        "bitcoin-core",
+        &replaced(
+            &core,
+            git,
+            "osv_packages = [\"GIT https://github.com/bitcoin-core/guix.sigs\"]",
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn display_text_has_no_hidden_characters_and_names_are_unique() {
+    let lnd = text_of("lnd");
+    for bad in [
+        "\u{200b}", "\u{200f}", "\u{202a}", "\u{202e}", "\u{2066}", "\u{2069}", "\u{feff}",
+        "\u{00ad}",
+    ] {
+        refused(
+            "lnd",
+            &replaced(
+                &lnd,
+                "summary = \"Lightning Labs' Lightning Network node.\"",
+                &format!("summary = \"Lightning Labs'{bad} node.\""),
+            ),
+            "format or bidi",
+        );
+    }
+    refused(
+        "lnd",
+        &replaced(&lnd, "name = \"LND\"", "name = \"L\u{200b}ND\""),
+        "entry.name",
+    );
+    // A name must be ASCII, so no look-alike letters.
+    refused(
+        "lnd",
+        &replaced(&lnd, "name = \"LND\"", "name = \"L\u{039d}D\""),
+        "ASCII",
+    );
+    // Names are unique across the catalog, ignoring case.
+    let a = synthetic("one-svc");
+    let b = replaced(
+        &synthetic("two-svc"),
+        "name = \"Synthetic two-svc\"",
+        "name = \"SYNTHETIC ONE-SVC\"",
+    );
+    let err = catalog::load_all(&[("one-svc", &a), ("two-svc", &b)]).unwrap_err();
+    assert!(err.to_string().contains("display name"), "{err}");
+}
+
+#[test]
+fn example_raw_is_untrusted_and_probes_need_a_pattern() {
+    let cat = catalog::embedded().unwrap();
+    let lnd = cat.get("lnd").unwrap();
+    let ex = &lnd.version_call().examples()[0];
+    // Debug never shows the reply, and the text comes out only through an escaping call.
+    assert_eq!(format!("{:?}", ex.raw), "Untrusted(<hidden>)");
+    assert_eq!(ex.raw.escape_for_terminal(), "0.21.6-beta");
+    // A probe with no pattern is refused at load.
+    let text = text_of("lnd");
+    refused(
+        "lnd",
+        &replaced(
+            &text,
+            "field = \"state\"\nmatch = '^(?:NON_EXISTING|LOCKED|UNLOCKED|RPC_ACTIVE|SERVER_ACTIVE|WAITING_TO_START)$'\n",
+            "",
+        ),
+        "a probe needs both field and match",
+    );
+    // The probe's pattern three-way result.
+    let probe = &lnd.recognize().probes[0];
+    assert_eq!(probe.field(), "state");
+    assert_eq!(probe.matches(&u("SERVER_ACTIVE")), ReplyMatch::Read(()));
+    assert_eq!(probe.matches(&u("nope")), ReplyMatch::NoMatch);
+    assert_eq!(
+        probe.matches(&u(&"A".repeat(MAX_REPLY + 1))),
+        ReplyMatch::Unreadable(Unreadable::TooLong)
+    );
+}
+
+#[test]
+fn link_checks_survive_a_long_chain_and_still_find_cycles() {
+    // A chain of 300 entries, each bundling the next: no recursion, no overflow.
+    let n = 300;
+    let texts: Vec<(String, String)> = (0..n)
+        .map(|i| {
+            let id = format!("c-{i}");
+            let mut t = synthetic(&id);
+            // Distinct ports per entry would be needed only past the cap; use no ports.
+            t = t.replace(
+                "[[recognize.ports]]\nport = 9735\nproto = \"tcp\"\nwhat = \"peer\"\nexposure = \"lan\"\n\n",
+                "",
+            );
+            t = t.replace("endpoint_port = 9735\n", "");
+            if i + 1 < n {
+                t = t.replacen("aliases = []", &format!("aliases = []\nbundles = [\"c-{}\"]", i + 1), 1);
+            }
+            (id, t)
+        })
+        .collect();
+    catalog::load_all(&pairs(&texts)).unwrap();
+    // A cycle is still found.
+    let a = replaced(
+        &synthetic("aa"),
+        "aliases = []",
+        "aliases = []\nbundles = [\"bb\"]",
+    );
+    let b = replaced(
+        &synthetic("bb"),
+        "aliases = []",
+        "aliases = []\nbundles = [\"aa\"]",
+    );
+    let a = replaced(&a, "name = \"Synthetic aa\"", "name = \"Synthetic aa\"");
+    let err = catalog::load_all(&[("aa", &a), ("bb", &b)]).unwrap_err();
+    assert!(err.to_string().contains("cycle"), "{err}");
 }

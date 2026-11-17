@@ -35,6 +35,8 @@ source = "lab/compose.yml"
 kind = "grpc"
 method = "lnrpc.State/GetState"
 port = 10009
+field = "state"
+match = '^(?:NON_EXISTING|LOCKED|UNLOCKED|RPC_ACTIVE|SERVER_ACTIVE|WAITING_TO_START)$'
 
 [version]
 source = "grpc"

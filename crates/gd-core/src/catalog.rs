@@ -71,8 +71,27 @@ const OTHER_URLS: [(&str, &str, &str); 1] = [(
     "https://security.lightning.engineering/",
 )];
 
+/// Entries whose `related_repos` may name another owner on the same code host,
+/// as (entry id, owner, reason). Every other entry's related repos share the
+/// owner of `upstream.repo`.
+const RELATED_OTHER_OWNER: [(&str, &str, &str); 1] = [(
+    "bitcoin-core",
+    "bitcoin-core",
+    "the signature repo and the project site repo live in the bitcoin-core organisation; the code is in bitcoin",
+)];
+
 /// Hosts that carry many projects: a website there must be exactly the repo.
-const CODE_HOSTS: [&str; 3] = ["github.com", "gitlab.com", "codeberg.org"];
+const CODE_HOSTS: [&str; 1] = ["codeberg.org"];
+
+/// Hosts (and all their subdomains) where anyone can publish: never a project's
+/// website. `github.com` covers gist and the rest; raw content is its own name.
+const SHARED_SITE_HOSTS: [&str; 5] = [
+    "github.com",
+    "githubusercontent.com",
+    "gitlab.com",
+    "bitbucket.org",
+    "readthedocs.io",
+];
 
 /// Shared page hosts: a website there must be the project's own subdomain,
 /// `<owner>.<suffix>` with the owner from `upstream.repo`.
@@ -83,6 +102,25 @@ const PAGES_SUFFIXES: [&str; 6] = [
     "pages.dev",
     "netlify.app",
     "vercel.app",
+];
+
+/// OSV's ecosystem names an `osv_packages` item may start with.
+const OSV_ECOSYSTEMS: [&str; 15] = [
+    "Go",
+    "PyPI",
+    "npm",
+    "crates.io",
+    "GIT",
+    "Maven",
+    "NuGet",
+    "RubyGems",
+    "Packagist",
+    "Hex",
+    "Pub",
+    "SwiftURL",
+    "Debian",
+    "Alpine",
+    "Ubuntu",
 ];
 
 const KINDS: [&str; 6] = ["service", "platform", "device", "app", "miner", "package"];
@@ -338,9 +376,11 @@ impl Call {
     }
 }
 
-/// A token is a version only if it is 1 to 64 characters of `[0-9A-Za-z.+~-]`.
+/// A token is a version only if it is 1 to 64 characters of `[0-9A-Za-z.+~-]`
+/// and starts with a letter or digit (so `--rpc-file` and `..` are never versions).
 fn is_version_token(s: &str) -> bool {
     (1..=64).contains(&s.len())
+        && s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '~' | '-'))
 }
@@ -378,32 +418,99 @@ impl Pattern {
         Ok(p)
     }
 
-    /// A reply is only ever matched when it is at most [`MAX_REPLY`] bytes and ASCII.
-    fn readable(reply: &str) -> bool {
-        reply.len() <= MAX_REPLY && reply.is_ascii()
+    /// Can the reply be matched at all? Only when it is at most [`MAX_REPLY`]
+    /// bytes and ASCII; otherwise why not.
+    fn readable(reply: &str) -> Result<(), Unreadable> {
+        if reply.len() > MAX_REPLY {
+            Err(Unreadable::TooLong)
+        } else if !reply.is_ascii() {
+            Err(Unreadable::NonAscii)
+        } else {
+            Ok(())
+        }
     }
 
     /// Does the whole reply match? A reply over [`MAX_REPLY`] bytes, or with
-    /// any non-ASCII character, never does.
-    #[must_use]
-    pub fn matches(&self, reply: &Untrusted<String>) -> bool {
+    /// any non-ASCII character, is [`ReplyMatch::Unreadable`], never `NoMatch`.
+    pub fn matches(&self, reply: &Untrusted<String>) -> ReplyMatch<()> {
         // expose_untrusted: matched by an anchored, bounded regex; nothing is returned.
         let text = reply.expose_untrusted();
-        Self::readable(text) && self.re.is_match(text)
+        if let Err(why) = Self::readable(text) {
+            return ReplyMatch::Unreadable(why);
+        }
+        if self.re.is_match(text) {
+            ReplyMatch::Read(())
+        } else {
+            ReplyMatch::NoMatch
+        }
     }
 
-    /// The `version` group of a whole-reply match, if it is a valid version
-    /// token (1 to 64 of `[0-9A-Za-z.+~-]`). A reply over [`MAX_REPLY`] bytes,
-    /// a non-ASCII one, a partial match or any other token gives `None`.
-    #[must_use]
-    pub fn version<'a>(&self, reply: &'a Untrusted<String>) -> Option<&'a str> {
+    /// The `version` group of a whole-reply match, when it is a valid version
+    /// token (1 to 64 of `[0-9A-Za-z.+~-]`, starting with a letter or digit).
+    /// A reply over [`MAX_REPLY`] bytes or a non-ASCII one is
+    /// [`ReplyMatch::Unreadable`]; so is a match whose `version` group is not a
+    /// valid token. A reply that does not match is `NoMatch`.
+    pub fn version<'a>(&self, reply: &'a Untrusted<String>) -> ReplyMatch<&'a str> {
         // expose_untrusted: only a token that passes `is_version_token` leaves this function.
         let text = reply.expose_untrusted();
-        if !Self::readable(text) {
-            return None;
+        if let Err(why) = Self::readable(text) {
+            return ReplyMatch::Unreadable(why);
         }
-        let v = self.re.captures(text)?.name("version")?.as_str();
-        is_version_token(v).then_some(v)
+        let Some(caps) = self.re.captures(text) else {
+            return ReplyMatch::NoMatch;
+        };
+        match caps.name("version").map(|m| m.as_str()) {
+            Some(v) if is_version_token(v) => ReplyMatch::Read(v),
+            _ => ReplyMatch::Unreadable(Unreadable::BadToken),
+        }
+    }
+}
+
+/// Why a reply could not be read at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unreadable {
+    /// Longer than [`MAX_REPLY`] bytes.
+    TooLong,
+    /// Has a non-ASCII character.
+    NonAscii,
+    /// The reply matched, but what the `version` group read is not a valid
+    /// version token.
+    BadToken,
+}
+
+/// The result of running a catalog pattern on a service's reply.
+///
+/// **`Unreadable` must surface as "version unknown", never as "not affected".**
+/// A reply that could not be read says nothing about the product, so no caller
+/// may treat it as `NoMatch` (a reply that was read and is not this product's).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub enum ReplyMatch<T> {
+    /// The reply matched; `T` is the validated version token (or `()` for a
+    /// pattern that reads no version).
+    Read(T),
+    /// The reply was read and does not match.
+    NoMatch,
+    /// The reply could not be read; see [`Unreadable`].
+    Unreadable(Unreadable),
+}
+
+impl<T> ReplyMatch<T> {
+    /// The token of a `Read` result, otherwise `None`. A `None` here does not
+    /// say which of `NoMatch` or `Unreadable` it was: check that before
+    /// treating it as anything but unknown.
+    #[must_use]
+    pub fn read(self) -> Option<T> {
+        match self {
+            Self::Read(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// Is this `Read`?
+    #[must_use]
+    pub fn is_read(&self) -> bool {
+        matches!(self, Self::Read(_))
     }
 }
 
@@ -445,8 +552,8 @@ pub struct Probe {
     kind: ProbeKind,
     call: Call,
     port: Option<u16>,
-    field: Option<String>,
-    matcher: Option<Pattern>,
+    field: String,
+    matcher: Pattern,
 }
 
 impl Probe {
@@ -468,23 +575,22 @@ impl Probe {
         self.port
     }
 
-    /// The reply field the pattern reads, when there is a pattern.
+    /// The reply field the pattern reads.
     #[must_use]
-    pub fn field(&self) -> Option<&str> {
-        self.field.as_deref()
+    pub fn field(&self) -> &str {
+        &self.field
     }
 
-    /// The anchored pattern this probe's field must match, if it has one.
+    /// The anchored pattern this probe's field must match. Every probe has one.
     #[must_use]
-    pub fn pattern(&self) -> Option<&Pattern> {
-        self.matcher.as_ref()
+    pub fn pattern(&self) -> &Pattern {
+        &self.matcher
     }
 
-    /// Does the probe's pattern match this reply field? `false` with no pattern,
-    /// and for a reply over [`MAX_REPLY`] bytes or with non-ASCII text.
-    #[must_use]
-    pub fn matches(&self, reply: &Untrusted<String>) -> bool {
-        self.matcher.as_ref().is_some_and(|p| p.matches(reply))
+    /// Does the probe's pattern match this reply field? A reply over
+    /// [`MAX_REPLY`] bytes or with non-ASCII text is `Unreadable`.
+    pub fn matches(&self, reply: &Untrusted<String>) -> ReplyMatch<()> {
+        self.matcher.matches(reply)
     }
 }
 
@@ -539,8 +645,9 @@ impl VersionCall {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Example {
-    /// The reply, as sent.
-    pub raw: String,
+    /// The reply, as sent. Untrusted text: print it only through
+    /// `escape_for_terminal`.
+    pub raw: Untrusted<String>,
     /// The version the regex must read from it.
     pub version: String,
     /// A repo file or upstream URL.
@@ -828,10 +935,10 @@ impl Entry {
     }
 
     /// Reads the version from a reply. The whole reply must match the entry's
-    /// anchored regex; a reply over [`MAX_REPLY`] bytes or with non-ASCII text
-    /// is never matched; the result is a valid version token or nothing.
-    #[must_use]
-    pub fn match_version<'a>(&self, reply: &'a Untrusted<String>) -> Option<&'a str> {
+    /// anchored regex. A reply over [`MAX_REPLY`] bytes or with non-ASCII text
+    /// is `Unreadable` (surface it as version unknown, never as not affected);
+    /// a read result is a valid version token.
+    pub fn match_version<'a>(&self, reply: &'a Untrusted<String>) -> ReplyMatch<&'a str> {
         self.version.pattern.version(reply)
     }
 
@@ -894,11 +1001,26 @@ impl Catalog {
 /// # Errors
 /// The first rule the entry breaks, with the entry's name.
 pub fn load(name: &str, text: &str) -> Result<Entry, CatalogError> {
-    let t: Table = toml::from_str(text)
-        .map_err(|e| CatalogError::entry(name, format!("not valid TOML: {e}")))?;
-    let entry = parse_entry(&t, name).map_err(|e| CatalogError::entry(name, e))?;
+    let t = parse_toml(text).map_err(|e| CatalogError::entry(name, e))?;
+    // The secret scan runs first, so nothing below ever sees (or reports) a
+    // value that looks like a secret. Every error names a field path only.
     no_secret_shapes(&t).map_err(|e| CatalogError::entry(name, e))?;
-    Ok(entry)
+    parse_entry(&t, name).map_err(|e| CatalogError::entry(name, e))
+}
+
+/// Parses TOML. The error names the line only: toml's own message quotes the
+/// offending text, which may be a secret.
+fn parse_toml(text: &str) -> R<Table> {
+    toml::from_str(text).map_err(|e| match e.span() {
+        Some(sp) => {
+            let upto = text.get(..sp.start).unwrap_or("");
+            format!(
+                "not valid TOML near line {}",
+                upto.matches('\n').count() + 1
+            )
+        }
+        None => "not valid TOML".to_string(),
+    })
 }
 
 /// Loads every entry, then runs the checks that span entries.
@@ -935,7 +1057,7 @@ pub fn embedded() -> Result<Catalog, CatalogError> {
 fn check_keys(t: &Table, ctx: &str, required: &[&str], optional: &[&str]) -> R<()> {
     for k in t.keys() {
         if !required.contains(&k.as_str()) && !optional.contains(&k.as_str()) {
-            return Err(format!("unknown key `{k}` in {ctx}"));
+            return Err(format!("unknown key `{}` in {ctx}", key_label(k)));
         }
     }
     for k in required {
@@ -944,6 +1066,30 @@ fn check_keys(t: &Table, ctx: &str, required: &[&str], optional: &[&str]) -> R<(
         }
     }
     Ok(())
+}
+
+/// A TOML key as shown in an error or a path: itself when it is a plain name,
+/// otherwise a stand-in, so an odd (quoted) key can never smuggle text through.
+fn key_label(k: &str) -> String {
+    if !k.is_empty()
+        && k.len() <= 40
+        && k.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        k.to_string()
+    } else {
+        "<key>".to_string()
+    }
+}
+
+/// Characters of Unicode category Cf (format) plus the bidi controls: they draw
+/// nothing but can hide or reorder text, so they never belong in display text.
+fn is_format_char(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD | 0x0600..=0x0605 | 0x061C | 0x06DD | 0x070F | 0x08E2 | 0x180E
+        | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F
+        | 0xFEFF | 0xFFF9..=0xFFFB | 0x110BD | 0x110CD | 0x13430..=0x1343F
+        | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A | 0xE0001 | 0xE0020..=0xE007F)
 }
 
 fn string<'a>(t: &'a Table, k: &str, ctx: &str) -> R<&'a str> {
@@ -955,8 +1101,10 @@ fn string<'a>(t: &'a Table, k: &str, ctx: &str) -> R<&'a str> {
 
 fn line<'a>(t: &'a Table, k: &str, ctx: &str) -> R<&'a str> {
     let s = string(t, k, ctx)?;
-    if s.is_empty() || s.chars().any(char::is_control) {
-        return Err(format!("{ctx}.{k} must be one non-empty line"));
+    if s.is_empty() || s.chars().any(|c| c.is_control() || is_format_char(c)) {
+        return Err(format!(
+            "{ctx}.{k} must be one non-empty line with no control, format or bidi characters"
+        ));
     }
     Ok(s)
 }
@@ -1112,7 +1260,7 @@ fn build_fixed() -> Result<Fixed, regex::Error> {
 /// an alternation inside it can never match part of a reply, and with a size limit.
 fn untrusted_regex(pattern: &str) -> R<Regex> {
     if pattern.len() < 2 || !pattern.starts_with('^') || !pattern.ends_with('$') {
-        return Err(format!("pattern must be anchored (^...$): {pattern}"));
+        return Err("pattern must be anchored (^...$)".into());
     }
     let slashes = pattern
         .strip_suffix('$')
@@ -1122,22 +1270,20 @@ fn untrusted_regex(pattern: &str) -> R<Regex> {
         .take_while(|c| *c == '\\')
         .count();
     if slashes % 2 == 1 {
-        return Err(format!(
-            "pattern ends in an escaped $, not an anchor: {pattern}"
-        ));
+        return Err("pattern ends in an escaped $, not an anchor".into());
     }
     if pattern.len() > MAX_PATTERN {
         return Err(format!("pattern is longer than {MAX_PATTERN} characters"));
     }
     if fixed()?.inline_flags.is_match(pattern) {
-        return Err(format!("pattern must not use inline flags: {pattern}"));
+        return Err("pattern must not use inline flags".into());
     }
     // The bare pattern must compile on its own first: a stray `)` would otherwise
     // close the wrapper below and let the rest of the pattern run unanchored.
     RegexBuilder::new(pattern)
         .size_limit(REGEX_SIZE_LIMIT)
         .build()
-        .map_err(|e| format!("pattern does not compile on its own within the size limit: {e}"))?;
+        .map_err(|_| "pattern does not compile on its own within the size limit".to_string())?;
     let wrapped = format!(r"\A(?:{pattern})\z");
     // Unicode off where the pattern allows it, so `\d` and `\w` are ASCII. A pattern
     // that cannot compile that way (it could match bytes that are not UTF-8) uses
@@ -1152,7 +1298,7 @@ fn untrusted_regex(pattern: &str) -> R<Regex> {
     RegexBuilder::new(&wrapped)
         .size_limit(REGEX_SIZE_LIMIT)
         .build()
-        .map_err(|e| format!("pattern does not compile within the size limit: {e}"))
+        .map_err(|_| "pattern does not compile within the size limit".to_string())
 }
 
 // ---------- URLs ----------
@@ -1180,17 +1326,14 @@ fn internal_host(host: &str) -> bool {
 
 /// Splits an https URL into (host, path). Refuses anything else, and internal names.
 fn https_parts(url: &str) -> R<(&str, &str)> {
-    let rest = url
-        .strip_prefix("https://")
-        .ok_or(format!("URL must be https: {url}"))?;
+    // No error below quotes the URL: it may carry user info or a token.
+    let rest = url.strip_prefix("https://").ok_or("URL must be https")?;
     if rest.contains(['?', '#', '@', ' ']) || url.chars().any(char::is_control) {
-        return Err(format!(
-            "URL must have no credentials, query, fragment or spaces: {url}"
-        ));
+        return Err("URL must have no credentials, query, fragment or spaces".into());
     }
     // No percent-encoding at all: `%2e%2e` would hide a `..` from the path checks.
     if rest.contains('%') {
-        return Err(format!("URL must not use % encoding: {url}"));
+        return Err("URL must not use % encoding".into());
     }
     let (host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
     let host_ok = !host.is_empty()
@@ -1199,21 +1342,28 @@ fn https_parts(url: &str) -> R<(&str, &str)> {
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-');
     if !host_ok || path.contains("..") {
-        return Err(format!(
-            "URL host must be a lower-case name, no port: {url}"
-        ));
+        return Err("URL host must be a lower-case name, no port".into());
     }
     // A trailing dot (`example.com.`) or an empty label (`a..b`) is a different
     // spelling of the same name; refuse it before any host rule looks at it.
     if host.split('.').any(str::is_empty) {
-        return Err(format!(
-            "URL host must not end in a dot or have an empty label: {url}"
-        ));
+        return Err("URL host must not end in a dot or have an empty label".into());
     }
     if internal_host(host) {
-        return Err(format!(
-            "URL names an internal host or an IP address: {url}"
-        ));
+        return Err("URL names an internal host or an IP address".into());
+    }
+    // Hex and octal spellings of an address (`0x7f.1`), a last label that starts
+    // with a digit (`127.1`, `1.2.3.4a`), and punycode labels (look-alike names).
+    let last = host.rsplit('.').next().unwrap_or("");
+    if host
+        .split('.')
+        .any(|l| l.starts_with("0x") || l.starts_with("xn--"))
+        || last.starts_with(|c: char| c.is_ascii_digit())
+    {
+        return Err(
+            "URL host must not use 0x labels, a digit-led last label or punycode (xn--) labels"
+                .into(),
+        );
     }
     Ok((host, path))
 }
@@ -1229,18 +1379,28 @@ fn check_repo_url(url: &str) -> R<()> {
     let (_, path) = https_parts(url)?;
     let segs: Vec<&str> = path.trim_matches('/').split('/').collect();
     if segs.len() != 2 || segs.iter().any(|s| s.is_empty()) || path.ends_with('/') {
-        return Err(format!("repo URL must be https://host/owner/repo: {url}"));
+        return Err("repo URL must be https://host/owner/repo".into());
     }
     Ok(())
 }
 
-/// A website may not sit on a shared code host unless it is exactly the repo.
+/// Is `host` the name `base` or a subdomain of it?
+fn on_host(host: &str, base: &str) -> bool {
+    host == base || host.ends_with(&format!(".{base}"))
+}
+
+/// A website may not sit on a shared host: a code or hosting site that carries
+/// many projects (github.com and its subdomains, gist, raw content, gitlab.com,
+/// bitbucket.org, readthedocs.io) is refused outright; codeberg.org only when it
+/// is exactly the repo; a shared pages host only as the project's own subdomain
+/// of the upstream owner.
 fn check_website(repo: &str, site: &str) -> R<()> {
     let (host, _) = https_parts(site)?;
+    if SHARED_SITE_HOSTS.iter().any(|h| on_host(host, h)) {
+        return Err("website must not be on a shared code host (or docs host)".into());
+    }
     if CODE_HOSTS.contains(&host) && site.trim_end_matches('/') != repo {
-        return Err(format!(
-            "website on a shared code host must be exactly upstream.repo: {site}"
-        ));
+        return Err("website on a shared code host must be exactly upstream.repo".into());
     }
     let owner = repo
         .strip_prefix("https://")
@@ -1249,9 +1409,9 @@ fn check_website(repo: &str, site: &str) -> R<()> {
         .to_ascii_lowercase();
     for suffix in PAGES_SUFFIXES {
         let own = format!("{owner}.{suffix}");
-        if (host == suffix || host.ends_with(&format!(".{suffix}"))) && host != own {
+        if on_host(host, suffix) && host != own {
             return Err(format!(
-                "website on a shared pages host must be {own} (the upstream owner), not {host}"
+                "website on a shared pages host must be {own} (the upstream owner)"
             ));
         }
     }
@@ -1259,13 +1419,27 @@ fn check_website(repo: &str, site: &str) -> R<()> {
 }
 
 /// A feed, policy, key, source or advisory URL must sit under the entry's own
-/// repo (same owner and repo), a listed related repo, its website, or a
-/// reviewed (entry, field, prefix) exception.
-fn check_under_upstream(id: &str, up: &Upstream, field: &str, url: &str) -> R<()> {
-    https_parts(url)?;
+/// repo (same owner and repo), a listed related repo, or a reviewed (entry,
+/// field, prefix) exception. `website_ok` also lets the project's website
+/// vouch for it, unless the website is on a shared pages host. Keys and
+/// advisory feeds never accept the website.
+fn check_under_upstream(
+    id: &str,
+    up: &Upstream,
+    field: &str,
+    url: &str,
+    website_ok: bool,
+) -> R<()> {
+    https_parts(url).map_err(|e| format!("{field}: {e}"))?;
     let mut bases: Vec<&str> = vec![&up.repo];
     bases.extend(up.related_repos.iter().map(String::as_str));
-    bases.extend(up.website.as_deref());
+    if website_ok
+        && let Some(w) = up.website.as_deref()
+        && let Ok((wh, _)) = https_parts(w)
+        && !PAGES_SUFFIXES.iter().any(|s| on_host(wh, s))
+    {
+        bases.push(w);
+    }
     bases.extend(
         OTHER_URLS
             .iter()
@@ -1274,9 +1448,13 @@ fn check_under_upstream(id: &str, up: &Upstream, field: &str, url: &str) -> R<()
     );
     if bases.iter().any(|b| under(url, b)) {
         Ok(())
+    } else if website_ok {
+        Err(format!(
+            "{field} is not under upstream.repo, related_repos or website"
+        ))
     } else {
         Err(format!(
-            "{field} is not under upstream.repo, related_repos or website: {url}"
+            "{field} is not under upstream.repo or related_repos (the website does not vouch for it)"
         ))
     }
 }
@@ -1286,10 +1464,10 @@ fn check_under_upstream(id: &str, up: &Upstream, field: &str, url: &str) -> R<()
 /// (`tests/catalog.rs`); here only its form.
 fn check_source(id: &str, up: &Upstream, field: &str, src: &str) -> R<()> {
     if src.starts_with("https://") {
-        check_under_upstream(id, up, field, src)
+        check_under_upstream(id, up, field, src, true)
     } else if src.contains("..") || src.starts_with('/') {
         Err(format!(
-            "{field} must be a file in the repo or a URL under the upstream: {src}"
+            "{field} must be a file in the repo or a URL under the upstream"
         ))
     } else {
         Ok(())
@@ -1312,6 +1490,7 @@ fn is_advisory_file(src: &str) -> bool {
 /// names may contain dots (`verrpc.Versioner/GetVersion`), so they skip the
 /// host-name test and are held to the exact READ_ONLY_CALLS list instead.
 fn no_endpoint_text(label: &str, s: &str, host_test: bool) -> R<()> {
+    // The text is never quoted back: it may be a URL with a token in it.
     let lower = s.to_ascii_lowercase();
     let bad = lower.contains("://")
         || s.contains('@')
@@ -1323,7 +1502,7 @@ fn no_endpoint_text(label: &str, s: &str, host_test: bool) -> R<()> {
         || (host_test && fixed()?.host_like.is_match(s));
     if bad {
         return Err(format!(
-            "{label} must not name a scheme, host, user info, `..`, link-local or onion address: {s}"
+            "{label} must not name a scheme, host, user info, `..`, link-local or onion address"
         ));
     }
     Ok(())
@@ -1508,7 +1687,13 @@ fn collect_strings(path: &str, v: &Value, depth: usize, out: &mut Vec<(String, S
         }
         Value::Table(t) => {
             for (k, x) in t {
-                collect_strings(&format!("{path}.{k}"), x, depth + 1, out)?;
+                let label = key_label(k);
+                let next = if path.is_empty() {
+                    label
+                } else {
+                    format!("{path}.{label}")
+                };
+                collect_strings(&next, x, depth + 1, out)?;
             }
         }
         _ => {}
@@ -1516,15 +1701,17 @@ fn collect_strings(path: &str, v: &Value, depth: usize, out: &mut Vec<(String, S
     Ok(())
 }
 
+/// Paths are built only from plain key names (anything else shows as `<key>`),
+/// so no quoted key can imitate this path and borrow the exemption.
 fn is_fingerprint_path(path: &str) -> bool {
-    path.starts_with(".signing.keys[") && path.ends_with("].fingerprint")
+    path.starts_with("signing.keys[") && path.ends_with("].fingerprint")
 }
 
 fn no_secret_shapes(t: &Table) -> R<()> {
     let fx = fixed()?;
     let mut all = Vec::new();
     for (k, v) in t {
-        collect_strings(&format!(".{k}"), v, 0, &mut all)?;
+        collect_strings(&key_label(k), v, 0, &mut all)?;
     }
     for (path, s) in all {
         for (name, re) in &fx.shapes {
@@ -1564,8 +1751,7 @@ fn no_secret_shapes(t: &Table) -> R<()> {
 /// # Errors
 /// The first value with a secret shape, or text that is not TOML.
 pub fn scan_secret_shapes(text: &str) -> Result<(), CatalogError> {
-    let t: Table =
-        toml::from_str(text).map_err(|e| CatalogError::whole(format!("not valid TOML: {e}")))?;
+    let t = parse_toml(text).map_err(CatalogError::whole)?;
     no_secret_shapes(&t).map_err(CatalogError::whole)
 }
 
@@ -1614,30 +1800,59 @@ fn check_image_pattern(img: &str) -> R<()> {
         || tail_has_colon
         || normalise_image(img) != img
     {
-        return Err(format!(
-            "image `{img}` must be in normalised form docker.io/namespace/repo, no tag or digest, `*` only at the end"
-        ));
+        return Err(
+            "image must be in normalised form docker.io/namespace/repo, no tag or digest, `*` only at the end"
+                .into(),
+        );
     }
-    // A wildcard follows at least a whole `registry/namespace/repo` prefix: never
-    // `docker.io/*` or `docker.io/library*`, which would claim a whole namespace.
+    // A wildcard is the very last character, directly after a whole repo name
+    // and one of `-`, `_`, `.` (`docker.io/lightninglabs/lnd-*`): never in the
+    // namespace, and never under `library/` (Docker's own images).
     if img.ends_with('*') {
         let segs: Vec<&str> = body.split('/').collect();
-        if segs.len() < 3 || segs.iter().any(|s| s.is_empty()) {
-            return Err(format!(
-                "image wildcard `{img}` must follow a full registry/namespace/repo prefix"
-            ));
+        let repo = segs.last().copied().unwrap_or("");
+        let named = repo
+            .strip_suffix(['-', '_', '.'])
+            .is_some_and(|r| r.chars().any(|c| c.is_ascii_alphanumeric()));
+        if segs.len() < 3 || segs.iter().any(|s| s.is_empty()) || !named {
+            return Err(
+                "image wildcard must follow a whole repo name and one of `-`, `_`, `.` in a registry/namespace/repo prefix"
+                    .into(),
+            );
+        }
+        if segs.get(1) == Some(&"library") {
+            return Err("image wildcard must not sit under library/".into());
         }
     }
     Ok(())
 }
 
-/// Plain versions across many major numbers: `N.2.3` for N in 0 to 40, `100.0.0` and
-/// `2026.1.0`. A regex that reads more than one major claims any product's reply,
-/// whatever way it is spelled.
-fn major_sweep() -> Vec<String> {
-    let mut v: Vec<String> = (0..=40).map(|n| format!("{n}.2.3")).collect();
-    v.push("100.0.0".into());
-    v.push("2026.1.0".into());
+/// How many plain versions the sweep generates, at most.
+const PLAIN_SWEEP_MAX: usize = 12_000;
+
+/// Plain versions a regex must not read for more than one major: majors 0 to 40, 100 and 2024 to 2027,
+/// as 2-, 3- and 4-part forms with minors and patches 0 to 12 (the 4-part form
+/// uses a sample of them to stay small). A regex that reads these for several
+/// majors claims some other product's plain reply, whatever way it is spelled.
+fn plain_sweep() -> Vec<String> {
+    let majors: Vec<u32> = (0..=40).chain([100]).chain(2024..=2027).collect();
+    let mut v = Vec::new();
+    for &a in &majors {
+        for b in 0..=12u32 {
+            v.push(format!("{a}.{b}"));
+            for c in 0..=12u32 {
+                v.push(format!("{a}.{b}.{c}"));
+            }
+        }
+        for b in [0u32, 1, 2, 6, 12] {
+            for c in [0u32, 1, 7, 12] {
+                for d in [0u32, 1, 5] {
+                    v.push(format!("{a}.{b}.{c}.{d}"));
+                }
+            }
+        }
+    }
+    debug_assert!(v.len() <= PLAIN_SWEEP_MAX);
     v
 }
 
@@ -1676,11 +1891,14 @@ fn parse_entry(t: &Table, stem: &str) -> R<Entry> {
         return Err(format!("id `{id}` must equal the file name `{stem}.toml`"));
     }
     let name = line(t, "name", "entry")?.to_string();
+    if !name.is_ascii() {
+        return Err("entry.name must be ASCII".into());
+    }
     let kind = one_of(t, "kind", "entry", &KINDS)?.to_string();
     let aliases = strings(t, "aliases", "entry")?;
     for a in &aliases {
         if !is_slug(a) {
-            return Err(format!("alias `{a}` must be a slug"));
+            return Err("an alias must be a slug".into());
         }
     }
     let summary = line(t, "summary", "entry")?.to_string();
@@ -1738,10 +1956,10 @@ fn parse_entry(t: &Table, stem: &str) -> R<Entry> {
         return Err("review.sources must cite at least one page".into());
     }
     for s in &sources {
-        https_parts(s)?;
+        https_parts(s).map_err(|e| format!("review.sources: {e}"))?;
     }
     for item in &todo {
-        if item.is_empty() || item.chars().any(char::is_control) {
+        if item.is_empty() || item.chars().any(|c| c.is_control() || is_format_char(c)) {
             return Err("review.todo items must be one non-empty line".into());
         }
     }
@@ -1784,23 +2002,39 @@ fn parse_upstream(id: &str, t: &Table) -> R<Upstream> {
         ],
     )?;
     let repo = string(up, "repo", "upstream")?.to_string();
-    check_repo_url(&repo)?;
-    let (repo_host, _) = https_parts(&repo)?;
+    check_repo_url(&repo).map_err(|e| format!("upstream.repo: {e}"))?;
+    let (repo_host, repo_path) = https_parts(&repo)?;
+    let repo_owner = repo_path
+        .trim_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     let related_repos = strings_opt(up, "related_repos", "upstream")?;
     for r in &related_repos {
-        check_repo_url(r)?;
+        check_repo_url(r).map_err(|e| format!("upstream.related_repos: {e}"))?;
         if *r == repo {
             return Err("related_repos must not repeat upstream.repo".into());
         }
-        if https_parts(r)?.0 != repo_host {
-            return Err(format!(
-                "related_repos must be on the same code host as the repo: {r}"
-            ));
+        let (rhost, rpath) = https_parts(r)?;
+        let rowner = rpath
+            .trim_matches('/')
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let reviewed = RELATED_OTHER_OWNER
+            .iter()
+            .any(|(i, o, _)| *i == id && *o == rowner);
+        if rhost != repo_host || (rowner != repo_owner && !reviewed) {
+            return Err(
+                "related_repos must be on the same code host and owner as upstream.repo".into(),
+            );
         }
     }
     let website = if up.contains_key("website") {
         let w = string(up, "website", "upstream")?;
-        check_website(&repo, w)?;
+        check_website(&repo, w).map_err(|e| format!("upstream.website: {e}"))?;
         Some(w.to_string())
     } else {
         None
@@ -1815,7 +2049,7 @@ fn parse_upstream(id: &str, t: &Table) -> R<Upstream> {
     for f in ["security_policy", "release_feed"] {
         if up.contains_key(f) {
             let u = string(up, f, "upstream")?;
-            check_under_upstream(id, &out, f, u)?;
+            check_under_upstream(id, &out, &format!("upstream.{f}"), u, true)?;
             if f == "security_policy" {
                 out.security_policy = Some(u.to_string());
             } else {
@@ -1841,7 +2075,7 @@ fn parse_recognize(
     )?;
     let images = strings(rec, "images", "recognize")?;
     for img in &images {
-        check_image_pattern(img)?;
+        check_image_pattern(img).map_err(|e| format!("recognize.images: {e}"))?;
     }
     let binaries = strings(rec, "binaries", "recognize")?;
     if binaries.is_empty() && !has_todo("binaries:") {
@@ -1919,16 +2153,15 @@ fn parse_recognize(
                 );
             }
         };
-        if p.contains_key("field") != p.contains_key("match") {
-            return Err("recognize.probes: field and match go together".into());
+        if !p.contains_key("field") || !p.contains_key("match") {
+            return Err(
+                "recognize.probes: a probe needs both field and match (a probe with no pattern recognises nothing)"
+                    .into(),
+            );
         }
-        let (field, matcher) = if p.contains_key("match") {
-            let f = check_field(p, "recognize.probes")?;
-            let m = Pattern::new(string(p, "match", "recognize.probes")?)?;
-            (Some(f), Some(m))
-        } else {
-            (None, None)
-        };
+        let field = check_field(p, "recognize.probes")?;
+        let matcher = Pattern::new(string(p, "match", "recognize.probes")?)
+            .map_err(|e| format!("recognize.probes.match: {e}"))?;
         probes.push(Probe {
             kind,
             call,
@@ -2020,9 +2253,7 @@ fn parse_version(
         no_endpoint_text("version.tls.server_name", name, true)?;
         // A bare local name: `localhost` or this entry's own id, never a public DNS name.
         if name != "localhost" && name != id {
-            return Err(format!(
-                "version.tls.server_name must be `localhost` or the entry id, not `{name}`"
-            ));
+            return Err("version.tls.server_name must be `localhost` or the entry id".into());
         }
         Some(Tls {
             cert_source,
@@ -2060,14 +2291,16 @@ fn parse_version(
             // That the file lists the version is checked in tests/catalog.rs.
             one_of(e, "source_kind", "version.examples", &["advisory"])?;
             if !is_advisory_file(src) {
-                return Err(format!(
-                    "version.examples.source of an advisory example must be an advisory file in the repo: {src}"
-                ));
+                return Err(
+                    "version.examples.source of an advisory example must be an advisory file in the repo"
+                        .into(),
+                );
             }
             if raw != want {
-                return Err(format!(
-                    "an advisory example is the bare value: raw `{raw}` must equal version `{want}`"
-                ));
+                return Err(
+                    "an advisory example is the bare value: version.examples.raw must equal version.examples.version"
+                        .into(),
+                );
             }
             if !has_todo("recorded-reply:") {
                 return Err(
@@ -2076,34 +2309,54 @@ fn parse_version(
             }
         }
         let reply = Untrusted::new(raw.to_string());
-        let got = pattern.version(&reply);
-        if got != Some(want) {
-            return Err(format!(
-                "version.regex on example `{raw}` gives {got:?}, expected `{want}`"
-            ));
+        // The reply text is never quoted: only where it is and what came out.
+        match pattern.version(&reply) {
+            ReplyMatch::Read(got) if got == want => {}
+            ReplyMatch::Read(_) => {
+                return Err(format!(
+                    "version.examples[{}].raw: the regex reads a different version than version.examples[{}].version",
+                    examples.len(),
+                    examples.len()
+                ));
+            }
+            other => {
+                return Err(format!(
+                    "version.examples[{}].raw: the regex does not read it ({})",
+                    examples.len(),
+                    match other {
+                        ReplyMatch::Unreadable(_) =>
+                            "unreadable: too long, non-ASCII or a bad token",
+                        _ => "no match",
+                    }
+                ));
+            }
         }
         examples.push(Example {
-            raw: raw.to_string(),
+            raw: reply,
             version: want.to_string(),
             source: src.to_string(),
             advisory,
         });
     }
 
-    // No version regex reads plain versions of more than one major number: that would claim
-    // any product's reply. A reviewed exception must still need it.
+    // No version regex reads plain versions (`1.2`, `28.1.0`, `2026.1.0.3`) of more
+    // than one major number: that would claim any product's reply. A regex pinned
+    // to one major (`^2\.\d+\.\d+$`) is allowed. A reviewed exception must still need it.
     let advisory_only = examples.iter().all(|e| e.advisory);
-    let majors = major_sweep()
+    let plain_majors: BTreeSet<String> = plain_sweep()
         .into_iter()
-        .filter(|p| pattern.matches(&Untrusted::new(p.clone())))
-        .count();
+        .filter(|p| pattern.matches(&Untrusted::new(p.clone())).is_read())
+        .filter_map(|p| p.split('.').next().map(str::to_string))
+        .collect();
+    let reads_plain = plain_majors.len() > 1;
     let excepted = PLAIN_VERSION_OK.iter().any(|(e, _)| *e == id);
-    if majors > 1 && !excepted {
-        return Err(format!(
-            "version.regex reads plain versions of more than one major number, so it would claim any product's reply: {regex}"
-        ));
+    if reads_plain && !excepted {
+        return Err(
+            "version.regex reads plain versions (like 1.2 or 28.1.0) of more than one major number, so it would claim any product's reply"
+                .into(),
+        );
     }
-    if majors <= 1 && excepted {
+    if !reads_plain && excepted {
         return Err(format!(
             "`{id}` is in PLAIN_VERSION_OK but its regex no longer reads many majors: remove it"
         ));
@@ -2140,11 +2393,22 @@ fn parse_advisories(id: &str, t: &Table, up: &Upstream) -> R<Advisories> {
     )?;
     let osv_packages = strings(adv, "osv_packages", "advisories")?;
     for p in &osv_packages {
-        let ok = p
+        let Some((eco, name)) = p
             .split_once(' ')
-            .is_some_and(|(eco, name)| !eco.is_empty() && !name.is_empty() && !name.contains(' '));
-        if !ok {
-            return Err(format!("osv package `{p}` must be `<ECOSYSTEM> <name>`"));
+            .filter(|(eco, name)| !eco.is_empty() && !name.is_empty() && !name.contains(' '))
+        else {
+            return Err("advisories.osv_packages items must be `<ECOSYSTEM> <name>`".into());
+        };
+        if !OSV_ECOSYSTEMS.contains(&eco) {
+            return Err(format!(
+                "advisories.osv_packages ecosystem must be one of {OSV_ECOSYSTEMS:?} (OSV's names)"
+            ));
+        }
+        if eco == "GIT" && name != up.repo && !up.related_repos.iter().any(|r| r == name) {
+            return Err(
+                "advisories.osv_packages: a GIT package must be upstream.repo or one of related_repos"
+                    .into(),
+            );
         }
     }
     let ghsa = boolean(adv, "ghsa", "advisories")?;
@@ -2155,13 +2419,19 @@ fn parse_advisories(id: &str, t: &Table, up: &Upstream) -> R<Advisories> {
         let kind = one_of(f, "kind", "advisories.feeds", &FEED_KINDS)?;
         machine_feed |= MACHINE_FEEDS.contains(&kind);
         let url = string(f, "url", "advisories.feeds")?;
-        check_under_upstream(id, up, "advisories.feeds.url", url)?;
+        check_under_upstream(id, up, "advisories.feeds.url", url, false)?;
         feeds.push(Feed {
             kind: kind.to_string(),
             url: url.to_string(),
         });
     }
     let blind_spot = opt_line(adv, "blind_spot", "advisories")?;
+    if osv_packages.is_empty() && blind_spot.is_none() {
+        return Err(
+            "advisories: no osv_packages needs a blind_spot (an entry nothing can match finds no advisories)"
+                .into(),
+        );
+    }
     if blind_spot.is_none() && !ghsa && !machine_feed {
         return Err("advisories: no GHSA and no feed a machine can read needs a blind_spot".into());
     }
@@ -2197,7 +2467,7 @@ fn parse_signing(
     let method = opt_line(sg, "method", "signing")?;
     let keys_url = if sg.contains_key("keys_url") {
         let u = string(sg, "keys_url", "signing")?;
-        check_under_upstream(id, up, "keys_url", u)?;
+        check_under_upstream(id, up, "signing.keys_url", u, false)?;
         Some(u.to_string())
     } else {
         None
@@ -2256,6 +2526,14 @@ fn parse_signing(
 // ---------- cross-entry checks ----------
 
 fn check_unique(entries: &BTreeMap<String, Entry>) -> R<()> {
+    let mut names: BTreeMap<String, &str> = BTreeMap::new();
+    for (id, e) in entries {
+        if let Some(other) = names.insert(e.name.to_ascii_lowercase(), id) {
+            return Err(format!(
+                "display name of `{id}` is the same as `{other}`'s (compared without case)"
+            ));
+        }
+    }
     let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
     for (id, e) in entries {
         let names = std::iter::once(id.as_str()).chain(e.aliases.iter().map(String::as_str));
@@ -2347,27 +2625,39 @@ fn check_links(entries: &BTreeMap<String, Entry>) -> R<()> {
         }
         edges.insert(id, targets);
     }
-    // Depth-first search; 1 = on the current path, 2 = finished.
-    fn visit<'a>(
-        n: &'a str,
-        edges: &BTreeMap<&'a str, Vec<&'a str>>,
-        state: &mut BTreeMap<&'a str, u8>,
-    ) -> R<()> {
-        match state.get(n) {
-            Some(1) => return Err(format!("fork_of or bundles has a cycle through `{n}`")),
-            Some(_) => return Ok(()),
-            None => {}
+    // Iterative depth-first search with a visited set: no recursion, so a long
+    // chain of entries can never overflow the stack. A node on the current
+    // path met again is a cycle.
+    let mut done: BTreeSet<&str> = BTreeSet::new();
+    for start in entries.keys() {
+        if done.contains(start.as_str()) {
+            continue;
         }
-        state.insert(n, 1);
-        for next in edges.get(n).map(Vec::as_slice).unwrap_or_default() {
-            visit(next, edges, state)?;
+        let mut on_path: BTreeSet<&str> = BTreeSet::new();
+        // (node, index of the next edge to follow)
+        let mut stack: Vec<(&str, usize)> = vec![(start.as_str(), 0)];
+        on_path.insert(start.as_str());
+        while let Some((node, i)) = stack.last().copied() {
+            let next = edges.get(node).and_then(|v| v.get(i)).copied();
+            if let Some(top) = stack.last_mut() {
+                top.1 += 1;
+            }
+            match next {
+                Some(n) if on_path.contains(n) => {
+                    return Err(format!("fork_of or bundles has a cycle through `{n}`"));
+                }
+                Some(n) if done.contains(n) => {}
+                Some(n) => {
+                    on_path.insert(n);
+                    stack.push((n, 0));
+                }
+                None => {
+                    on_path.remove(node);
+                    done.insert(node);
+                    stack.pop();
+                }
+            }
         }
-        state.insert(n, 2);
-        Ok(())
-    }
-    let mut state = BTreeMap::new();
-    for id in entries.keys() {
-        visit(id, &edges, &mut state)?;
     }
     Ok(())
 }
