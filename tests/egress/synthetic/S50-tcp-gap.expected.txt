@@ -1,0 +1,5 @@
+Judge C (egress capture): FAIL
+control: dns ok, https ok, wire ok, blocked-path ok
+destinations: 1 unlisted, 0 allowlisted
+F1 unlisted-destination tcp 192.0.2.7:7777
+F5 capture-unreadable pcap: tcp-gap
