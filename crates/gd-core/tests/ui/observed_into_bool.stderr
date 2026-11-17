@@ -1,0 +1,7 @@
+error[E0277]: the trait bound `bool: From<Observed<bool>>` is not satisfied
+ --> tests/ui/observed_into_bool.rs:5:28
+  |
+5 |     let _fine: bool = seen.into();
+  |                            ^^^^ the trait `From<Observed<bool>>` is not implemented for `bool`
+  |
+  = note: required for `Observed<bool>` to implement `Into<bool>`

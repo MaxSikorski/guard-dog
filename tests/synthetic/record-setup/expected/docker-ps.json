@@ -1,0 +1,4 @@
+[
+{"Image":"docker.io/lightninglabs/lnd:v0.19.2-beta","ImageID":"sha256:4f2b8c1d9e7a3b5f60c2d4e6a8b0c1d3e5f70912a4b6c8d0e2f4a6b8c0d2e4f6","Labels":{"org.opencontainers.image.source":"label-1"},"Names":["/lnd","/container-1"],"Ports":[{"IP":"0.0.0.0","PrivatePort":9735,"PublicPort":9735,"Type":"tcp"},{"IP":"::","PrivatePort":9735,"PublicPort":9735,"Type":"tcp"},{"IP":"2001:db8::1","PrivatePort":9736,"Type":"tcp"},{"IP":"fe80::1","PrivatePort":9737,"Type":"tcp"}],"State":"running","Status":"Up 3 days"},
+{"Image":"image-1","Labels":{},"Names":["/bitcoind"],"Ports":[{"IP":"0.0.0.0","PrivatePort":8333,"PublicPort":8333,"Type":"tcp"},{"IP":"fd00::1","PrivatePort":8334,"Type":"tcp"}],"State":"running","Status":"Up 3 days"}
+]
