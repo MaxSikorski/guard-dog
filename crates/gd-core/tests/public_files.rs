@@ -146,11 +146,9 @@ fn name_at(text: &str, at: usize) -> String {
 /// regard to case. A marker glued to a longer word (`docs/home/x`) is a
 /// relative path, not a home folder; `file://localhost/...` is a home folder.
 fn report_after(line: &str, marker: &str, allowed: &[&str], found: &mut Vec<String>) {
-    let lower = line.to_lowercase();
-    if lower.len() != line.len() {
-        return; // odd Unicode changed the byte lengths; the markers are ASCII
-    }
-    for (at, _) in lower.match_indices(marker.to_lowercase().as_str()) {
+    // ASCII lowercasing keeps every byte offset, so odd Unicode cannot hide a line.
+    let lower = line.to_ascii_lowercase();
+    for (at, _) in lower.match_indices(marker.to_ascii_lowercase().as_str()) {
         let before = lower.get(..at).unwrap_or("");
         if before.chars().next_back().is_some_and(is_name_char) && !before.ends_with("localhost") {
             continue;
@@ -201,23 +199,61 @@ fn temp_paths(line: &str, found: &mut Vec<String>) {
     }
 }
 
-/// Eight or more whole numbers of 1 to 5 digits in a row, space separated
-/// (backticks, quotes and brackets around them are ignored; commas do not join numbers, so byte arrays are fine), look like
-/// the output of `id -G`. Dotted versions such as `0.17.0` do not count.
-fn group_list(line: &str, found: &mut Vec<String>) {
-    let mut run = 0;
-    let mut longest = 0;
-    for token in line.split(' ') {
-        let bare =
-            token.trim_matches(|c: char| matches!(c, '`' | '\'' | '"' | '[' | ']' | '(' | ')'));
-        let small = !bare.is_empty() && bare.len() <= 5 && bare.bytes().all(|b| b.is_ascii_digit());
-        run = if small { run + 1 } else { 0 };
-        longest = longest.max(run);
+/// Is `text` eight or more whole numbers of 1 to 5 digits, single-space
+/// separated, that are not one strictly consecutive run (`22 23 24 ...` is a
+/// list of versions, not group ids)?
+fn looks_like_group_list(text: &str) -> bool {
+    let mut numbers = Vec::new();
+    for token in text.trim().split(' ') {
+        match token.parse::<u32>() {
+            Ok(n)
+                if !token.is_empty()
+                    && token.len() <= 5
+                    && token.bytes().all(|b| b.is_ascii_digit()) =>
+            {
+                numbers.push(n);
+            }
+            _ => return false,
+        }
     }
-    if longest >= 8 {
-        found.push(format!(
-            "run of {longest} small numbers, like an `id -G` group list"
-        ));
+    let steps: Vec<i64> = numbers
+        .windows(2)
+        .map(|w| match w {
+            [a, b] => i64::from(*b) - i64::from(*a),
+            _ => 0,
+        })
+        .collect();
+    let consecutive = steps.iter().all(|s| *s == 1) || steps.iter().all(|s| *s == -1);
+    numbers.len() >= 8 && !consecutive
+}
+
+/// Group lists like the output of `id -G`: the whole line, or the whole
+/// contents of a backtick, quote, bracket or parenthesis span, is 8 or more
+/// numbers (see `looks_like_group_list`). A Rust byte string `b"..."` is
+/// data, not a group list. Dotted versions such as `0.17.0` never count.
+fn group_list(line: &str, found: &mut Vec<String>) {
+    let mut hit = looks_like_group_list(line);
+    for (open, close) in [('`', '`'), ('"', '"'), ('\'', '\''), ('[', ']'), ('(', ')')] {
+        let mut from = 0;
+        while let Some(rel) = line.get(from..).and_then(|rest| rest.find(open)) {
+            let start = from + rel + open.len_utf8();
+            let Some(len) = line.get(start..).and_then(|rest| rest.find(close)) else {
+                break;
+            };
+            let byte_string =
+                open == '"' && line.get(..from + rel).is_some_and(|s| s.ends_with('b'));
+            if !byte_string
+                && line
+                    .get(start..start + len)
+                    .is_some_and(looks_like_group_list)
+            {
+                hit = true;
+            }
+            from = start + len + close.len_utf8();
+        }
+    }
+    if hit {
+        found.push("a run of 8 or more small numbers, like an `id -G` group list".to_string());
     }
 }
 
@@ -239,10 +275,21 @@ fn emails(line: &str, found: &mut Vec<String>) {
             continue; // `@types/node`, `pkg@1.2.3`, a bare `@`
         }
         let local = if at > 0 && bytes[at - 1] == b'"' {
-            // A quoted local part: "name"@host
-            line[..at - 1]
-                .rfind('"')
-                .map_or("", |open| &line[open + 1..at - 1])
+            // A quoted local part: "name"@host, where a backslash escapes the
+            // next character, so an escaped quote does not open or close it.
+            let mut open = None;
+            let mut i = at - 1;
+            while i > 0 {
+                i -= 1;
+                if bytes[i] == b'"' {
+                    let slashes = bytes[..i].iter().rev().take_while(|b| **b == b'\\').count();
+                    if slashes % 2 == 0 {
+                        open = Some(i);
+                        break;
+                    }
+                }
+            }
+            open.map_or("", |open| &line[open + 1..at - 1])
         } else {
             let mut start = at;
             while start > 0
@@ -434,7 +481,14 @@ fn the_checker_catches_planted_details_and_leaves_ordinary_text_alone() {
         format!("export DIR={private}zz/0123"),
         format!("{}-501/x", ["/private", "/tmp/claude"].concat()),
         format!("{}7/x", ["/var/", "folders/"].concat()),
-        format!("groups: {}", numbers(9, 20, 7)),
+        numbers(9, 20, 7),
+        ["20", "12", "61", "79", "80", "81", "98", "701"].join(" "),
+        format!(
+            "`{}`",
+            ["20", "12", "61", "79", "80", "81", "98", "701"].join(" ")
+        ),
+        format!("\u{212A}{slash}{alias}/x"),
+        format!("\"{alias}\\\"\"@{mail_host}"),
         format!("`{}`", numbers(8, 12, 3)),
         format!("[{}]", numbers(10, 100, 1111)),
         format!("\"{}\"", numbers(8, 65500, 4)),
@@ -489,6 +543,8 @@ fn the_checker_catches_planted_details_and_leaves_ordinary_text_alone() {
         ),
         "root runs this as root".to_string(),
         format!("let bytes = [{}];", numbers(12, 0, 1).replace(' ', ", ")),
+        format!("supported versions: `{}`", numbers(8, 22, 1)),
+        format!("let x = b\"{}\";", numbers(9, 0, 7)),
     ];
     for line in &fine {
         assert!(
