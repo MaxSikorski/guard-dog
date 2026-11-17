@@ -1,0 +1,1355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script>(function(){var d;try{var s=localStorage.getItem("theme");d=s?s==="dark":matchMedia("(prefers-color-scheme: dark)").matches}catch(e){d=true}document.documentElement.setAttribute("data-theme",d?"dark":"light")})();</script>
+<script>(function(){try{var k=localStorage.getItem("gd-skin");if(k&&k!=="original")document.documentElement.setAttribute("data-skin",k)}catch(e){}})();</script>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<link rel="icon" id="favicon" type="image/svg+xml" href="">
+<script>/* Favicon follows the theme: black mark in light mode, white mark in dark mode; the inside stays transparent. */window.gdFavicon=function(dark){var c=dark?"#ffffff":"#000000";var svg='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="'+c+'" fill-rule="evenodd" d="M32 4 8 12v17c0 14 9 25 24 31 15-6 24-17 24-31V12L32 4Zm0 6 18 6v13c0 11-6 20-18 25-12-5-18-14-18-25V16l18-6Z"/><path fill="'+c+'" fill-rule="evenodd" d="M20 18c0-1 1-1 2 0l7 7h6l7-7c1-1 2-1 2 0v16c0 8-5 13-12 16-7-3-12-8-12-16V18Zm4 14v4h5v-4h-5Zm11 0v4h5v-4h-5Zm-7 9 4 5 4-5h-8Z"/></svg>';var f=document.getElementById("favicon");if(f)f.href="data:image/svg+xml,"+encodeURIComponent(svg)};window.gdFavicon(document.documentElement.getAttribute("data-theme")!=="light");</script>
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>@font-face{font-family:'Inter';font-weight:300;font-style:normal;font-display:swap;src:url('../vendor/fonts/inter-latin-300-normal.woff2') format('woff2')}@font-face{font-family:'Inter';font-weight:400;font-style:normal;font-display:swap;src:url('../vendor/fonts/inter-latin-400-normal.woff2') format('woff2')}@font-face{font-family:'Inter';font-weight:500;font-style:normal;font-display:swap;src:url('../vendor/fonts/inter-latin-500-normal.woff2') format('woff2')}@font-face{font-family:'Inter';font-weight:600;font-style:normal;font-display:swap;src:url('../vendor/fonts/inter-latin-600-normal.woff2') format('woff2')}@font-face{font-family:'Inter';font-weight:700;font-style:normal;font-display:swap;src:url('../vendor/fonts/inter-latin-700-normal.woff2') format('woff2')}</style>
+<title>How Guard Dog will work · mock-up</title>
+<meta name="description" content="A clickable mock-up of how Guard Dog is planned to work. Pre-alpha: made-up sample data, nothing installable yet, nothing connected.">
+<!--
+  How Guard Dog will work: a clickable mock-up of planned software (vanilla HTML, CSS and JavaScript, one file).
+  SAMPLE DATA ONLY. Every name, version and address is made up; addresses come from the
+  documentation-only range 192.0.2.0/24. Nothing here is connected to anything or sends anything.
+  GSAP and Inter are vendored in ../vendor/ (hashes in THIRD-PARTY-NOTICES.md).
+-->
+<script src="../vendor/gsap/gsap.min.js" defer></script>
+<style>
+/* Sikorski Design System tokens: pure black and white chrome, glass cards, Inter.
+   Colour is used ONLY for meaning: urgency (red, orange, yellow, blue, green)
+   and categories (Bitcoin orange, Lightning amber, Nostr purple, Cashu pink). Dark is the default. */
+:root{
+  --bg:#000000; --surface:rgba(28,28,30,.7); --surface-2:rgba(255,255,255,.06); --surface-3:rgba(255,255,255,.1);
+  --text:#ffffff; --muted:rgba(255,255,255,.6); --faint:rgba(255,255,255,.4); --border:rgba(255,255,255,.1);
+  --accent:#ffffff; --accent-ink:#000000; --accent-soft:rgba(255,255,255,.1);
+  --crit:#ff453a; --crit-soft:rgba(255,69,58,.16);
+  --high:#ff9f0a; --high-soft:rgba(255,159,10,.16);
+  --med:#ffd60a; --med-soft:rgba(255,214,10,.14);
+  --low:#64d2ff; --low-soft:rgba(100,210,255,.14);
+  --ok:#30d158; --ok-soft:rgba(48,209,88,.15);
+  --btc:#f7931a; --ln:#ffb340; --nostr:#bf5af2; --nostr-soft:rgba(191,90,242,.16); --cashu:#ff375f;
+  --shadow:none; --blur:blur(30px); --glass-bg:rgba(0,0,0,.72); --top-h:64px;
+  --radius:20px; --radius-sm:12px;
+  --mono:"SF Mono",Consolas,"Liberation Mono",Menlo,Courier,monospace;
+  --sans:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+}
+[data-theme="light"]{
+  --glass-bg:rgba(245,245,247,.78);
+  --bg:#f5f5f7; --surface:rgba(255,255,255,.7); --surface-2:rgba(0,0,0,.04); --surface-3:rgba(0,0,0,.07);
+  --text:#000000; --muted:rgba(0,0,0,.6); --faint:rgba(0,0,0,.42); --border:rgba(0,0,0,.1);
+  --accent:#000000; --accent-ink:#ffffff; --accent-soft:rgba(0,0,0,.06);
+  --crit:#d70015; --crit-soft:rgba(255,59,48,.12);
+  --high:#c93400; --high-soft:rgba(255,149,0,.14);
+  --med:#a05a00; --med-soft:rgba(255,204,0,.2);
+  --low:#0071a4; --low-soft:rgba(90,200,250,.16);
+  --ok:#248a3d; --ok-soft:rgba(52,199,89,.14);
+  --btc:#d9730a; --ln:#c96a00; --nostr:#8944ab; --nostr-soft:rgba(175,82,222,.12); --cashu:#d30f45;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion: reduce){html{scroll-behavior:auto}}
+html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+body{transition:background-color .5s ease,color .5s ease}
+h1,h2,h3{letter-spacing:-0.04em}
+body{min-height:100vh}
+a{color:inherit}
+button{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+.mono{font-family:var(--mono);font-size:.92em}
+.muted{color:var(--muted)} .faint{color:var(--faint)}
+
+/* ---------- top bar ---------- */
+/* Fixed, always-frosted header like the weekly slide decks: content scrolls behind glass, never into the words. */
+.top{position:sticky;top:0;z-index:30;height:var(--top-h);display:flex;align-items:center;gap:16px;padding:0 28px;background:var(--glass-bg);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--border);white-space:nowrap}
+.top > *{flex-shrink:0}
+@media (max-width:1180px){.top .hide-lg{display:none}}
+@media (max-width:980px){.top .hide-md{display:none}}
+.brand{display:flex;align-items:center;gap:10px;font-weight:600;letter-spacing:-.02em;font-size:16px;text-decoration:none}
+.brand svg{width:26px;height:26px}
+.node{display:flex;flex-direction:column;line-height:1.25;gap:2px;margin-left:4px;padding-left:16px;border-left:1px solid var(--border)}
+.node b{font-size:13px} .node span{font-size:12px;color:var(--muted)}
+.sample{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);background:var(--accent-soft);padding:3px 8px;border-radius:99px;white-space:nowrap}
+.top .grow{flex:1 1 auto;min-width:8px}
+.btn{text-decoration:none;display:inline-flex;align-items:center;gap:8px;border:1px solid var(--border);background:var(--surface);padding:9px 18px;border-radius:30px;cursor:pointer;font-weight:600;font-size:14px;white-space:nowrap;transition:background .15s,border-color .15s,transform .1s}
+.btn:hover{background:var(--surface-2)} .btn:active{transform:translateY(1px)}
+.btn svg{width:17px;height:17px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.primary:hover{opacity:.88;background:var(--accent)}
+.btn.danger{background:var(--crit);border-color:var(--crit);color:#fff}
+.btn.ghost{background:transparent;border-color:transparent}
+.btn.ghost:hover{background:var(--surface-2)}
+.btn.sm{padding:6px 13px;font-size:13px;border-radius:30px}
+.btn[disabled]{opacity:.5;cursor:not-allowed}
+.iconbtn{width:38px;height:38px;justify-content:center;padding:0}
+.spin{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ---------- layout ---------- */
+.shell{display:grid;grid-template-columns:232px minmax(0,1fr);min-height:calc(100vh - var(--top-h))}
+.side{border-right:1px solid var(--border);padding:16px 12px;position:sticky;top:var(--top-h);height:calc(100vh - var(--top-h));overflow:auto;display:flex;flex-direction:column;gap:2px}
+.nav a{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;text-decoration:none;color:var(--muted);font-weight:550;font-size:14px}
+.nav a svg{width:18px;height:18px;flex:none}
+.nav a:hover{background:var(--surface-2);color:var(--text)}
+.nav a[aria-current="page"]{background:var(--surface-3);color:var(--text)}
+.nav .count{margin-left:auto;font-size:12px;font-weight:700;min-width:22px;text-align:center;padding:1px 7px;border-radius:99px;background:var(--crit);color:#fff}
+.nav .count.soft{background:var(--surface-3);color:var(--muted)}
+.nav .tag{margin-left:auto;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--faint)}
+.side h6{margin:14px 10px 4px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint)}
+.side .foot{margin-top:auto;padding:10px;font-size:12px;color:var(--faint)}
+main{padding:22px 26px 90px;max-width:1180px;width:100%}
+.pagehead{display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap;margin-bottom:18px}
+.pagehead h1{margin:0;font-size:26px;letter-spacing:-.02em}
+.pagehead p{margin:2px 0 0;color:var(--muted)}
+.pagehead .grow{flex:1}
+
+/* ---------- cards ---------- */
+.grid{display:grid;gap:14px}
+.g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.g3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.g4{grid-template-columns:repeat(4,minmax(0,1fr))}
+.card{background:var(--surface);backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px}
+.card h2{margin:0 0 10px;font-size:15px;letter-spacing:-.005em;display:flex;align-items:center;gap:8px}
+.card h2 .grow{flex:1}
+.card h2 svg{width:18px;height:18px;color:var(--muted)}
+.card.flat{box-shadow:none}
+.stat{display:flex;flex-direction:column;gap:2px}
+.stat .n{font-size:30px;font-weight:750;letter-spacing:-.02em;line-height:1.1}
+.stat .l{font-size:13px;color:var(--muted)}
+.hero{display:grid;grid-template-columns:auto 1fr auto;gap:18px;align-items:center;padding:22px 24px;border-color:var(--crit);background:linear-gradient(var(--crit-soft),var(--crit-soft)),var(--surface)}
+.hero .shield{width:64px;height:64px;border-radius:18px;display:grid;place-items:center;background:var(--crit-soft);color:var(--crit)}
+.hero .shield svg{width:36px;height:36px}
+.hero h2{font-size:22px;margin:0 0 4px}
+.hero p{margin:0;color:var(--muted)}
+.disclaimer{display:flex;gap:10px;align-items:flex-start;font-size:13px;color:var(--muted);background:var(--surface-2);border-radius:var(--radius-sm);padding:10px 12px}
+.disclaimer svg{width:18px;height:18px;flex:none;margin-top:1px}
+
+/* ---------- chips / severity ---------- */
+.chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:700;padding:2px 9px;border-radius:99px;white-space:nowrap;text-transform:capitalize}
+.chip::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.chip.critical{color:var(--crit);background:var(--crit-soft)}
+.chip.high{color:var(--high);background:var(--high-soft)}
+.chip.medium{color:var(--med);background:var(--med-soft)}
+.chip.low{color:var(--low);background:var(--low-soft)}
+.chip.ok{color:var(--ok);background:var(--ok-soft)}
+.chip.info{color:var(--muted);background:var(--surface-3)}
+.chip.nostr{color:var(--nostr);background:var(--nostr-soft)}
+.chip.plain::before{display:none}
+.chip.possibly{color:var(--med);background:var(--med-soft)}
+.pill{font-size:11.5px;font-weight:650;padding:2px 8px;border-radius:6px;background:var(--surface-3);color:var(--muted);white-space:nowrap}
+
+/* ---------- lists ---------- */
+.list{display:flex;flex-direction:column}
+.row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:center;padding:12px 4px;border-top:1px solid var(--border)}
+.row:first-child{border-top:0}
+.row .t{font-weight:600}
+.row .s{font-size:13px;color:var(--muted)}
+.row.click{cursor:pointer;border-radius:10px;padding-left:10px;padding-right:10px;margin:0 -6px}
+.row.click:hover{background:var(--surface-2)}
+.dot{width:10px;height:10px;border-radius:50%}
+.dot.critical{background:var(--crit)} .dot.high{background:var(--high)} .dot.medium{background:var(--med)} .dot.low{background:var(--low)} .dot.ok{background:var(--ok)} .dot.info{background:var(--faint)}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th{text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--faint);font-weight:650;padding:8px 10px;border-bottom:1px solid var(--border)}
+td{padding:10px;border-bottom:1px solid var(--border);vertical-align:middle}
+tr:last-child td{border-bottom:0}
+.tablewrap{overflow-x:auto}
+.group-title{display:flex;align-items:center;gap:8px;margin:22px 0 8px;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+.group-title:first-child{margin-top:0}
+.group-title svg{width:16px;height:16px}
+
+/* ---------- finding detail ---------- */
+.detail{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:16px;align-items:start}
+.steps{counter-reset:s;list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:8px}
+.steps li{counter-increment:s;display:grid;grid-template-columns:28px 1fr;gap:10px;align-items:start}
+.steps li::before{content:counter(s);width:26px;height:26px;border-radius:50%;display:grid;place-items:center;font-weight:700;font-size:13px;background:var(--accent-soft);color:var(--accent)}
+.steps li.done::before{content:"✓";background:var(--ok-soft);color:var(--ok)}
+.steps li.done span{color:var(--muted);text-decoration:line-through}
+.evidence{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
+.evidence li{font-family:var(--mono);font-size:12.5px;background:var(--surface-2);padding:7px 10px;border-radius:8px;overflow-wrap:anywhere}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:14px}
+.kv dt{color:var(--muted)} .kv dd{margin:0;font-weight:600}
+.question{border:1px dashed var(--med);background:var(--med-soft);border-radius:var(--radius-sm);padding:12px 14px}
+.question p{margin:0 0 10px;font-weight:650}
+.btnrow{display:flex;gap:8px;flex-wrap:wrap}
+
+/* ---------- filters / tabs ---------- */
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+.tabs button{border:1px solid var(--border);background:var(--surface);border-radius:99px;padding:5px 12px;font-size:13px;font-weight:600;cursor:pointer;color:var(--muted)}
+.tabs button[aria-pressed="true"]{background:var(--text);color:var(--bg);border-color:var(--text)}
+
+/* ---------- forms ---------- */
+label.field{display:flex;flex-direction:column;gap:5px;font-size:13px;font-weight:600;color:var(--muted)}
+input[type=text],input[type=url],input[type=password],select,textarea{font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--border);border-radius:9px;padding:9px 11px;width:100%}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:0;border-color:transparent}
+.switch{position:relative;width:42px;height:24px;flex:none}
+.switch input{opacity:0;width:0;height:0;position:absolute}
+.switch span{position:absolute;inset:0;border-radius:99px;background:var(--surface-3);transition:.2s;cursor:pointer}
+.switch span::after{content:"";position:absolute;width:18px;height:18px;left:3px;top:3px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:.2s}
+.switch input:checked + span{background:var(--accent)}
+.switch input:checked + span::after{transform:translateX(18px)}
+.switch input:disabled + span{opacity:.6;cursor:not-allowed}
+.switch input:focus-visible + span{outline:2px solid var(--accent);outline-offset:2px}
+.setting{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;padding:12px 0;border-top:1px solid var(--border)}
+.setting:first-of-type{border-top:0}
+.setting .t{font-weight:600} .setting .s{font-size:13px;color:var(--muted)}
+.inline-form{display:flex;gap:8px;flex-wrap:wrap}
+.inline-form input{flex:1;min-width:220px}
+.option-cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.option-card{border:1.5px solid var(--border);border-radius:12px;padding:12px;cursor:pointer;background:var(--surface);text-align:left}
+.option-card[aria-checked="true"]{border-color:var(--accent);background:var(--accent-soft)}
+.option-card b{display:block;margin-bottom:2px}
+.option-card span{font-size:13px;color:var(--muted)}
+
+/* ---------- exposure radar / scout map ---------- */
+.radar{position:relative;aspect-ratio:1;max-width:260px;margin:0 auto}
+.radar svg{width:100%;height:100%}
+.mapwrap{position:relative;background:radial-gradient(circle at 50% 50%,var(--surface-2),var(--surface) 70%);border-radius:var(--radius);border:1px solid var(--border);overflow:hidden}
+.mapwrap svg{display:block;width:100%;height:auto}
+.mapnode{cursor:pointer}
+.mapnode text{font-size:11px;fill:var(--muted);font-family:var(--sans)}
+.mapnode circle.body{fill:var(--surface);stroke:var(--border);stroke-width:1.5}
+.mapnode:hover circle.body,.mapnode.sel circle.body{stroke:var(--accent);stroke-width:2.5}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);padding:10px 14px;border-top:1px solid var(--border)}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;vertical-align:middle}
+
+/* ---------- timeline ---------- */
+.timeline{list-style:none;margin:0;padding:0 0 0 14px;border-left:2px solid var(--border);display:flex;flex-direction:column;gap:12px}
+.timeline li{position:relative;font-size:14px}
+.timeline li::before{content:"";position:absolute;left:-20px;top:6px;width:10px;height:10px;border-radius:50%;background:var(--bg);border:2px solid var(--faint)}
+.timeline li.warn::before{border-color:var(--high)}
+.timeline li.ok::before{border-color:var(--ok)}
+.timeline time{display:block;font-size:12px;color:var(--faint)}
+
+/* ---------- modal / drawer / toast ---------- */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.4);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);display:none;align-items:center;justify-content:center;z-index:50;padding:16px}
+.overlay.open{display:flex}
+.modal{background:var(--surface);backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);border:1px solid var(--border);border-radius:28px;max-width:620px;width:100%;max-height:min(88vh,860px);overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,.35)}
+.modal header{display:flex;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid var(--border);position:sticky;top:0;background:transparent;z-index:1}
+.modal header h3{margin:0;font-size:17px;flex:1}
+.modal .body{padding:18px 20px}
+.modal footer{display:flex;gap:8px;justify-content:flex-end;padding:14px 20px;border-top:1px solid var(--border);position:sticky;bottom:0;background:transparent}
+.dm{font-family:var(--mono);font-size:13px;white-space:pre-wrap;background:var(--surface-2);border-radius:12px;padding:14px;border:1px solid var(--border)}
+.dmhead{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.avatar{width:34px;height:34px;border-radius:50%;background:var(--accent-soft);display:grid;place-items:center;color:var(--accent)}
+.avatar svg{width:22px;height:22px}
+.toasts{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:60}
+.toast{background:var(--text);color:var(--bg);padding:10px 14px;border-radius:11px;font-size:14px;box-shadow:var(--shadow);max-width:360px;animation:fadeUp .25s ease-out}
+.wizard-steps{display:flex;gap:6px;margin-bottom:16px}
+.wizard-steps i{height:5px;flex:1;border-radius:99px;background:var(--surface-3)}
+.wizard-steps i.on{background:var(--accent)}
+.progress{height:8px;border-radius:99px;background:var(--surface-3);overflow:hidden}
+.progress b{display:block;height:100%;width:0;background:var(--accent);border-radius:99px}
+.scanlog{list-style:none;margin:12px 0 0;padding:0;font-family:var(--mono);font-size:12.5px;display:flex;flex-direction:column;gap:4px;min-height:120px}
+.scanlog li{color:var(--muted)} .scanlog li b{color:var(--ok);font-weight:600}
+.promise{display:grid;grid-template-columns:22px 1fr;gap:8px;margin:8px 0}
+.promise svg{width:20px;height:20px;color:var(--ok)}
+
+/* ---------- animation fallback ---------- */
+@keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.no-gsap .card{animation:fadeUp .35s ease-out both}
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+
+/* ---------- responsive ---------- */
+@media (max-width: 1000px){
+  .g4{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .detail{grid-template-columns:1fr}
+}
+/* Phone menu: the same dropdown as the website and the weekly decks. The sidebar folds behind the menu
+   button into one vertical list that scrolls on its own, so every page is a tap away. */
+.nav-menu-toggle,.nav-menu{display:none}
+.nav-menu-link{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:10px;font-size:1rem;font-weight:500;color:var(--text);text-decoration:none;white-space:nowrap}
+.nav-menu-link svg{width:19px;height:19px;flex:none;color:var(--muted)}
+.nav-menu-link:hover,.nav-menu-link:focus-visible{background:var(--surface-2)}
+.nav-menu-link[aria-current="page"]{background:var(--surface-3)}
+.nav-menu-link[aria-current="page"] svg{color:var(--text)}
+.nav-menu .count{margin-left:auto;font-size:12px;font-weight:700;min-width:22px;text-align:center;padding:1px 7px;border-radius:99px;background:var(--crit);color:#fff}
+.nav-menu .count.soft{background:var(--surface-3);color:var(--muted)}
+.nav-menu .tag{margin-left:auto;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--faint)}
+.nav-menu h6{margin:12px 14px 4px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint)}
+.nav-menu .menu-foot{margin:6px 0 0;padding:10px 14px 6px;border-top:1px solid var(--border);font-size:12.5px;color:var(--faint);white-space:normal}
+@media (max-width: 860px){
+  .shell{grid-template-columns:1fr}
+  .side{display:none}
+  .nav-menu-toggle{display:inline-flex}
+  .nav-menu:not([hidden]){
+    display:flex;flex-direction:column;
+    position:absolute;top:calc(100% + 8px);right:16px;
+    width:min(300px,calc(100vw - 32px));
+    max-height:calc(100vh - var(--top-h) - 24px);max-height:calc(100dvh - var(--top-h) - 24px);
+    overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;
+    padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:16px;
+    box-shadow:0 12px 32px rgba(0,0,0,.25)
+  }
+  main{padding:16px 16px 90px}
+  .g2,.g3{grid-template-columns:1fr}
+  .hero{grid-template-columns:auto 1fr}
+  .hero .btnrow{grid-column:1/-1}
+  .option-cards{grid-template-columns:1fr}
+}
+@media (max-width: 520px){
+  .g4{grid-template-columns:1fr 1fr}
+  .row{grid-template-columns:auto minmax(0,1fr)}
+  .row > :last-child{grid-column:2}
+  .pagehead h1{font-size:22px}
+  .top{padding:0 16px;gap:10px}
+}
+@media (max-width: 420px){
+  #scanNow span{display:none}
+  #scanNow{padding:9px 12px}
+}
+
+/* ===================== Skins =====================
+   "Original" is the Sikorski Design System above (light or dark). Six optional skins below each set
+   their own palette, type and shapes. Colour for meaning is kept in every skin: urgency (red, orange,
+   yellow, blue, green) and categories (Bitcoin, Lightning, Nostr, Cashu). Nothing loads from outside. */
+[data-skin]{--crit-soft:color-mix(in srgb,var(--crit) 16%,transparent);--high-soft:color-mix(in srgb,var(--high) 16%,transparent);--med-soft:color-mix(in srgb,var(--med) 18%,transparent);--low-soft:color-mix(in srgb,var(--low) 16%,transparent);--ok-soft:color-mix(in srgb,var(--ok) 16%,transparent);--nostr-soft:color-mix(in srgb,var(--nostr) 16%,transparent)}
+[data-skin]:not([data-skin="original"]) #theme-toggle{display:none}
+[data-skin="cyberpunk"]{--bg:#0b0217;--surface:rgba(25,6,45,.78);--surface-2:rgba(255,0,170,.08);--surface-3:rgba(0,240,255,.13);--text:#f2f0ff;--muted:#b9a8d9;--faint:#7d6aa3;--border:rgba(0,240,255,.35);--accent:#00f0ff;--accent-ink:#0b0217;--accent-soft:rgba(0,240,255,.14);--crit:#ff2e63;--high:#ff9f1c;--med:#f9f871;--low:#3ab0ff;--ok:#39ff14;--btc:#ff9f1c;--ln:#ffd60a;--nostr:#c77dff;--cashu:#ff4fd8;--glass-bg:rgba(11,2,23,.82);--radius:6px;--radius-sm:4px;--sans:"Avenir Next Condensed","Arial Narrow",system-ui,sans-serif}
+[data-skin="cyberpunk"] body{background:radial-gradient(ellipse at top,rgba(255,0,170,.10),transparent 55%),radial-gradient(ellipse at bottom right,rgba(0,240,255,.08),transparent 50%),var(--bg)}
+[data-skin="cyberpunk"] .card{box-shadow:0 0 0 1px rgba(255,0,170,.22),0 0 22px rgba(0,240,255,.10)}
+[data-skin="cyberpunk"] h1,[data-skin="cyberpunk"] .card h2{text-transform:uppercase;letter-spacing:.06em;text-shadow:0 0 12px rgba(0,240,255,.55)}
+[data-skin="cyberpunk"] .btn,[data-skin="cyberpunk"] .tabs button{border-radius:4px;text-transform:uppercase;letter-spacing:.06em}
+[data-skin="cyberpunk"] .btn.primary{box-shadow:0 0 14px rgba(0,240,255,.55)}
+[data-skin="terminal"]{--bg:#020a02;--surface:#031103;--surface-2:rgba(51,255,102,.06);--surface-3:rgba(51,255,102,.13);--text:#b6ffb6;--muted:#6fcf7f;--faint:#3f8f4c;--border:rgba(51,255,102,.35);--accent:#33ff66;--accent-ink:#020a02;--accent-soft:rgba(51,255,102,.12);--crit:#ff5555;--high:#ffb86c;--med:#f1fa8c;--low:#8be9fd;--ok:#50fa7b;--btc:#ffb86c;--ln:#f1fa8c;--nostr:#bd93f9;--cashu:#ff79c6;--glass-bg:rgba(2,10,2,.92);--blur:none;--radius:0px;--radius-sm:0px;--sans:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+[data-skin="terminal"] body{background:repeating-linear-gradient(0deg,rgba(0,0,0,.18) 0 1px,transparent 1px 3px),var(--bg)}
+[data-skin="terminal"] .btn,[data-skin="terminal"] .tabs button,[data-skin="terminal"] .chip,[data-skin="terminal"] .pill,[data-skin="terminal"] input,[data-skin="terminal"] select,[data-skin="terminal"] .nav a,[data-skin="terminal"] .nav-menu-link,[data-skin="terminal"] .modal,[data-skin="terminal"] .option-card{border-radius:0}
+[data-skin="terminal"] #main h1::before{content:"> ";color:var(--accent)}
+[data-skin="terminal"] h1,[data-skin="terminal"] h2,[data-skin="terminal"] h3{letter-spacing:0}
+[data-skin="terminal"] h1,[data-skin="terminal"] .stat .n{text-shadow:0 0 8px rgba(51,255,102,.45)}
+[data-skin="beach"]{--bg:#fbf5ea;--surface:rgba(255,255,255,.78);--surface-2:rgba(10,142,160,.06);--surface-3:rgba(10,142,160,.12);--text:#103a45;--muted:rgba(16,58,69,.68);--faint:rgba(16,58,69,.46);--border:rgba(16,58,69,.13);--accent:#0a8ea0;--accent-ink:#ffffff;--accent-soft:rgba(10,142,160,.12);--crit:#d93d3d;--high:#e0662f;--med:#a87400;--low:#2b7cb8;--ok:#2e9e6a;--btc:#e0662f;--ln:#c98a00;--nostr:#8a4fc9;--cashu:#e0457b;--glass-bg:rgba(251,245,234,.82);--radius:26px;--radius-sm:16px;--sans:ui-rounded,"SF Pro Rounded","Arial Rounded MT Bold",system-ui,sans-serif}
+[data-skin="beach"] body{background:linear-gradient(180deg,#e3f4f6 0,#fbf5ea 340px) fixed}
+[data-skin="beach"] .card{box-shadow:0 6px 24px rgba(16,58,69,.07)}
+[data-skin="steampunk"]{--bg:#1e140c;--surface:rgba(52,36,22,.88);--surface-2:rgba(201,149,64,.10);--surface-3:rgba(201,149,64,.18);--text:#f3e2c3;--muted:#cdb38a;--faint:#9c825c;--border:rgba(201,149,64,.55);--accent:#d4a24c;--accent-ink:#1e140c;--accent-soft:rgba(212,162,76,.16);--crit:#e2543a;--high:#e88a2c;--med:#e0c04a;--low:#7fb3c8;--ok:#8fbf6a;--btc:#e88a2c;--ln:#e0c04a;--nostr:#b48ad6;--cashu:#e07a95;--glass-bg:rgba(30,20,12,.9);--radius:10px;--radius-sm:6px;--sans:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif}
+[data-skin="steampunk"] body{background:radial-gradient(ellipse at center,rgba(212,162,76,.07),transparent 70%),var(--bg)}
+[data-skin="steampunk"] .card{box-shadow:inset 0 0 0 3px rgba(30,20,12,.65),inset 0 0 0 4px rgba(212,162,76,.32)}
+[data-skin="steampunk"] h1,[data-skin="steampunk"] .card h2,[data-skin="steampunk"] .brand{font-variant:small-caps;letter-spacing:.03em}
+[data-skin="steampunk"] .btn.primary{background:linear-gradient(180deg,#e7bd6a,#b9862f);border-color:#8a6220;color:#1e140c}
+[data-skin="paper"]{--bg:#f4f1ea;--surface:#fbfaf6;--surface-2:rgba(0,0,0,.035);--surface-3:rgba(0,0,0,.07);--text:#1a1a1a;--muted:#4f4f4f;--faint:#7c7c7c;--border:rgba(26,26,26,.22);--accent:#1a1a1a;--accent-ink:#f4f1ea;--accent-soft:rgba(0,0,0,.06);--crit:#b3261e;--high:#b35c00;--med:#856a00;--low:#1f5f99;--ok:#2e6b3f;--btc:#b35c00;--ln:#856a00;--nostr:#6b3fa0;--cashu:#a8325e;--glass-bg:rgba(244,241,234,.95);--blur:none;--radius:2px;--radius-sm:2px;--sans:Charter,"Iowan Old Style",Georgia,serif}
+[data-skin="paper"] .btn,[data-skin="paper"] .tabs button,[data-skin="paper"] .option-card,[data-skin="paper"] .modal{border-radius:3px}
+[data-skin="paper"] h1{border-bottom:2px solid var(--text);padding-bottom:4px}
+[data-skin="forest"]{--bg:#0f1a14;--surface:rgba(22,38,29,.82);--surface-2:rgba(160,200,140,.07);--surface-3:rgba(160,200,140,.13);--text:#e8f0e3;--muted:#a9bfa2;--faint:#748c70;--border:rgba(160,200,140,.22);--accent:#c8e6a0;--accent-ink:#0f1a14;--accent-soft:rgba(200,230,160,.13);--crit:#ff6b5b;--high:#f0a04b;--med:#e9d26a;--low:#7cc6d6;--ok:#8fd694;--btc:#f0a04b;--ln:#e9d26a;--nostr:#c59be6;--cashu:#f28fb0;--glass-bg:rgba(15,26,20,.85);--radius:16px;--radius-sm:10px}
+[data-skin="forest"] body{background:radial-gradient(ellipse at top left,rgba(143,214,148,.07),transparent 60%),var(--bg)}
+.skin-card{display:flex;flex-direction:column;gap:8px}
+.skin-swatches{display:flex;gap:6px}
+.skin-swatches i{width:22px;height:22px;border-radius:50%;border:1px solid rgba(128,128,128,.35)}
+
+/* Mock-up banner: on every screen and in every dialog (public preview) */
+.mockbanner{display:flex;gap:12px;align-items:flex-start;margin:0 0 18px;padding:12px 14px;border-radius:var(--radius-sm);background:var(--high-soft);border:1px solid var(--high);color:var(--text);font-size:13.5px;line-height:1.5}
+.mockbanner svg{width:20px;height:20px;flex:none;margin-top:1px;color:var(--high)}
+.mockbanner a{color:inherit;font-weight:600;white-space:nowrap}
+.mocknote{margin:0 0 12px;padding:8px 10px;border-radius:10px;background:var(--high-soft);border:1px solid var(--high);font-size:12.5px;color:var(--text)}
+.noscript-banner{margin:16px;padding:14px;border:1px solid #ff9f0a;border-radius:12px}
+@media (max-width:520px){.top .hide-sm{display:none}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-dog" viewBox="0 0 64 64"><path fill="currentColor" fill-rule="evenodd" d="M32 4 8 12v17c0 14 9 25 24 31 15-6 24-17 24-31V12L32 4Zm0 6 18 6v13c0 11-6 20-18 25-12-5-18-14-18-25V16l18-6Z"/><path fill="currentColor" fill-rule="evenodd" d="M20 18c0-1 1-1 2 0l7 7h6l7-7c1-1 2-1 2 0v16c0 8-5 13-12 16-7-3-12-8-12-16V18Zm4 14v4h5v-4h-5Zm11 0v4h5v-4h-5Zm-7 9 4 5 4-5h-8Z"/></symbol>
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1v-9.5Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2.5 20h19L12 3Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4.5m0 2.6v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></symbol>
+    <symbol id="i-box" viewBox="0 0 24 24"><path d="m12 2.8 8.5 4.6v9.2L12 21.2l-8.5-4.6V7.4L12 2.8Z M3.8 7.6 12 12l8.2-4.4M12 12v9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M3 12h18M12 3c2.6 2.6 3.8 5.6 3.8 9s-1.2 6.4-3.8 9c-2.6-2.6-3.8-5.6-3.8-9S9.4 5.6 12 3Z" fill="none" stroke="currentColor" stroke-width="1.7"/></symbol>
+    <symbol id="i-radar" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="12" cy="12" r="5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 12 18.4 5.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.7"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="14" r="4.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="m11.2 10.8 8.3-8.3m-3 3 2.5 2.5m-5-.1 2 2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+    <symbol id="i-git" viewBox="0 0 24 24"><circle cx="6" cy="5.5" r="2.3" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="6" cy="18.5" r="2.3" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="18" cy="8.5" r="2.3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M6 7.8v8.4M18 10.8c0 4-4 4.6-9.8 6.4" fill="none" stroke="currentColor" stroke-width="1.7"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m4.5 12.5 4.8 4.8L19.5 7" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-check-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="m7.8 12.3 2.9 2.9 5.5-5.6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 2.8v2.4m0 13.6v2.4M2.8 12h2.4m13.6 0h2.4M5.5 5.5l1.7 1.7m9.6 9.6 1.7 1.7m0-13-1.7 1.7m-9.6 9.6-1.7 1.7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+    <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6.2L4.6 18.6A1.6 1.6 0 0 0 6 21h12a1.6 1.6 0 0 0 1.4-2.4L14 9.2V3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M7.5 15h9" stroke="currentColor" stroke-width="1.7"/></symbol>
+    <symbol id="i-tap" viewBox="0 0 24 24"><path d="M9 11V5.5a1.5 1.5 0 0 1 3 0V11m0-1.5a1.5 1.5 0 0 1 3 0V11m0-.5a1.5 1.5 0 0 1 3 0v4.6c0 3.2-2.4 5.9-5.6 5.9h-.6c-2 0-3.4-.9-4.6-2.6L4.8 14a1.6 1.6 0 0 1 2.5-2l1.7 1.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11.5A8 8 0 0 0 5.6 6.8L4 8.5M4 4v4.5h4.5M4 12.5a8 8 0 0 0 14.4 4.7L20 15.5M20 20v-4.5h-4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 2.5v2m0 15v2M2.5 12h2m15 0h2M5.3 5.3l1.4 1.4m10.6 10.6 1.4 1.4m0-13.4-1.4 1.4M6.7 17.3l-1.4 1.4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15l1.5-2ZM10 20.5a2 2 0 0 0 4 0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 11v5.5m0-8.6v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></symbol>
+    <symbol id="i-blind" viewBox="0 0 24 24"><path d="M3.5 3.5l17 17M10.4 6A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a17 17 0 0 1-3 3.8M6.2 7.6A16 16 0 0 0 2.5 12S6 18.5 12 18.5c1.6 0 3-.4 4.3-1.1M9.9 10a3 3 0 0 0 4.1 4.1" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2.5 4.5 13.5H11l-1 8 8.5-11H12l1-8Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+    <symbol id="i-btc" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9.5 7.5h3.6a2.1 2.1 0 0 1 0 4.2H9.5m0 0h4.2a2.4 2.4 0 0 1 0 4.8H9.5V7.5m1.6-2v2m0 9v2m2-13v2m0 9v2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-nostr" viewBox="0 0 24 24"><path d="M5 19c1.5-5 4-8.5 8-10.5M13 8.5c2.2-1 4.4-1.3 6-.8-.4 2.6-2 5-4.6 6.3M14.4 14c-1.8.9-4 1.2-6.4.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="17.5" cy="5.5" r="1.5" fill="currentColor"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 9 4.8-9 4.8-9-4.8L12 3Zm-9 9 9 4.8 9-4.8M3 16.2 12 21l9-4.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+    <symbol id="i-coin" viewBox="0 0 24 24"><ellipse cx="12" cy="7" rx="7.5" ry="3.3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M4.5 7v5c0 1.8 3.4 3.3 7.5 3.3s7.5-1.5 7.5-3.3V7m-15 5v5c0 1.8 3.4 3.3 7.5 3.3s7.5-1.5 7.5-3.3v-5" fill="none" stroke="currentColor" stroke-width="1.7"/></symbol>
+    <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9.5 2.5v3.5m5-3.5v3.5m-5 12v3.5m5-3.5v3.5M2.5 9.5H6m-3.5 5H6m12-5h3.5m-3.5 5h3.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" fill="none" stroke="currentColor" stroke-width="1.7"/></symbol>
+    <symbol id="i-heart" viewBox="0 0 24 24"><path d="M3 12h4l2-4 3.5 8 2.5-5 1.5 1H21" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  </defs>
+</svg>
+
+<header class="top header-nav">
+  <a class="brand" href="#/overview" id="logo-refresh" title="Back to the overview" aria-label="Guard Dog mock-up: back to the overview"><svg><use href="#i-dog"/></svg>Guard Dog</a>
+  <div class="node hide-lg"><b>regtest-node.local</b><span>Umbrel · watching 24 things</span></div>
+  <span class="sample" title="Everything on this page is made up">Mock-up<span class="hide-sm"> · sample data</span></span>
+  <div class="grow"></div>
+  <button class="btn hide-lg" id="previewAlert" type="button"><svg><use href="#i-bell"/></svg>Preview an alert</button>
+  <button class="btn primary" id="scanNow" type="button"><svg id="scanIcon"><use href="#i-refresh"/></svg><span>Scan now</span></button>
+  <button id="nav-menu-toggle" class="btn iconbtn nav-menu-toggle" type="button" aria-label="Menu" aria-expanded="false" aria-controls="nav-menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path id="menu-icon-path" d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <nav class="nav-menu" id="nav-menu" aria-label="Main menu" hidden></nav>
+  <button id="theme-toggle" class="btn iconbtn theme-toggle" type="button" aria-label="Toggle Theme"><svg id="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path class="sun-path" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg></button>
+</header>
+
+<div class="shell">
+  <nav class="side" aria-label="Main">
+    <div class="nav" id="nav"></div>
+    <div class="foot"><b>Mock-up of planned software.</b><br>Pre-alpha. Made-up data; nothing is real or connected.<br><a href="#" id="startWizard">Replay first-time setup</a><br><a href="../">← Guard Dog website</a><br><a href="../#support">Support Guard Dog</a> · <a href="../#contribute">Help build it</a></div>
+  </nav>
+  <main id="main" tabindex="-1"><noscript><div class="noscript-banner"><b>This is a mock-up of planned software.</b> Guard Dog is pre-alpha: none of these screens exist yet and there is nothing to install. Every name, version, number and address here is made up (sample regtest data). Buttons only change this page; nothing is sent anywhere. This mock-up needs JavaScript to click through. <a href="../">Back to the website</a></div></noscript></main>
+</div>
+
+<div class="overlay" id="overlay" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+  <div class="modal" id="modal"></div>
+</div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script>
+"use strict";
+/* ======================================================================
+   SAMPLE DATA (made up for the mock-up; versions and findings are examples)
+   ====================================================================== */
+const D = {
+  node: { name: "regtest-node.local", platform: "Umbrel", os: "umbrelOS 1.4 (sample)" },
+  lastCheckMin: 3,
+  findings: [
+    { id: "GD-SAMPLE-0001", sev: "critical", status: "affected", area: "Lightning",
+      title: "Alby Hub is reachable from the internet and has a wallet-takeover flaw",
+      service: "Alby Hub", version: "1.18.2", fixed: "1.19.0", safest: "1.24.0", when: "12 min ago",
+      why: "Versions 1.7.0 to 1.18.5 have a flaw that can let an attacker take over the wallet and send its funds, but only when the Hub can be reached from the internet. Yours can: your router forwards port 8080 to it.",
+      evidence: [
+        "Umbrel app \"Alby Hub\" v1.18.2 (image digest pinned by Umbrel)",
+        "Router UPnP mapping: TCP 8080 → 192.0.2.20:8080 (\"alby-hub\")",
+        "Outside-in probe by your buddy's Guard Dog, 2 h ago: port 8080 open, page title \"Alby Hub\""
+      ],
+      playbook: [
+        "Cut internet access first: remove the router's port mapping (one tap below), or turn off UPnP on the router.",
+        "Update Alby Hub to 1.24.0 through Umbrel (one tap below).",
+        "Change the Hub's unlock password.",
+        "Because it was exposed while on an affected version, follow the extra steps in Alby's security notice."
+      ],
+      actions: [ { id: "act-upnp", label: "Remove the router port mapping" }, { id: "act-update", label: "Update Alby Hub to 1.24.0" } ],
+      source: "Alby security notice (Sept 2026) · curated by 2 of your 3 trusted signers" },
+    { id: "GD-SAMPLE-0002", sev: "high", status: "possibly", area: "Registered device",
+      title: "Your Coldcard \"Safe deposit\" may hold a weak seed",
+      service: "Coldcard Mk4 (registered by you)", version: "firmware before the July 2026 fix", fixed: "the July 2026 patch", safest: "a new seed, made with dice", when: "registered 2 days ago",
+      why: "Coldcard firmware from before the July 2026 fix could create predictable seeds. Updating the firmware does NOT fix a seed that already exists. Guard Dog needs one answer to know whether you're affected.",
+      evidence: [ "Registered device: Coldcard Mk4, firmware 5.x (entered by you)", "Advisory range covers this model and firmware" ],
+      question: { text: "How was this wallet's seed created?", options: ["On the Coldcard itself", "With dice rolls", "Imported from somewhere else"] },
+      playbook: [
+        "If the seed was made on the device: create a NEW seed on patched firmware, ideally with dice rolls.",
+        "Move all funds from the old wallet to the new one.",
+        "Only then retire the old seed backup."
+      ],
+      actions: [],
+      source: "Coinkite advisory (July 2026) · curated" },
+    { id: "GD-SAMPLE-0003", sev: "high", status: "affected", area: "Bitcoin",
+      title: "Bitcoin Core's control port answers on your home network",
+      service: "Bitcoin Core", version: "28.1", fixed: "a settings change", safest: "28.1 (you're on it)", when: "today",
+      why: "Port 8332 (RPC) listens on every address, so any device on your Wi-Fi can try to talk to your node's control interface. Only your own apps on this box need it.",
+      evidence: [ "Listener 0.0.0.0:8332 (bitcoind)", "Reachable from 192.0.2.0/24 according to the firewall rules" ],
+      playbook: [ "Bind RPC to the local Docker network only (one tap below).", "Keep rpcallowip limited to the apps that need it." ],
+      actions: [ { id: "act-rpc", label: "Bind RPC to the local network only" } ],
+      source: "Guard Dog configuration check" },
+    { id: "GD-SAMPLE-0004", sev: "medium", status: "possibly", area: "Scout",
+      title: "A second Bitcoin node on your network runs a very old version",
+      service: "Bitcoin Core 0.21.1 at 192.0.2.40 (found by Scout)", version: "0.21.1", fixed: "25.0 and newer", safest: "28.1", when: "yesterday",
+      why: "Scout recognized it from its handshake (\"/Satoshi:0.21.1/\"). Versions older than 25.0 have publicly disclosed vulnerabilities. Is this an old node you forgot about?",
+      evidence: [ "Bitcoin P2P version handshake on 192.0.2.40:8333 → /Satoshi:0.21.1/", "Device vendor: Raspberry Pi (from its hardware address)" ],
+      question: { text: "Is this device yours?", options: ["Yes, I'll update or retire it", "No, I don't know it"] },
+      playbook: [ "If it's yours: update it, or move anything on it and switch it off.", "If you don't know it: unplug it or block it on your router, then look into it." ],
+      actions: [],
+      source: "Bitcoin Core disclosures · Scout" },
+    { id: "GD-SAMPLE-0005", sev: "medium", status: "affected", area: "Network",
+      title: "UPnP is turned on in your router",
+      service: "Router 192.0.2.1", version: "—", fixed: "a router setting", safest: "UPnP off", when: "today",
+      why: "UPnP lets any app on your network open ports to the internet without asking you. That's how Alby Hub ended up exposed.",
+      evidence: [ "Router answered a UPnP port-mapping request list", "1 mapping found" ],
+      playbook: [ "Open your router's settings (usually Advanced → NAT or UPnP) and turn UPnP off.", "Forward only the ports you choose, by hand." ],
+      actions: [],
+      source: "Guard Dog exposure check" },
+    { id: "GD-SAMPLE-0006", sev: "low", status: "affected", area: "Base layer",
+      title: "SSH accepts password logins",
+      service: "OpenSSH", version: "9.2p1", fixed: "a settings change", safest: "keys only", when: "today",
+      why: "Keys are far harder to guess than passwords. Your node is only reachable on your LAN, so this is low, but worth fixing.",
+      evidence: [ "sshd_config: PasswordAuthentication yes" ],
+      playbook: [ "Add your SSH key to the node.", "Set PasswordAuthentication to no and restart SSH." ],
+      actions: [],
+      source: "Guard Dog configuration check" },
+    { id: "GD-SAMPLE-0007", sev: "low", status: "possibly", area: "Scout",
+      title: "New device joined your network: \"ESP_3C1A2B\"",
+      service: "192.0.2.57 (Espressif)", version: "—", fixed: "—", safest: "—", when: "today 09:12",
+      why: "Espressif chips are in smart plugs, sensors and lights. It's probably yours. Name it so Guard Dog knows.",
+      evidence: [ "First seen today 09:12 via ARP", "mDNS name: ESP_3C1A2B.local" ],
+      question: { text: "Do you know this device?", options: ["Yes, it's mine", "No"] },
+      playbook: [ "If it's yours, name it.", "If not, block it on your router and change your Wi-Fi password." ],
+      actions: [],
+      source: "Scout" },
+    { id: "GD-SAMPLE-0099", sev: "high", status: "resolved", area: "Lightning",
+      title: "LND was on a version with a published advisory",
+      service: "LND", version: "now v0.18.5-beta", fixed: "—", safest: "—", when: "resolved 3 days ago",
+      why: "Updated through Umbrel after Guard Dog's alert. A later scan confirmed the new version.", evidence: [], playbook: [], actions: [], source: "Sample" }
+  ],
+  inventory: [
+    { group: "Bitcoin", icon: "i-btc", items: [
+      { name: "Bitcoin Core", v: "28.1", safest: "28.1", by: "RPC (read-only user)", level: "Understood", sev: "high", note: "RPC open to LAN" } ] },
+    { group: "Lightning", icon: "i-bolt", items: [
+      { name: "LND", v: "0.18.5-beta", safest: "0.18.5-beta", by: "read-only macaroon", level: "Understood", sev: "ok" },
+      { name: "Alby Hub", v: "1.18.2", safest: "1.24.0", by: "Umbrel app + image", level: "Understood", sev: "critical" },
+      { name: "ThunderHub", v: "0.13.x", safest: "0.13.x", by: "Umbrel app", level: "Recognized", sev: "ok" } ] },
+    { group: "Bitcoin services", icon: "i-layers", items: [
+      { name: "BTCPay Server", v: "2.0.8", safest: "2.0.8", by: "Greenfield API", level: "Recognized", sev: "ok" },
+      { name: "Fulcrum", v: "1.12.0", safest: "1.12.0", by: "server.version", level: "Recognized", sev: "ok" },
+      { name: "mempool", v: "3.2.1", safest: "3.2.1", by: "Umbrel app", level: "Recognized", sev: "ok" } ] },
+    { group: "Ecash", icon: "i-coin", items: [
+      { name: "Cashu mint (Nutshell)", v: "0.16.5", safest: "0.16.5", by: "NUT-06 info", level: "Recognized", sev: "ok" },
+      { name: "Fedimint guardian", v: "0.7.2", safest: "0.7.2", by: "image", level: "Recognized", sev: "ok" } ] },
+    { group: "Nostr", icon: "i-nostr", items: [
+      { name: "strfry relay", v: "1.0.4", safest: "1.0.4", by: "NIP-11", level: "Recognized", sev: "ok" },
+      { name: "Blossom server", v: "3.1.0", safest: "3.1.0", by: "image", level: "Recognized", sev: "ok" },
+      { name: "nsecBunker (NIP-46)", v: "0.10.x", safest: "0.10.x", by: "image", level: "Recognized", sev: "ok" } ] },
+    { group: "Base layer", icon: "i-cpu", items: [
+      { name: "umbrelOS", v: "1.4.x", safest: "1.4.x", by: "platform", level: "Recognized", sev: "ok" },
+      { name: "Debian", v: "12", safest: "12", by: "os-release", level: "Recognized", sev: "ok" },
+      { name: "Docker", v: "27.x", safest: "27.x", by: "read-only proxy", level: "Recognized", sev: "ok" },
+      { name: "Tor", v: "0.4.8.x", safest: "0.4.8.x", by: "package", level: "Recognized", sev: "ok" },
+      { name: "OpenSSH", v: "9.2p1", safest: "9.2p1", by: "package", level: "Recognized", sev: "low", note: "password logins" } ] },
+    { group: "Not recognized yet", icon: "i-box", items: [
+      { name: "my-zap-bot (container)", v: "0.3.0", safest: "?", by: "image label points to a git repo", level: "Unrecognized", sev: "info", note: "Watch its repo?" } ] }
+  ],
+  blindSpots: [
+    { t: "Hardware wallets", s: "Guard Dog only knows the 2 devices you registered." },
+    { t: "Your phone and laptop", s: "Only the 4 apps you registered. No agent runs there." },
+    { t: "Router settings", s: "It can read port mappings, not your router's full configuration." },
+    { t: "Backups", s: "Answer the backup checklist so Guard Dog knows where your seed and channel backups live." },
+    { t: "Outside-in view of your clearnet IP", s: "Last seen by your buddy 2 h ago; nothing since." }
+  ],
+  exposure: {
+    internet: [ { what: "Alby Hub web UI", how: "Router UPnP: 8080 → 192.0.2.20:8080", seen: "Buddy probe + router", sev: "critical" } ],
+    tor: [ { what: "LND REST", how: "Onion service (needs a macaroon)", seen: "Checked over Tor", sev: "ok" },
+           { what: "BTCPay Server", how: "Onion service (store front)", seen: "Checked over Tor", sev: "ok" } ],
+    tailnet: [ { what: "Umbrel dashboard", how: "Tailscale Serve, your tailnet only", seen: "tailscale serve status", sev: "ok" } ],
+    lan: [ { what: "Bitcoin Core RPC :8332", how: "Listens on all addresses", seen: "Listener + firewall", sev: "high" },
+           { what: "strfry relay :7777", how: "LAN and onion, expected", seen: "Listener", sev: "ok" },
+           { what: "SSH :22", how: "Password logins allowed", seen: "sshd_config", sev: "low" } ]
+  },
+  devices: [
+    { ip: "192.0.2.1", name: "Router", vendor: "Netgear", kind: "router", known: true, ports: "53, 80, 443, 1900", fp: "UPnP on" },
+    { ip: "192.0.2.20", name: "regtest-node.local (this node)", vendor: "Raspberry Pi", kind: "node", known: true, ports: "22, 80, 8080, 8333, 9735", fp: "Umbrel · Bitcoin Core 28.1 · LND" },
+    { ip: "192.0.2.40", name: "Unknown Bitcoin node", vendor: "Raspberry Pi", kind: "btc", known: false, ports: "22, 8333", fp: "/Satoshi:0.21.1/" },
+    { ip: "192.0.2.23", name: "Laptop", vendor: "Apple", kind: "laptop", known: true, ports: "—", fp: "" },
+    { ip: "192.0.2.31", name: "Phone", vendor: "Apple", kind: "phone", known: true, ports: "—", fp: "" },
+    { ip: "192.0.2.35", name: "Living-room TV", vendor: "LG", kind: "tv", known: true, ports: "3000, 9955", fp: "" },
+    { ip: "192.0.2.44", name: "Printer", vendor: "HP", kind: "printer", known: true, ports: "80, 631, 9100", fp: "" },
+    { ip: "192.0.2.50", name: "NAS", vendor: "Synology", kind: "nas", known: true, ports: "5000, 5001, 445", fp: "" },
+    { ip: "192.0.2.57", name: "ESP_3C1A2B", vendor: "Espressif", kind: "iot", known: false, ports: "80", fp: "new today" },
+    { ip: "192.0.2.62", name: "Guest phone", vendor: "Samsung", kind: "phone", known: true, ports: "—", fp: "" }
+  ],
+  attackChecks: [
+    { t: "Gateway hardware address is steady", s: "Same MAC for 30 days (ARP-spoofing check)" },
+    { t: "Only one DHCP server answers", s: "Your router (rogue-DHCP check)" },
+    { t: "No unexpected IPv6 router adverts", s: "Rogue-router check" },
+    { t: "DNS servers unchanged", s: "The same two servers since the first scan" }
+  ],
+  timeline: [
+    { t: "Today 09:12", e: "New device ESP_3C1A2B joined (192.0.2.57)", c: "warn" },
+    { t: "Yesterday 21:40", e: "192.0.2.40 answered as Bitcoin Core 0.21.1", c: "warn" },
+    { t: "3 days ago", e: "LND updated to 0.18.5-beta; advisory resolved", c: "ok" },
+    { t: "5 days ago", e: "Router created UPnP mapping 8080 → 192.0.2.20", c: "warn" },
+    { t: "12 days ago", e: "Guest phone joined and was marked known", c: "" }
+  ],
+  watch: {
+    wallets: [
+      { name: "Cold storage (2-of-3 multisig)", s: "3 xpubs, watch-only · no spends in 214 days", ok: true },
+      { name: "Spending wallet", s: "Spend 2 days ago, which you announced beforehand", ok: true } ],
+    npub: { s: "npub1sample…k9x · profile, follows and relay list unchanged · 4 relays watched", ok: true },
+    lightning: { s: "6 channels · no unexpected closes · no new peers this week · biggest payment out 41,000 sats", ok: true },
+    canaries: [
+      { name: "Decoy wallet", s: "you made and funded it (12,000 sats); Guard Dog only watches its address · untouched" },
+      { name: "Decoy nsec", s: "a throwaway key you made; Guard Dog only watches for it on relays · never used" },
+      { name: "Decoy macaroon", s: "a revoked, useless macaroon left as bait; any login try with it alarms · never used" } ],
+    health: [
+      { name: "Node up", s: "41 days", ok: true },
+      { name: "Disk", s: "61% used · full in about 14 months", ok: true },
+      { name: "Force-closes", s: "none in 90 days", ok: true } ]
+  },
+  registered: {
+    devices: [
+      { name: "Safe deposit", vendor: "Coldcard", model: "Mk4", fw: "5.x", sev: "possibly" },
+      { name: "Daily", vendor: "Blockstream Jade", model: "Jade", fw: "1.0.x", sev: "ok" } ],
+    apps: [
+      { name: "Sparrow Wallet", where: "Laptop", v: "2.x", sev: "ok" },
+      { name: "Zeus", where: "Phone", v: "0.x", sev: "ok" },
+      { name: "Amber (Nostr signer)", where: "Phone", v: "3.x", sev: "ok" },
+      { name: "Alby browser extension", where: "Browser", v: "3.x", sev: "ok" } ]
+  },
+  repos: [
+    { url: "github.com/getAlby/hub", linked: "Alby Hub (Umbrel app)", yours: "1.18.2", latest: "1.24.0", adv: 1 },
+    { url: "github.com/hoytech/strfry", linked: "strfry relay", yours: "1.0.4", latest: "1.0.4", adv: 0 },
+    { url: "codeberg.org/example/zap-bot", linked: "my-zap-bot (container)", yours: "0.3.0", latest: "0.3.1", adv: 0 }
+  ],
+  approvals: [
+    { code: "YES-7F3K", label: "Remove the router port mapping 8080 → 192.0.2.20:8080", from: "GD-SAMPLE-0001",
+      dry: [ "Router: delete UPnP mapping TCP 8080 → 192.0.2.20:8080 (\"alby-hub\")", "Nothing else changes.", "Undo: re-create the mapping (offered for 24 h)." ], expires: 28 }
+  ],
+  settings: {
+    channels: [
+      { id: "nostr", name: "Nostr DM (NIP-17)", s: "to npub1sample…k9x via your inbox relays", on: true },
+      { id: "ntfy", name: "ntfy push", s: "your own ntfy server, topic kept secret", on: true },
+      { id: "signal", name: "Signal / Telegram", s: "optional, through your own bot or number", on: false },
+      { id: "email", name: "Email", s: "weekly digest only", on: true } ],
+    ai: "off"
+  }
+};
+
+/* ======================================================================
+   Helpers
+   ====================================================================== */
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const esc = (v) => String(v).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const icon = (id, extra = "") => `<svg ${extra} aria-hidden="true"><use href="#${id}"/></svg>`;
+const SEV = { critical: 0, high: 1, medium: 2, low: 3 };
+const sevLabel = { critical: "Critical", high: "High", medium: "Medium", low: "Low", ok: "OK", info: "Info", possibly: "Possibly affected" };
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const hasGsap = () => typeof window.gsap !== "undefined" && !reduced;
+const open = () => D.findings.filter(f => f.status !== "resolved");
+const chip = (sev, text) => `<span class="chip ${esc(sev)}">${esc(text || sevLabel[sev] || sev)}</span>`;
+
+function toast(msg) {
+  const t = document.createElement("div");
+  t.className = "toast"; t.textContent = msg;
+  $("#toasts").appendChild(t);
+  setTimeout(() => { t.style.transition = "opacity .3s"; t.style.opacity = "0"; setTimeout(() => t.remove(), 320); }, 3200);
+}
+
+function mockBanner() {
+  return `<div class="mockbanner" role="note" aria-label="Mock-up notice">${icon("i-info")}<div><b>This is a mock-up of planned software.</b> Guard Dog is pre-alpha: none of these screens exist yet and there is nothing to install. Every name, version, number and address here is made up (sample regtest data). Buttons only change this page; nothing is sent anywhere. <a href="../">Back to the website</a></div></div>`;
+}
+
+function disclaimer() {
+  return `<div class="disclaimer">${icon("i-info")}<div><b>No known issues is not the same as secure.</b> Last checked ${D.lastCheckMin} min ago · ${D.blindSpots.length} blind spots · Guard Dog helps you keep watch; it does not replace your judgment.</div></div>`;
+}
+
+/* ======================================================================
+   Navigation
+   ====================================================================== */
+const PAGES = [
+  { id: "overview", label: "Overview", icon: "i-home" },
+  { id: "findings", label: "Findings", icon: "i-alert", count: () => open().length },
+  { id: "inventory", label: "Inventory", icon: "i-box" },
+  { id: "exposure", label: "Exposure", icon: "i-globe" },
+  { id: "scout", label: "Scout", icon: "i-radar", soft: () => D.devices.filter(d => !d.known).length },
+  { id: "watch", label: "Watch & tripwires", icon: "i-eye" },
+  { section: "You tell it" },
+  { id: "registered", label: "Registered", icon: "i-key" },
+  { id: "repos", label: "Watched repos", icon: "i-git" },
+  { section: "You decide" },
+  { id: "approvals", label: "Approvals", icon: "i-tap", count: () => D.approvals.length },
+  { id: "settings", label: "Settings", icon: "i-gear" },
+  { id: "lab", label: "Lab", icon: "i-flask", tag: "later" }
+];
+
+function renderNav(current) {
+  const items = (cls) => PAGES.map(p => {
+    if (p.section) return `<h6>${esc(p.section)}</h6>`;
+    const c = p.count ? p.count() : 0, s = p.soft ? p.soft() : 0;
+    const badge = c ? `<span class="count">${c}</span>` : s ? `<span class="count soft">${s}</span>` : p.tag ? `<span class="tag">${esc(p.tag)}</span>` : "";
+    return `<a ${cls ? `class="${cls}" ` : ""}href="#/${p.id}" ${p.id === current ? 'aria-current="page"' : ""}>${icon(p.icon)}<span>${esc(p.label)}</span>${badge}</a>`;
+  }).join("");
+  $("#nav").innerHTML = items("");
+  $("#nav-menu").innerHTML = items("nav-menu-link") +
+    `<div class="menu-foot"><b>Mock-up of planned software</b> with made-up data. <a href="#" id="startWizardMenu">Replay first-time setup</a><br><a href="../">← Guard Dog website</a><br><a href="../#support">Support Guard Dog</a> · <a href="../#contribute">Help build it</a></div>`;
+}
+
+/* Phone dropdown menu (same behaviour as the website's) */
+const hamburgerPath = "M4 6h16M4 12h16M4 18h16", closePath = "M6 6l12 12M6 18L18 6";
+function setMenu(open) {
+  const menu = $("#nav-menu"), btn = $("#nav-menu-toggle");
+  if (!menu || menu.hidden === !open) return;
+  menu.hidden = !open;
+  btn.setAttribute("aria-expanded", String(open));
+  $("#menu-icon-path").setAttribute("d", open ? closePath : hamburgerPath);
+  if (open) {
+    const cur = menu.querySelector('[aria-current="page"]');
+    menu.scrollTop = 0;
+    if (cur) cur.scrollIntoView({ block: "nearest" });
+    if (hasGsap()) gsap.fromTo(menu, { opacity: 0, y: -6 }, { opacity: 1, y: 0, duration: 0.3, ease: "power2.out" });
+  }
+}
+
+function route() {
+  const parts = (location.hash.replace(/^#\/?/, "") || "overview").split("/");
+  const page = parts[0], arg = parts[1] ? decodeURIComponent(parts[1]) : null;
+  renderNav(page);
+  const fn = VIEWS[page] || VIEWS.overview;
+  $("#main").innerHTML = mockBanner() + fn(arg);
+  after(page, arg);
+  animateIn();
+  $("#main").focus({ preventScroll: true });
+  window.scrollTo({ top: 0 });
+}
+
+function animateIn() {
+  if (hasGsap()) {
+    gsap.from("#main .card", { y: 20, opacity: 0, duration: .8, stagger: .05, ease: "power4.out", clearProps: "transform,opacity" });
+  }
+}
+
+/* ======================================================================
+   Views
+   ====================================================================== */
+const VIEWS = {};
+
+VIEWS.overview = () => {
+  const o = open();
+  const counts = { critical: 0, high: 0, medium: 0, low: 0 };
+  o.forEach(f => counts[f.sev]++);
+  const urgent = o.filter(f => f.sev === "critical" || f.sev === "high").sort((a, b) => SEV[a.sev] - SEV[b.sev]);
+  const top = urgent[0];
+  return `
+  <div class="pagehead"><div><h1>Overview</h1><p>Everything Guard Dog watches on ${esc(D.node.name)}, in one place.</p></div></div>
+  <div class="grid" style="gap:16px">
+    ${top ? `
+    <div class="card hero" style="border-color:var(--${top.sev === "critical" ? "crit" : "high"});background:linear-gradient(var(--${top.sev === "critical" ? "crit" : "high"}-soft),var(--${top.sev === "critical" ? "crit" : "high"}-soft)),var(--surface)">
+      <div class="shield" style="${top.sev === "critical" ? "" : "background:var(--high-soft);color:var(--high)"}">${icon("i-alert")}</div>
+      <div><h2>${urgent.length} ${urgent.length === 1 ? "thing needs" : "things need"} you now</h2>
+        <p>Most urgent: <b>${esc(top.title)}</b></p></div>
+      <div class="btnrow"><a class="btn primary" href="#/findings/${esc(top.id)}">${icon("i-tap")}See what to do</a></div>
+    </div>` : `
+    <div class="card hero" style="border-color:var(--ok);background:linear-gradient(var(--ok-soft),var(--ok-soft)),var(--surface)">
+      <div class="shield" style="background:var(--ok-soft);color:var(--ok)">${icon("i-check-circle")}</div>
+      <div><h2>No known issues found</h2><p>That is not the same as secure. Check the blind spots below.</p></div><div></div>
+    </div>`}
+    <div class="grid g4">
+      ${["critical", "high", "medium", "low"].map(s => `
+      <a class="card stat" href="#/findings" style="text-decoration:none">
+        <span class="n" data-count="${counts[s]}" style="color:var(--${s === "critical" ? "crit" : s === "medium" ? "med" : s})">${counts[s]}</span>
+        <span class="l">${sevLabel[s]}</span></a>`).join("")}
+    </div>
+    <div class="grid g3">
+      <div class="card"><h2>${icon("i-box")}Watching</h2><div class="stat"><span class="n" data-count="24">24</span><span class="l">services, devices and apps · <a href="#/inventory">inventory</a></span></div></div>
+      <div class="card"><h2>${icon("i-globe")}Reachable from the internet</h2><div class="stat"><span class="n" style="color:var(--crit)" data-count="1">1</span><span class="l">service (plus 2 onion services you chose) · <a href="#/exposure">exposure</a></span></div></div>
+      <div class="card"><h2>${icon("i-radar")}On your network</h2><div class="stat"><span class="n" data-count="${D.devices.length}">${D.devices.length}</span><span class="l">devices, ${D.devices.filter(d => !d.known).length} unknown · <a href="#/scout">Scout</a></span></div></div>
+    </div>
+    <div class="grid g2">
+      <div class="card"><h2>${icon("i-blind")}Blind spots <span class="grow"></span><span class="pill">what Guard Dog can't see</span></h2>
+        <div class="list">${D.blindSpots.map(b => `<div class="row"><span class="dot info"></span><div><div class="t">${esc(b.t)}</div><div class="s">${esc(b.s)}</div></div><span></span></div>`).join("")}</div>
+      </div>
+      <div class="card"><h2>${icon("i-heart")}What changed this week</h2>
+        <ul class="timeline">${D.timeline.map(x => `<li class="${esc(x.c)}"><time>${esc(x.t)}</time>${esc(x.e)}</li>`).join("")}</ul>
+        <p class="muted" style="font-size:13px;margin:14px 0 0">The weekly digest goes out Sunday 9:00 by email and Nostr DM.</p>
+      </div>
+    </div>
+    <div class="grid g3">
+      <div class="card"><h2>${icon("i-eye")}Watch-only</h2><p class="muted" style="margin:0">2 wallets, your npub and your Lightning node: <b style="color:var(--ok)">nothing unexpected</b>.</p></div>
+      <div class="card"><h2>${icon("i-key")}Tripwires</h2><p class="muted" style="margin:0">3 canaries planted: <b style="color:var(--ok)">none touched</b>.</p></div>
+      <div class="card"><h2>${icon("i-heart")}Watching the watcher</h2><p class="muted" style="margin:0">Heartbeat seen by <b>your buddy's Guard Dog</b> and your phone 1 min ago.</p></div>
+    </div>
+    ${disclaimer()}
+  </div>`;
+};
+
+let findingFilter = "open";
+VIEWS.findings = (id) => {
+  if (id) return findingDetail(id);
+  const filters = [["open", "Open"], ["critical", "Critical"], ["high", "High"], ["medium", "Medium"], ["low", "Low"], ["resolved", "Resolved"]];
+  let list = D.findings.slice();
+  if (findingFilter === "open") list = list.filter(f => f.status !== "resolved");
+  else if (findingFilter === "resolved") list = list.filter(f => f.status === "resolved");
+  else list = list.filter(f => f.sev === findingFilter && f.status !== "resolved");
+  list.sort((a, b) => SEV[a.sev] - SEV[b.sev]);
+  return `
+  <div class="pagehead"><div><h1>Findings</h1><p>Each one says what's wrong, why it matters and exactly what to do.</p></div></div>
+  <div class="tabs" role="group" aria-label="Filter findings">${filters.map(([k, l]) => `<button type="button" data-filter="${k}" aria-pressed="${findingFilter === k}">${l}</button>`).join("")}</div>
+  <div class="card"><div class="list">
+    ${list.length ? list.map(f => `
+      <a class="row click" href="#/findings/${esc(f.id)}" style="text-decoration:none">
+        <span class="dot ${f.status === "resolved" ? "ok" : esc(f.sev)}"></span>
+        <div><div class="t">${esc(f.title)}</div><div class="s">${esc(f.area)} · ${esc(f.service)} · ${esc(f.when)}</div></div>
+        <div class="btnrow">${f.status === "possibly" ? chip("possibly", "Needs one answer") : ""}${f.status === "resolved" ? chip("ok", "Resolved") : chip(f.sev)}</div>
+      </a>`).join("") : `<p class="muted">Nothing here.</p>`}
+  </div></div>
+  <div style="margin-top:16px">${disclaimer()}</div>`;
+};
+
+function findingDetail(id) {
+  const f = D.findings.find(x => x.id === id);
+  if (!f) return `<p>Finding not found. <a href="#/findings">Back to findings</a></p>`;
+  const done = f._done || [];
+  return `
+  <div class="pagehead"><div><p><a href="#/findings">← All findings</a></p><h1 style="font-size:23px;max-width:820px">${esc(f.title)}</h1>
+    <p class="btnrow" style="margin-top:8px">${f.status === "resolved" ? chip("ok", "Resolved") : chip(f.sev)}${f.status === "possibly" ? chip("possibly") : ""}<span class="pill mono">${esc(f.id)}</span><span class="pill">${esc(f.area)}</span></p></div></div>
+  <div class="detail">
+    <div class="grid" style="gap:14px">
+      <div class="card"><h2>${icon("i-info")}Why it matters</h2><p style="margin:0">${esc(f.why)}</p></div>
+      ${f.question && f.status === "possibly" ? `
+      <div class="card"><h2>${icon("i-alert")}Guard Dog needs one answer</h2>
+        <div class="question"><p>${esc(f.question.text)}</p>
+          <div class="btnrow">${f.question.options.map((o, i) => `<button class="btn sm" type="button" data-answer="${i}" data-id="${esc(f.id)}">${esc(o)}</button>`).join("")}</div>
+        </div></div>` : ""}
+      ${f.playbook.length ? `
+      <div class="card"><h2>${icon("i-check-circle")}What to do, in order</h2>
+        <ol class="steps">${f.playbook.map((s, i) => `<li class="${done.includes(i) ? "done" : ""}"><span>${esc(s)}</span></li>`).join("")}</ol>
+        ${f.actions.length ? `<div class="btnrow" style="margin-top:14px">${f.actions.map((a, i) => `<button class="btn ${i === 0 ? "primary" : ""}" type="button" data-action="${esc(a.id)}" data-id="${esc(f.id)}">${icon("i-tap")}${esc(a.label)}</button>`).join("")}</div>
+        <p class="faint" style="font-size:12.5px;margin:10px 0 0">One tap shows a dry run first. Nothing changes until you approve, here or by a signed Nostr reply.</p>` : ""}
+      </div>` : ""}
+      ${f.evidence.length ? `<div class="card"><h2>${icon("i-eye")}Evidence</h2><ul class="evidence">${f.evidence.map(e => `<li>${esc(e)}</li>`).join("")}</ul></div>` : ""}
+    </div>
+    <div class="grid" style="gap:14px">
+      <div class="card"><h2>Details</h2><dl class="kv">
+        <dt>Affects</dt><dd>${esc(f.service)}</dd>
+        <dt>You run</dt><dd class="mono">${esc(f.version)}</dd>
+        <dt>Fixed in</dt><dd class="mono">${esc(f.fixed)}</dd>
+        <dt>Safest choice</dt><dd class="mono">${esc(f.safest)}</dd>
+        <dt>Seen</dt><dd>${esc(f.when)}</dd>
+        <dt>Source</dt><dd style="font-weight:500">${esc(f.source)}</dd></dl></div>
+      ${f.status !== "resolved" ? `<div class="card"><h2>Other choices</h2><div class="grid" style="gap:8px">
+        <button class="btn" type="button" data-handled="${esc(f.id)}">${icon("i-check")}I've handled it</button>
+        <button class="btn" type="button" data-accept="${esc(f.id)}">Accept the risk…</button>
+        <button class="btn ghost" type="button" data-preview="${esc(f.id)}">${icon("i-bell")}Preview the alert</button></div></div>` : ""}
+      ${disclaimer()}
+    </div>
+  </div>`;
+}
+
+VIEWS.inventory = () => `
+  <div class="pagehead"><div><h1>Inventory</h1><p>What Guard Dog found on ${esc(D.node.name)} (${esc(D.node.os)}). <b>Recognized</b> = found, versioned and checked against advisories. <b>Understood</b> = also its settings checked.</p></div></div>
+  <div class="card">
+  ${D.inventory.map(g => `
+    <div class="group-title">${icon(g.icon, `style="color:${({ "Bitcoin": "var(--btc)", "Lightning": "var(--ln)", "Bitcoin services": "var(--btc)", "Ecash": "var(--cashu)", "Nostr": "var(--nostr)" })[g.group] || "var(--muted)"}"`)}${esc(g.group)}</div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Service</th><th>You run</th><th>Safest</th><th>Seen through</th><th>Level</th><th>Status</th></tr></thead>
+      <tbody>${g.items.map(i => `<tr>
+        <td><b>${esc(i.name)}</b>${i.note ? `<div class="faint" style="font-size:12.5px">${esc(i.note)}</div>` : ""}</td>
+        <td class="mono">${esc(i.v)}</td>
+        <td class="mono" style="${i.safest !== i.v && i.safest !== "?" ? "color:var(--accent);font-weight:700" : ""}">${esc(i.safest)}</td>
+        <td class="muted">${esc(i.by)}</td>
+        <td><span class="pill">${esc(i.level)}</span></td>
+        <td>${i.sev === "info" ? `<a class="btn sm" href="#/repos">Watch repo</a>` : chip(i.sev)}</td></tr>`).join("")}</tbody>
+    </table></div>`).join("")}
+  </div>
+  <div class="card" style="margin-top:14px"><h2>${icon("i-blind")}Blind spots</h2>
+    <div class="list">${D.blindSpots.map(b => `<div class="row"><span class="dot info"></span><div><div class="t">${esc(b.t)}</div><div class="s">${esc(b.s)}</div></div><span></span></div>`).join("")}</div>
+    <div class="btnrow" style="margin-top:10px"><a class="btn" href="#/registered">${icon("i-plus")}Register a device or app</a></div>
+  </div>`;
+
+function exposureRows(list) {
+  return list.map(x => `<div class="row"><span class="dot ${esc(x.sev)}"></span><div><div class="t">${esc(x.what)}</div><div class="s">${esc(x.how)} · seen by ${esc(x.seen)}</div></div>${chip(x.sev, x.sev === "ok" ? "Expected" : sevLabel[x.sev])}</div>`).join("");
+}
+VIEWS.exposure = () => `
+  <div class="pagehead"><div><h1>Exposure</h1><p>What an attacker can reach, and from where.</p></div><div class="grow"></div>
+    <button class="btn" type="button" id="probeBtn">${icon("i-radar")}Ask my buddy to probe now</button></div>
+  <div class="grid g2" style="align-items:start">
+    <div class="card"><h2>${icon("i-globe")}From the internet</h2>
+      <div class="radar" aria-hidden="true">${radarSVG()}</div>
+      <div class="list" style="margin-top:8px">${exposureRows(D.exposure.internet)}</div>
+      <p class="faint" style="font-size:12.5px;margin:10px 0 0">Outside-in probe by <b>your buddy's Guard Dog</b> (paired buddy) 2 h ago. It can only scan addresses your node signed for it.</p></div>
+    <div class="grid" style="gap:14px">
+      <div class="card"><h2>${icon("i-layers")}Over Tor</h2><div class="list">${exposureRows(D.exposure.tor)}</div></div>
+      <div class="card"><h2>${icon("i-lock")}Your private network (Tailscale)</h2><div class="list">${exposureRows(D.exposure.tailnet)}</div></div>
+      <div class="card"><h2>${icon("i-radar")}On your home network</h2><div class="list">${exposureRows(D.exposure.lan)}</div></div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:14px"><h2>Router</h2>
+    <div class="grid g3"><div class="stat"><span class="n" style="color:var(--med)">On</span><span class="l">UPnP (apps can open ports)</span></div>
+    <div class="stat"><span class="n">1</span><span class="l">port mapping, to Alby Hub</span></div>
+    <div class="stat"><span class="n">Single</span><span class="l">NAT (no carrier NAT)</span></div></div></div>
+  <div style="margin-top:14px">${disclaimer()}</div>`;
+
+function radarSVG() {
+  return `<svg viewBox="0 0 200 200">
+    <defs><radialGradient id="rg" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="var(--accent)" stop-opacity=".18"/><stop offset="1" stop-color="var(--accent)" stop-opacity="0"/></radialGradient>
+    <linearGradient id="sweep" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="var(--accent)" stop-opacity="0"/><stop offset="1" stop-color="var(--accent)" stop-opacity=".45"/></linearGradient></defs>
+    <circle cx="100" cy="100" r="96" fill="url(#rg)" stroke="var(--border)"/>
+    <circle cx="100" cy="100" r="64" fill="none" stroke="var(--border)"/>
+    <circle cx="100" cy="100" r="32" fill="none" stroke="var(--border)"/>
+    <path d="M100 4v192M4 100h192" stroke="var(--border)"/>
+    <g id="sweepArm" style="transform-origin:100px 100px"><path d="M100 100 L196 100 A96 96 0 0 0 167.9 32.1 Z" fill="url(#sweep)"/></g>
+    <circle cx="100" cy="100" r="7" fill="var(--accent)"/>
+    <g class="blip"><circle cx="148" cy="62" r="11" fill="var(--crit)" opacity=".2"/><circle cx="148" cy="62" r="5" fill="var(--crit)"/></g>
+    <text x="148" y="86" text-anchor="middle" font-size="10" fill="var(--muted)">:8080</text>
+    <circle cx="58" cy="132" r="4" fill="var(--ok)"/><text x="58" y="150" text-anchor="middle" font-size="10" fill="var(--muted)">onion</text>
+    <circle cx="70" cy="58" r="4" fill="var(--ok)"/><text x="70" y="50" text-anchor="middle" font-size="10" fill="var(--muted)">onion</text>
+  </svg>`;
+}
+
+let selDevice = "192.0.2.40";
+let activeSweep = false;
+VIEWS.scout = () => {
+  const d = D.devices.find(x => x.ip === selDevice) || D.devices[0];
+  return `
+  <div class="pagehead"><div><h1>Scout</h1><p>Guard Dog's own network discovery. It recognizes Bitcoin and Nostr services on any device and watches for network attacks.</p></div></div>
+  <div class="grid" style="grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);align-items:start" id="scoutGrid">
+    <div class="card" style="padding:0;overflow:hidden">
+      <div class="mapwrap" style="border:0;border-radius:0">${mapSVG()}</div>
+      <div class="legend"><span><i style="background:var(--btc)"></i>Bitcoin / Lightning</span><span><i style="background:var(--ok)"></i>Known</span><span><i style="background:var(--high)"></i>Unknown</span><span><i style="background:var(--faint)"></i>Router</span></div>
+    </div>
+    <div class="grid" style="gap:14px">
+      <div class="card"><h2>${esc(d.name)}</h2><dl class="kv">
+        <dt>Address</dt><dd class="mono">${esc(d.ip)}</dd><dt>Made by</dt><dd>${esc(d.vendor)}</dd>
+        <dt>Open ports</dt><dd class="mono">${esc(d.ports)}</dd><dt>Recognized as</dt><dd>${esc(d.fp || "—")}</dd>
+        <dt>Known</dt><dd>${d.known ? chip("ok", "Yes") : chip("high", "Not yet")}</dd></dl>
+        ${!d.known ? `<div class="btnrow" style="margin-top:12px"><button class="btn primary sm" type="button" data-known="${esc(d.ip)}">${icon("i-check")}It's mine, name it</button><button class="btn sm" type="button" data-unknown="${esc(d.ip)}">I don't know it</button></div>` : ""}
+      </div>
+      <div class="card"><h2>${icon("i-lock")}Network-attack checks</h2>
+        <div class="list">${D.attackChecks.map(c => `<div class="row"><span style="color:var(--ok)">${icon("i-check-circle", 'width="20" height="20"')}</span><div><div class="t">${esc(c.t)}</div><div class="s">${esc(c.s)}</div></div><span></span></div>`).join("")}</div></div>
+      <div class="card"><div class="setting" style="padding:0"><div><div class="t">Active sweep</div><div class="s">${activeSweep ? "On: gentle ARP and ping sweeps, 50 packets/s, only your home subnet." : "Off: Scout only listens. Turn on to find quiet devices too."}</div></div>
+        <label class="switch"><input type="checkbox" id="sweepToggle" ${activeSweep ? "checked" : ""} aria-label="Active sweep"><span></span></label></div></div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:14px"><h2>Devices</h2><div class="tablewrap"><table>
+    <thead><tr><th>Name</th><th>Address</th><th>Made by</th><th>Recognized as</th><th>Status</th></tr></thead>
+    <tbody>${D.devices.map(x => `<tr class="click" data-dev="${esc(x.ip)}" style="cursor:pointer"><td><b>${esc(x.name)}</b></td><td class="mono">${esc(x.ip)}</td><td>${esc(x.vendor)}</td><td class="muted">${esc(x.fp || "—")}</td><td>${x.known ? chip("ok", "Known") : chip("high", "Unknown")}</td></tr>`).join("")}</tbody></table></div></div>
+  <div class="card" style="margin-top:14px"><h2>Timeline</h2><ul class="timeline">${D.timeline.map(x => `<li class="${esc(x.c)}"><time>${esc(x.t)}</time>${esc(x.e)}</li>`).join("")}</ul></div>`;
+};
+
+function mapSVG() {
+  const W = 560, H = 380, cx = W / 2, cy = H / 2;
+  const others = D.devices.filter(d => d.kind !== "router");
+  const nodes = others.map((d, i) => {
+    const a = (i / others.length) * Math.PI * 2 - Math.PI / 2;
+    const r = d.kind === "node" || d.kind === "btc" ? 120 : 155;
+    return { d, x: cx + Math.cos(a) * r * 1.25, y: cy + Math.sin(a) * r * .82 };
+  });
+  const color = (d) => d.kind === "node" || d.kind === "btc" ? "var(--btc)" : d.known ? "var(--ok)" : "var(--high)";
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Map of devices on your network">
+    ${nodes.map(n => `<line class="edge" x1="${cx}" y1="${cy}" x2="${n.x.toFixed(1)}" y2="${n.y.toFixed(1)}" stroke="var(--border)" stroke-width="1.5" ${n.d.known ? "" : 'stroke-dasharray="4 4"'}/>`).join("")}
+    <g class="mapnode" data-dev="192.0.2.1" transform="translate(${cx},${cy})"><circle class="body" r="26"/><circle r="8" fill="var(--faint)"/><text y="44" text-anchor="middle">Router</text></g>
+    ${nodes.map(n => `<g class="mapnode ${n.d.ip === selDevice ? "sel" : ""}" data-dev="${esc(n.d.ip)}" transform="translate(${n.x.toFixed(1)},${n.y.toFixed(1)})" tabindex="0" role="button" aria-label="${esc(n.d.name)}">
+      ${!n.d.known ? `<circle class="pulse" r="20" fill="${color(n.d)}" opacity=".18"/>` : ""}
+      <circle class="body" r="17"/><circle r="6.5" fill="${color(n.d)}"/>
+      <text y="33" text-anchor="middle">${esc(n.d.name.length > 18 ? n.d.name.slice(0, 17) + "…" : n.d.name)}</text></g>`).join("")}
+  </svg>`;
+}
+
+VIEWS.watch = () => `
+  <div class="pagehead"><div><h1>Watch & tripwires</h1><p>Watch-only signs of compromise, plus decoys that prove a break-in if anyone touches them.</p></div><div class="grow"></div>
+    <button class="btn" type="button" id="announceBtn">${icon("i-bell")}Announce a planned spend</button></div>
+  <div class="grid g2" style="align-items:start">
+    <div class="card"><h2>${icon("i-btc")}Wallets (watch-only)</h2><div class="list">${D.watch.wallets.map(w => `<div class="row"><span class="dot ok"></span><div><div class="t">${esc(w.name)}</div><div class="s">${esc(w.s)}</div></div>${chip("ok", "Quiet")}</div>`).join("")}</div>
+      <p class="faint" style="font-size:12.5px;margin:10px 0 0">Your xpubs stay on this box and are checked against your own node, never a third-party service.</p></div>
+    <div class="card"><h2>${icon("i-key")}Canary tripwires</h2><div class="list">${D.watch.canaries.map(c => `<div class="row"><span class="dot ok"></span><div><div class="t">${esc(c.name)}</div><div class="s">${esc(c.s)}</div></div>${chip("ok", "Untouched")}</div>`).join("")}</div>
+      <div class="btnrow" style="margin-top:10px"><button class="btn sm" type="button" id="plantBtn">${icon("i-plus")}Plant another decoy</button></div></div>
+    <div class="card"><h2>${icon("i-nostr", 'style="color:var(--nostr)"')}Your Nostr identity</h2><p style="margin:0" class="muted">${esc(D.watch.npub.s)}</p></div>
+    <div class="card"><h2>${icon("i-bolt")}Your Lightning node</h2><p style="margin:0" class="muted">${esc(D.watch.lightning.s)}</p></div>
+    <div class="card"><h2>${icon("i-heart")}Health signs that can mean an attack</h2><div class="list">${D.watch.health.map(h => `<div class="row"><span class="dot ok"></span><div><div class="t">${esc(h.name)}</div><div class="s">${esc(h.s)}</div></div><span></span></div>`).join("")}</div></div>
+    <div class="card"><h2>${icon("i-lock")}Backups checklist</h2><p class="muted" style="margin:0 0 10px">5 questions about where your seed, passphrase, channel backups and nsec live. Risky answers become findings.</p><button class="btn sm" type="button" id="backupBtn">Start the checklist</button></div>
+  </div>`;
+
+VIEWS.registered = () => `
+  <div class="pagehead"><div><h1>Registered</h1><p>Things Guard Dog can't see for itself. Tell it, and it'll alert you when an advisory hits them.</p></div><div class="grow"></div>
+    <button class="btn primary" type="button" id="registerBtn">${icon("i-plus")}Register a device or app</button></div>
+  <div class="card"><h2>${icon("i-key")}Hardware wallets and signing devices</h2><div class="list">
+    ${D.registered.devices.map(d => `<div class="row"><span class="dot ${d.sev === "possibly" ? "medium" : "ok"}"></span><div><div class="t">${esc(d.name)} <span class="faint" style="font-weight:500">· ${esc(d.vendor)} ${esc(d.model)}</span></div><div class="s mono">firmware ${esc(d.fw)}</div></div>${d.sev === "possibly" ? `<a href="#/findings/GD-SAMPLE-0002">${chip("possibly", "Needs one answer")}</a>` : chip("ok", "No known issues")}</div>`).join("")}
+  </div></div>
+  <div class="card" style="margin-top:14px"><h2>${icon("i-layers")}Apps on your phone, laptop and browser</h2><div class="list">
+    ${D.registered.apps.map(a => `<div class="row"><span class="dot ok"></span><div><div class="t">${esc(a.name)}</div><div class="s">${esc(a.where)} · <span class="mono">${esc(a.v)}</span></div></div>${chip("ok", "No known issues")}</div>`).join("")}
+  </div></div>`;
+
+VIEWS.repos = () => `
+  <div class="pagehead"><div><h1>Watched repos</h1><p>Paste any git repository: someone's custom app you run, a plugin, a script. Guard Dog watches its releases and security advisories.</p></div></div>
+  <div class="card"><form class="inline-form" id="repoForm" autocomplete="off">
+    <label class="sr" for="repoUrl">Git repository address</label>
+    <input type="text" id="repoUrl" placeholder="https://github.com/owner/repo   (GitHub, GitLab, Codeberg, or a nostr git address)">
+    <button class="btn primary" type="submit">${icon("i-plus")}Watch it</button></form>
+    <p class="faint" style="font-size:12.5px;margin:10px 0 0">Fetched over Tor when available, so the forge doesn't learn from your address which repos you watch.</p></div>
+  <div class="card" style="margin-top:14px"><div class="tablewrap"><table>
+    <thead><tr><th>Repository</th><th>Linked to</th><th>You run</th><th>Latest</th><th>Advisories</th></tr></thead>
+    <tbody id="repoRows">${D.repos.map(repoRow).join("")}</tbody></table></div></div>`;
+function repoRow(r) {
+  return `<tr><td class="mono">${esc(r.url)}</td><td>${esc(r.linked)}</td><td class="mono">${esc(r.yours)}</td><td class="mono" style="${r.latest !== r.yours ? "color:var(--accent);font-weight:700" : ""}">${esc(r.latest)}</td><td>${r.adv ? chip("critical", r.adv + " affects you") : chip("ok", "None")}</td></tr>`;
+}
+
+VIEWS.approvals = () => `
+  <div class="pagehead"><div><h1>Approvals</h1><p>Guard Dog never changes anything on its own. Each fix waits here with a dry run until you say yes.</p></div></div>
+  ${D.approvals.length ? D.approvals.map(a => `
+  <div class="card"><h2>${icon("i-tap")}${esc(a.label)}<span class="grow"></span><span class="pill">expires in <span class="exp">${a.expires}</span> min</span></h2>
+    <p class="muted" style="margin:0 0 10px">For <a href="#/findings/${esc(a.from)}">${esc(a.from)}</a>. Dry run, exactly what will change:</p>
+    <ul class="evidence">${a.dry.map(x => `<li>${esc(x)}</li>`).join("")}</ul>
+    <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-approve="${esc(a.code)}">${icon("i-check")}Approve</button><button class="btn" type="button" data-decline="${esc(a.code)}">Decline</button></div>
+    <p class="faint" style="font-size:12.5px;margin:10px 0 0">Or reply <b class="mono">${esc(a.code)}</b> to Guard Dog's Nostr DM, signed by your npub. The code works once and expires.</p></div>`).join("") : `
+  <div class="card"><p class="muted" style="margin:0">Nothing is waiting for you.</p></div>`}`;
+
+let settingsTab = "alerts";
+VIEWS.settings = () => {
+  const tabs = [["alerts", "Alerts"], ["appearance", "Appearance"], ["ai", "AI (optional)"], ["buddy", "Buddy & heartbeat"], ["permissions", "What Guard Dog can touch"]];
+  return `
+  <div class="pagehead"><div><h1>Settings</h1></div></div>
+  <div class="tabs" role="group" aria-label="Settings sections">${tabs.map(([k, l]) => `<button type="button" data-stab="${k}" aria-pressed="${settingsTab === k}">${l}</button>`).join("")}</div>
+  ${settingsTab === "alerts" ? `
+    <div class="card"><h2>${icon("i-bell")}Where alerts go</h2>
+      ${D.settings.channels.map(c => `<div class="setting"><div><div class="t">${esc(c.name)}</div><div class="s">${esc(c.s)}</div></div><label class="switch"><input type="checkbox" data-chan="${esc(c.id)}" ${c.on ? "checked" : ""} aria-label="${esc(c.name)}"><span></span></label></div>`).join("")}
+      <div class="btnrow" style="margin-top:12px"><button class="btn" type="button" id="testAlert">${icon("i-bell")}Send a test alert</button><button class="btn ghost" type="button" id="previewAlert2">Preview the alert text</button></div></div>
+    <div class="card" style="margin-top:14px"><h2>When</h2>
+      <div class="setting"><div><div class="t">Critical and high</div><div class="s">Immediately, every channel. A reminder after 24 h if you haven't acknowledged it.</div></div><span class="pill">Always on</span></div>
+      <div class="setting"><div><div class="t">Everything else</div><div class="s">In the weekly digest.</div></div><select aria-label="Digest day" style="width:auto"><option>Sunday 9:00</option><option>Monday 8:00</option><option>Friday 17:00</option></select></div>
+      <div class="setting"><div><div class="t">Quiet hours</div><div class="s">22:00 to 7:00. Critical alerts still come through.</div></div><label class="switch"><input type="checkbox" checked aria-label="Quiet hours"><span></span></label></div></div>` : ""}
+  ${settingsTab === "appearance" ? `
+    <div class="card"><h2>${icon("i-sun")}Theme</h2><p class="muted" style="margin:0 0 12px">Pick how Guard Dog looks. Urgency colours (red, orange, yellow, blue, green) mean the same thing in every theme.</p>
+      <div class="option-cards" role="radiogroup" aria-label="Theme">
+        ${SKINS.map(s => `<button type="button" class="option-card skin-card" role="radio" aria-checked="${currentSkin === s.id}" data-skin-pick="${s.id}">
+          <b>${esc(s.name)}</b><span>${esc(s.vibe)}</span>
+          <span class="skin-swatches" aria-hidden="true">${s.sw.map(c => `<i style="background:${c}"></i>`).join("")}</span></button>`).join("")}
+      </div>
+      <p class="faint" style="font-size:12.5px;margin:12px 0 0">Original follows your light or dark choice; the other themes have their own fixed colours.</p></div>` : ""}
+  ${settingsTab === "ai" ? `
+    <div class="card"><h2>${icon("i-cpu")}AI is optional</h2><p class="muted" style="margin:0 0 12px">Everything important works with no model: inventory, advisories, exposure, Scout and alerts. A model adds plain-English explanations, spots silent security fixes in changelogs, and answers "am I safe?".</p>
+      <div class="option-cards" role="radiogroup" aria-label="Where the model runs">
+        ${[["off", "No AI", "Templates write every alert."], ["local", "On my network", "Ollama, llama.cpp, LM Studio or Cactus on a box or Mac you own."], ["api", "API key (opt-in)", "OpenRouter or another provider. Only redacted data is sent."]].map(([k, t, s]) => `
+        <button type="button" class="option-card" role="radio" aria-checked="${D.settings.ai === k}" data-ai="${k}"><b>${t}</b><span>${s}</span></button>`).join("")}
+      </div>
+      ${D.settings.ai === "local" ? `<div class="grid g2" style="margin-top:14px"><label class="field">Endpoint<input type="text" value="http://192.0.2.23:11434/v1"></label><label class="field">Model<input type="text" value="a small local model"></label></div>` : ""}
+      ${D.settings.ai === "api" ? `<div class="grid g2" style="margin-top:14px"><label class="field">Endpoint<input type="text" value="https://ai-provider.example/v1"></label><label class="field">API key<input type="password" value="sample-not-a-real-key"></label></div>` : ""}
+      <div class="setting" style="margin-top:12px"><div><div class="t">Redaction before anything leaves this box</div><div class="s">IPs, onion addresses, xpubs, npubs, names and tokens are replaced with placeholders.</div></div><label class="switch"><input type="checkbox" checked disabled aria-label="Redaction, always on"><span></span></label></div>
+      <div class="setting"><div><div class="t">Changelog reader</div><div class="s">A small classifier on this box's CPU. It can only answer fixed questions, so text can't steer it.</div></div><span class="pill">Local · no text output</span></div>
+      <p class="faint" style="font-size:12.5px;margin:10px 0 0">Subscription sign-ins (OAuth) aren't supported: providers' terms forbid using them in other apps.</p></div>` : ""}
+  ${settingsTab === "buddy" ? `
+    <div class="card"><h2>${icon("i-heart")}Watching the watcher</h2>
+      <div class="setting"><div><div class="t">Buddy: a friend's Guard Dog (sample)</div><div class="s">Paired 21 days ago · sees your heartbeat · probes you daily from outside · you do the same for them</div></div>${chip("ok", "Seen 1 min ago")}</div>
+      <div class="setting"><div><div class="t">Your phone</div><div class="s">Expects a signed heartbeat every 5 minutes through ntfy; alarms after 10 minutes of silence</div></div>${chip("ok", "Seen 1 min ago")}</div>
+      <div class="setting"><div><div class="t">Hosted heartbeat</div><div class="s">For people without a buddy. Run by the project later.</div></div><span class="pill">Later</span></div>
+      <div class="btnrow" style="margin-top:12px"><button class="btn" type="button" id="pairBtn">${icon("i-plus")}Pair a new buddy</button></div></div>` : ""}
+  ${settingsTab === "permissions" ? `
+    <div class="card"><h2>${icon("i-lock")}What Guard Dog can and can't touch</h2><div class="list">
+      ${[["ok", "Reads app list and versions", "through a read-only Docker proxy, never the raw socket"],
+         ["ok", "Reads Bitcoin Core info", "a restricted RPC user that can call 3 read-only commands"],
+         ["ok", "Reads Lightning info", "a macaroon baked for info:read only"],
+         ["ok", "Has no keys", "no seeds, no spending keys, no admin macaroon, not your nsec"],
+         ["ok", "Runs as its own user", "never root; systemd hardening score 1.8 (OK)"],
+         [activeSweep ? "medium" : "ok", "Raw network packets", activeSweep ? "allowed (CAP_NET_RAW) because active sweep is on" : "not allowed: active sweep is off"],
+         ["ok", "Talks only to", "your relays, ntfy, the advisory feed and GitHub (over Tor). Nothing else, enforced."]].map(([s, t, d]) => `
+        <div class="row"><span class="dot ${s}"></span><div><div class="t">${t}</div><div class="s">${d}</div></div><span></span></div>`).join("")}
+    </div></div>` : ""}`;
+};
+
+VIEWS.lab = () => `
+  <div class="pagehead"><div><h1>Lab</h1><p>White-hat testing against a copy of your setup with fake money, never your real node.</p></div></div>
+  <div class="card" style="text-align:center;padding:36px 20px">
+    <div style="width:70px;height:70px;margin:0 auto 12px;border-radius:20px;background:var(--surface-2);display:grid;place-items:center;color:var(--muted)">${icon("i-flask", 'width="36" height="36"')}</div>
+    <h2 style="justify-content:center;font-size:18px">Coming in a later phase</h2>
+    <p class="muted" style="max-width:520px;margin:0 auto 16px">Guard Dog will build a regtest copy of your exact setup (same apps and versions, fake keys, no route to your real network), then run white-hat test playbooks against it. A real new vulnerability becomes a private report that you approve and send.</p>
+    <button class="btn" type="button" disabled>${icon("i-flask")}Clone my setup into the lab</button></div>`;
+
+/* ======================================================================
+   After-render hooks (animations and page-specific wiring)
+   ====================================================================== */
+function after(page) {
+  if (page === "overview" && hasGsap()) {
+    $$("[data-count]").forEach(el => {
+      const n = +el.dataset.count, o = { v: 0 };
+      gsap.to(o, { v: n, duration: .8, ease: "power2.out", onUpdate: () => { el.textContent = Math.round(o.v); } });
+    });
+  }
+  if (page === "exposure") {
+    const arm = $("#sweepArm");
+    if (hasGsap()) {
+      gsap.to(arm, { rotation: -360, svgOrigin: "100 100", duration: 4, repeat: -1, ease: "none" });
+      gsap.to(".blip", { scale: 1.25, svgOrigin: "148 62", duration: .9, yoyo: true, repeat: -1, ease: "sine.inOut" });
+    } else if (arm && !reduced) {
+      arm.animate([{ transform: "rotate(0deg)" }, { transform: "rotate(-360deg)" }], { duration: 4000, iterations: Infinity });
+    }
+  }
+  if (page === "scout" && hasGsap()) {
+    gsap.from(".mapnode", { scale: 0, transformOrigin: "50% 50%", duration: .5, stagger: .05, ease: "back.out(2)" });
+    gsap.from(".edge", { opacity: 0, duration: .6, stagger: .04 });
+    gsap.to(".pulse", { scale: 1.6, opacity: 0, transformOrigin: "50% 50%", duration: 1.4, repeat: -1, ease: "power1.out" });
+  }
+  if (page === "approvals") {
+    clearInterval(window._expTimer);
+    window._expTimer = setInterval(() => {
+      D.approvals.forEach(a => { if (a.expires > 1) a.expires--; });
+      $$(".exp").forEach((el, i) => { if (D.approvals[i]) el.textContent = D.approvals[i].expires; });
+    }, 60000);
+  }
+}
+
+/* ======================================================================
+   Modals
+   ====================================================================== */
+let lastFocus = null;
+function modal(title, body, footer = "") {
+  lastFocus = document.activeElement;
+  $("#modal").innerHTML = `<header><h3 id="modalTitle">${title}</h3><button class="btn ghost iconbtn" type="button" data-close aria-label="Close">${icon("i-x")}</button></header><div class="body"><p class="mocknote"><b>Mock-up:</b> planned, not built yet. Made-up data; nothing is sent or changed.</p>${body}</div>${footer ? `<footer>${footer}</footer>` : ""}`;
+  $("#overlay").classList.add("open");
+  if (hasGsap()) gsap.from("#modal", { y: 18, opacity: 0, scale: .98, duration: .28, ease: "power2.out" });
+  const f = $("#modal").querySelector("button:not([data-close]), input, select, textarea") || $("#modal [data-close]");
+  f && f.focus();
+}
+function closeModal() {
+  $("#overlay").classList.remove("open");
+  clearInterval(window._scanTimer);
+  lastFocus && lastFocus.focus && lastFocus.focus();
+}
+
+function alertPreview(f) {
+  f = f || D.findings[0];
+  const steps = f.playbook.slice(0, 3).map((s, i) => `${i + 1}. ${s}`).join("\n");
+  const text = `GUARD DOG · ${sevLabel[f.sev].toUpperCase()}
+${f.title}
+You run: ${f.version}${f.fixed && f.fixed !== "—" ? ` · fixed in: ${f.fixed}` : ""}
+
+What to do:
+${steps}${f.actions.length ? `\n\nReply YES-7F3K to approve: ${f.actions[0].label.toLowerCase()} (dry run shown first).` : ""}
+
+Checked 3 min ago · ${D.blindSpots.length} blind spots · No known issues is not the same as secure.`;
+  modal("How this alert arrives",
+    `<div class="dmhead"><div class="avatar">${icon("i-dog")}</div><div><b>Guard Dog (regtest-node.local)</b><div class="faint" style="font-size:12.5px">Encrypted Nostr DM (NIP-17) to your npub · same text by ntfy and email</div></div></div>
+     <div class="dm">${esc(text)}</div>
+     <p class="faint" style="font-size:12.5px">Names and text that came from outside (app labels, page titles) are escaped, so they can't fake a second alert or hide instructions.</p>`,
+    `<button class="btn primary" type="button" data-close>Close</button>`);
+}
+
+function approvalModal(f, act) {
+  const a = D.approvals[0];
+  const dry = act.id === "act-upnp" ? a.dry
+    : act.id === "act-update" ? ["Umbrel: update app \"Alby Hub\" 1.18.2 → 1.24.0", "Before: verify the release signature and image digest, back up the app's config", "After: rescan and confirm version and health; roll back if it fails"]
+    : ["bitcoin.conf: rpcbind=0.0.0.0 → the local Docker network only", "Restart Bitcoin Core (about 1 minute)", "Undo: restore the previous bitcoin.conf (kept for 7 days)"];
+  modal(`One tap: ${esc(act.label)}`,
+    `<p style="margin-top:0">Dry run, exactly what will change:</p><ul class="evidence">${dry.map(x => `<li>${esc(x)}</li>`).join("")}</ul>
+     <p class="muted" style="font-size:13.5px">Approve here, or reply <b class="mono">YES-7F3K</b> to the Nostr DM from your npub. The code works once and expires in 30 minutes.</p>`,
+    `<button class="btn" type="button" data-close>Not now</button><button class="btn primary" type="button" data-doapprove="${esc(f.id)}" data-act="${esc(act.id)}">${icon("i-check")}Approve</button>`);
+}
+
+function registerModal() {
+  modal("Register a device or app",
+    `<div class="grid" style="gap:12px">
+      <label class="field">What is it?<select id="regKind"><option>Hardware wallet / signing device</option><option>Phone or desktop wallet app</option><option>Nostr client or signer</option><option>Browser extension</option></select></label>
+      <div class="grid g2"><label class="field">Make and model<select><option>Coldcard Mk4</option><option>Coldcard Q</option><option>Trezor Safe 5</option><option>Blockstream Jade</option><option>BitBox02</option><option>Keystone 3 Pro</option><option>Foundation Passport</option><option>SeedSigner</option><option>Other…</option></select></label>
+      <label class="field">Firmware or app version<input type="text" placeholder="e.g. 5.4.0"></label></div>
+      <label class="field">Your own name for it (stays on this box)<input type="text" placeholder="e.g. Safe deposit"></label>
+      <p class="faint" style="font-size:12.5px;margin:0">Next, Guard Dog asks a few setup questions: how the seed was made, passphrase, multisig. Those let it tell "possibly affected" from "affected".</p></div>`,
+    `<button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="button" id="regSave">${icon("i-plus")}Register</button>`);
+}
+
+/* first-time setup wizard */
+let wz = 0;
+function wizard(step = 0) {
+  wz = step;
+  const total = 6;
+  const bar = `<div class="wizard-steps">${Array.from({ length: total }, (_, i) => `<i class="${i <= step ? "on" : ""}"></i>`).join("")}</div>`;
+  const next = (label = "Next", cls = "primary") => `<button class="btn ${cls}" type="button" data-wz="${step + 1}">${label}</button>`;
+  const back = step > 0 && step < 4 ? `<button class="btn ghost" type="button" data-wz="${step - 1}">Back</button>` : "";
+  const P = (t, s) => `<div class="promise">${icon("i-check-circle")}<div><b>${t}</b><div class="muted" style="font-size:13.5px">${s}</div></div></div>`;
+  const steps = [
+    ["Welcome to Guard Dog", `${bar}<p style="margin-top:0">Guard Dog watches what your money and identity depend on and tells you, in plain English, when something becomes dangerous. Five promises first:</p>
+      ${P("It never holds your keys or moves your funds.", "No seeds, no spending keys, not your nsec.")}
+      ${P("It never changes anything without your yes.", "Every fix is a dry run you approve.")}
+      ${P("Your setup's details stay here.", "No telemetry. Any cloud AI only sees redacted data.")}
+      ${P("It never says \"secure\".", "Only \"no known issues\", with what it checked and what it couldn't see.")}
+      ${P("It only scans what's yours.", "Your node, your home network, and addresses you sign for.")}`, next("Let's start")],
+    ["We found your platform", `${bar}<div class="card flat" style="display:flex;gap:14px;align-items:center"><div class="avatar" style="width:46px;height:46px">${icon("i-box")}</div><div><b>Umbrel</b> on a Raspberry Pi 5 · umbrelOS 1.4<div class="muted" style="font-size:13.5px">23 apps running · Docker 27</div></div></div>
+      <p class="muted">Not right? You can pick StartOS, RaspiBlitz, myNode, nix-bitcoin, plain Docker or plain Linux.</p>`, back + next()],
+    ["What Guard Dog asks to read", `${bar}<p style="margin-top:0">Each permission is read-only. Here's why each one is needed:</p>
+      <div class="setting"><div><div class="t">App list and versions</div><div class="s">through a read-only Docker proxy</div></div><label class="switch"><input type="checkbox" checked aria-label="App list"><span></span></label></div>
+      <div class="setting"><div><div class="t">Bitcoin Core info</div><div class="s">a restricted RPC user (we'll show the 2 lines to paste)</div></div><label class="switch"><input type="checkbox" checked aria-label="Bitcoin Core info"><span></span></label></div>
+      <div class="setting"><div><div class="t">Lightning info</div><div class="s">an info:read-only macaroon (one command to bake it)</div></div><label class="switch"><input type="checkbox" checked aria-label="Lightning info"><span></span></label></div>
+      <div class="setting"><div><div class="t">Active network sweep (Scout)</div><div class="s">off by default; listening only</div></div><label class="switch"><input type="checkbox" aria-label="Active sweep"><span></span></label></div>`, back + next()],
+    ["Where should alerts go?", `${bar}<label class="field">Your npub (Nostr DMs, encrypted)<input type="text" value="npub1sample…k9x"></label>
+      <p class="muted" style="font-size:13.5px">Guard Dog makes its own key to send from. It never needs your nsec.</p>
+      <label class="field">A second channel (recommended)<select><option>ntfy push to my phone</option><option>Email</option><option>Signal</option><option>Telegram</option></select></label>`, back + next("Run the first scan")],
+    ["First scan", `${bar}<div class="progress"><b id="scanBar"></b></div><ul class="scanlog" id="scanLog"></ul>`, `<button class="btn primary" type="button" data-wz="5" id="wzResults" disabled>See results</button>`],
+    ["Here's what we found", `${bar}<div class="grid g3" style="margin-bottom:12px"><div class="card flat stat"><span class="n">24</span><span class="l">things watched</span></div><div class="card flat stat"><span class="n" style="color:var(--crit)">${open().filter(f => f.sev === "critical" || f.sev === "high").length}</span><span class="l">need you now</span></div><div class="card flat stat"><span class="n">5</span><span class="l">blind spots</span></div></div>
+      <p style="margin-top:0">Most urgent: <b>${esc(D.findings[0].title)}</b>.</p><p class="muted" style="font-size:13.5px">Tip: register your hardware wallets next. Guard Dog can't see them on its own.</p>`, `<button class="btn" type="button" id="wzRegister">Register a device</button><button class="btn primary" type="button" id="wzDone">Go to the overview</button>`]
+  ];
+  const [title, body, foot] = steps[step];
+  modal(title, body, foot);
+  if (step === 4) runScanAnimation();
+}
+
+function runScanAnimation() {
+  const lines = ["Platform: Umbrel 1.4", "Apps: 23 found through the read-only proxy", "Bitcoin Core 28.1 (RPC, read-only user)", "LND 0.18.5-beta · Alby Hub 1.18.2 · ThunderHub",
+    "BTCPay 2.0.8 · Fulcrum 1.12.0 · mempool 3.2.1", "Cashu mint 0.16.5 · Fedimint guardian 0.7.2", "strfry 1.0.4 · Blossom 3.1.0 · nsecBunker", "Listeners, firewall, router (UPnP: on, 1 mapping)",
+    "Scout (listening): 10 devices, 2 unknown", "Advisory feed: 1,284 entries, 2 of 3 trusted signers", "Matching… 7 findings"];
+  let i = 0;
+  const log = $("#scanLog"), bar = $("#scanBar");
+  clearInterval(window._scanTimer);
+  if (hasGsap()) gsap.to(bar, { width: "100%", duration: lines.length * .32, ease: "power1.inOut" });
+  else bar.style.cssText = `width:100%;transition:width ${lines.length * .32}s ease`;
+  window._scanTimer = setInterval(() => {
+    if (!log || i >= lines.length) { clearInterval(window._scanTimer); const b = $("#wzResults"); if (b) { b.disabled = false; b.focus(); } return; }
+    const li = document.createElement("li"); li.innerHTML = `<b>✓</b> ${esc(lines[i++])}`;
+    log.appendChild(li);
+    if (hasGsap()) gsap.from(li, { x: -8, opacity: 0, duration: .25 });
+  }, 320);
+}
+
+/* ======================================================================
+   Events (one delegated listener)
+   ====================================================================== */
+document.addEventListener("click", (e) => {
+  const menu = $("#nav-menu");
+  if (menu && !menu.hidden && !e.target.closest("#nav-menu, #nav-menu-toggle")) setMenu(false);
+  const t = e.target.closest("button, a, g.mapnode, tr[data-dev]");
+  if (!t) return;
+  const ds = t.dataset;
+  if (t.id === "nav-menu-toggle") { setMenu(menu.hidden); return; }
+  if (t.closest("#nav-menu")) setMenu(false);
+
+  if (ds.close !== undefined) { closeModal(); return; }
+  if (ds.filter) { findingFilter = ds.filter; route(); return; }
+  if (ds.stab) { settingsTab = ds.stab; route(); return; }
+  if (ds.ai) { D.settings.ai = ds.ai; route(); return; }
+  if (ds.skinPick) { applySkin(ds.skinPick); toast(`Theme: ${SKINS.find(s => s.id === ds.skinPick).name}`); route(); return; }
+  if (ds.dev) { selDevice = ds.dev; route(); return; }
+  if (ds.wz !== undefined) { wizard(+ds.wz); return; }
+
+  if (ds.answer !== undefined) {
+    const f = D.findings.find(x => x.id === ds.id); const a = +ds.answer;
+    if (f.id === "GD-SAMPLE-0002") {
+      if (a === 0) { f.status = "affected"; f.sev = "critical"; toast("Affected. Follow the steps: new seed with dice, then move funds."); }
+      else { f.status = "resolved"; f.when = "resolved just now"; toast("Not affected: the seed wasn't made by the device."); }
+    } else if (f.id === "GD-SAMPLE-0004") {
+      if (a === 0) { f.status = "affected"; toast("Thanks. It stays open until it's updated or retired."); }
+      else { f.status = "affected"; f.sev = "high"; toast("Treated as unknown: block it on your router, then look into it."); }
+    } else if (f.id === "GD-SAMPLE-0007") {
+      if (a === 0) { f.status = "resolved"; f.when = "resolved just now"; const d = D.devices.find(x => x.ip === "192.0.2.57"); d.known = true; d.name = "Smart plug"; toast("Named \"Smart plug\" and marked known."); }
+      else { f.status = "affected"; f.sev = "high"; toast("Raised to high: block it on your router and change your Wi-Fi password."); }
+    }
+    route(); return;
+  }
+  if (ds.action) {
+    const f = D.findings.find(x => x.id === ds.id);
+    approvalModal(f, f.actions.find(a => a.id === ds.action)); return;
+  }
+  if (ds.doapprove) {
+    const f = D.findings.find(x => x.id === ds.doapprove);
+    const idx = f.actions.findIndex(a => a.id === ds.act);
+    f._done = (f._done || []).concat(idx === 0 ? [0] : [1]);
+    closeModal();
+    if (f.id === "GD-SAMPLE-0001" && f._done.includes(0) && f._done.includes(1)) { f.status = "resolved"; f.when = "resolved just now"; D.exposure.internet = []; toast("Both fixes applied (mock). Rescan confirms: Alby Hub 1.24.0, no longer reachable from the internet."); }
+    else if (f.id === "GD-SAMPLE-0003") { f.status = "resolved"; f.when = "resolved just now"; toast("Applied (mock). RPC now answers on the local network only."); }
+    else toast("Applied (mock). Nothing real was changed.");
+    D.approvals = D.approvals.filter(a => !(f.id === "GD-SAMPLE-0001" && ds.act === "act-upnp"));
+    route(); return;
+  }
+  if (ds.approve) { D.approvals = D.approvals.filter(a => a.code !== ds.approve); const f = D.findings[0]; f._done = (f._done || []).concat([0]); D.exposure.internet = []; toast("Approved (mock). The router mapping is gone; the buddy probe will confirm."); route(); return; }
+  if (ds.decline) { D.approvals = D.approvals.filter(a => a.code !== ds.decline); toast("Declined. The finding stays open."); route(); return; }
+  if (ds.handled) { const f = D.findings.find(x => x.id === ds.handled); f.status = "resolved"; f.when = "resolved just now"; toast("Marked handled. The next scan checks it really is."); route(); return; }
+  if (ds.accept) {
+    modal("Accept the risk", `<p style="margin-top:0">Guard Dog will stop alerting about this until the date below, then ask again.</p>
+      <label class="field">Why (for your future self)<textarea rows="3" placeholder="e.g. This port is only open while I'm travelling"></textarea></label>
+      <label class="field" style="margin-top:10px">Ask me again in<select><option>7 days</option><option>30 days</option><option>90 days</option></select></label>`,
+      `<button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="button" data-close id="acceptSave">Accept for now</button>`);
+    return;
+  }
+  if (ds.preview) { alertPreview(D.findings.find(x => x.id === ds.preview)); return; }
+  if (ds.known) { const d = D.devices.find(x => x.ip === ds.known); d.known = true; toast(`${d.name} marked as yours.`); route(); return; }
+  if (ds.unknown) { toast("Kept as unknown. Block it on your router and check what it is."); return; }
+
+  switch (t.id) {
+    case "logo-refresh": e.preventDefault(); if ((location.hash || "#/overview") === "#/overview") { location.reload(); } else { location.hash = "#/overview"; } return;
+    case "scanNow": return scanNow();
+    case "previewAlert": case "previewAlert2": return alertPreview();
+    case "theme-toggle": isDark = !isDark; return applyTheme(isDark);
+    case "startWizard": case "startWizardMenu": e.preventDefault(); return wizard(0);
+    case "registerBtn": case "wzRegister": return registerModal();
+    case "regSave": closeModal(); return toast("Registered (mock). Guard Dog will now ask a few setup questions.");
+    case "wzDone": closeModal(); location.hash = "#/overview"; return;
+    case "testAlert": return toast("Test alert sent to Nostr DM, ntfy and email (mock).");
+    case "probeBtn": return toast("Asked your buddy's Guard Dog for an outside-in probe. Results in about 2 minutes (mock).");
+    case "announceBtn": return toast("Spend announced for the next 24 h: the alert for it will be quiet (mock).");
+    case "plantBtn": return toast("You make and fund a decoy yourself; Guard Dog only watches it, it never holds the key (mock).");
+    case "backupBtn": return toast("The backup checklist opens here (mock).");
+    case "pairBtn": return toast("Pairing shows a one-time code to give your buddy (mock).");
+  }
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("#nav-menu").hidden) { setMenu(false); $("#nav-menu-toggle").focus(); return; }
+  if (e.key === "Escape" && $("#overlay").classList.contains("open")) closeModal();
+  if ((e.key === "Enter" || e.key === " ") && e.target.matches("g.mapnode")) { e.preventDefault(); selDevice = e.target.dataset.dev; route(); }
+});
+$("#overlay").addEventListener("click", (e) => { if (e.target.id === "overlay") closeModal(); });
+document.addEventListener("change", (e) => {
+  if (e.target.id === "sweepToggle") { activeSweep = e.target.checked; toast(activeSweep ? "Active sweep on: gentle, 50 packets/s, home subnet only." : "Active sweep off: Scout only listens."); route(); }
+  if (e.target.dataset.chan) { const c = D.settings.channels.find(x => x.id === e.target.dataset.chan); c.on = e.target.checked; toast(`${c.name} ${c.on ? "on" : "off"}.`); }
+});
+document.addEventListener("submit", (e) => {
+  if (e.target.id !== "repoForm") return;
+  e.preventDefault();
+  const v = $("#repoUrl").value.trim();
+  if (!/^(https?:\/\/)?(github\.com|gitlab\.com|codeberg\.org)\/[\w.-]+\/[\w.-]+\/?$|^nostr:|^naddr1/i.test(v)) { toast("Paste a GitHub, GitLab or Codeberg address like https://github.com/owner/repo, or a nostr git address."); return; }
+  const url = v.replace(/^https?:\/\//, "").replace(/\/$/, "");
+  const r = { url, linked: "not linked yet", yours: "?", latest: "checking…", adv: 0 };
+  D.repos.unshift(r);
+  $("#repoRows").insertAdjacentHTML("afterbegin", repoRow(r));
+  const row = $("#repoRows tr");
+  if (hasGsap()) gsap.from(row, { backgroundColor: "var(--accent-soft)", duration: 1.2 });
+  $("#repoUrl").value = "";
+  setTimeout(() => { r.latest = "v1.2.0"; r.linked = "pick a running app…"; route(); toast("Watching. Latest release v1.2.0, no advisories (mock)."); }, 1100);
+});
+
+/* scan + theme */
+function scanNow() {
+  const btn = $("#scanNow"), ic = $("#scanIcon");
+  btn.disabled = true; ic.classList.add("spin"); btn.querySelector("span").textContent = "Scanning…";
+  setTimeout(() => {
+    btn.disabled = false; ic.classList.remove("spin"); btn.querySelector("span").textContent = "Scan now";
+    D.lastCheckMin = 0; toast("Scan finished: 24 things checked, nothing new (mock)."); route();
+  }, 1600);
+}
+/* Theme toggle: the Sikorski Design System §6 block (canonical ids, key "theme", sun/moon, spin) */
+const sunPath = "M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z";
+const moonPath = "M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z";
+const prefersDark = window.matchMedia("(prefers-color-scheme: dark)");
+let isDark;
+try { const savedTheme = localStorage.getItem("theme"); isDark = savedTheme ? savedTheme === "dark" : prefersDark.matches; } catch (_) { isDark = true; }
+function applyTheme(dark, animate = true) {
+  document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+  try { localStorage.setItem("theme", dark ? "dark" : "light"); } catch (_) {}
+  const metaTheme = document.querySelector('meta[name="theme-color"]');
+  if (metaTheme) metaTheme.content = dark ? "#000000" : "#f5f5f7";
+  if (window.gdFavicon) window.gdFavicon(dark);
+  const themeIcon = document.getElementById("theme-icon");
+  themeIcon.querySelector("path").setAttribute("d", dark ? sunPath : moonPath);
+  if (animate && hasGsap()) gsap.fromTo(themeIcon, { rotation: 0, scale: 0.8 }, { rotation: 360, scale: 1, duration: 0.6, ease: "power2.out" });
+}
+
+/* Skins: Original (Sikorski) plus six optional themes */
+const SKINS = [
+  { id: "original", name: "Original (Sikorski)", vibe: "Black and white, glass and Inter. Light or dark.", light: null, sw: ["#000000", "#1c1c1e", "#ffffff", "#ff453a", "#30d158"] },
+  { id: "cyberpunk", name: "Cyberpunk", vibe: "Neon cyan and magenta on a deep night sky.", light: false, sw: ["#0b0217", "#19062d", "#00f0ff", "#ff2e63", "#39ff14"] },
+  { id: "terminal", name: "Terminal", vibe: "Green phosphor, monospace, square corners.", light: false, sw: ["#020a02", "#031103", "#33ff66", "#ff5555", "#50fa7b"] },
+  { id: "beach", name: "Beach", vibe: "Sand, sea and coral with soft, round corners.", light: true, sw: ["#fbf5ea", "#ffffff", "#0a8ea0", "#d93d3d", "#2e9e6a"] },
+  { id: "steampunk", name: "Steampunk", vibe: "Brass on walnut, parchment and serif type.", light: false, sw: ["#1e140c", "#342416", "#d4a24c", "#e2543a", "#8fbf6a"] },
+  { id: "paper", name: "Paper", vibe: "Newsprint and ink. Calm, high contrast, prints well.", light: true, sw: ["#f4f1ea", "#fbfaf6", "#1a1a1a", "#b3261e", "#2e6b3f"] },
+  { id: "forest", name: "Forest", vibe: "Moss, pine and birch. Easy on the eyes at night.", light: false, sw: ["#0f1a14", "#16261d", "#c8e6a0", "#ff6b5b", "#8fd694"] }
+];
+let currentSkin = "original";
+try { currentSkin = localStorage.getItem("gd-skin") || "original"; } catch (_) {}
+function applySkin(id) {
+  const s = SKINS.find(x => x.id === id) || SKINS[0];
+  currentSkin = s.id;
+  if (s.id === "original") document.documentElement.removeAttribute("data-skin");
+  else document.documentElement.setAttribute("data-skin", s.id);
+  try { localStorage.setItem("gd-skin", s.id); } catch (_) {}
+  if (s.light === null) { applyTheme(isDark, false); return; }
+  const metaTheme = document.querySelector('meta[name="theme-color"]');
+  if (metaTheme) metaTheme.content = s.sw[0];
+  if (window.gdFavicon) window.gdFavicon(!s.light);
+}
+
+/* boot */
+(function boot() {
+  applyTheme(isDark, false);
+  applySkin(currentSkin);
+  prefersDark.addEventListener("change", (e) => { isDark = e.matches; if (currentSkin === "original") applyTheme(isDark, true); });
+  window.addEventListener("hashchange", route);
+  const start = () => {
+    if (!hasGsap()) document.documentElement.classList.add("no-gsap");
+    route();
+    let seen = false; try { seen = localStorage.getItem("gd-wizard-seen") === "1"; } catch (_) {}
+    if (!seen) { wizard(0); try { localStorage.setItem("gd-wizard-seen", "1"); } catch (_) {} }
+  };
+  // GSAP is loaded with defer; wait for it briefly, then go on without it.
+  if (document.readyState === "complete") start(); else window.addEventListener("load", start);
+})();
+</script>
+</body>
+</html>
