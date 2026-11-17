@@ -336,6 +336,7 @@ fn parse_version(raw: &str) -> Result<Pep440Version, VersionError> {
     if release.len() > MAX_COMPONENTS {
         return Err(VersionError::TooLong);
     }
+    let mut budget = release.len();
 
     // Pre-release: optional separator, a label, optional separator, optional
     // number. A separator is taken even when no number follows.
@@ -394,6 +395,7 @@ fn parse_version(raw: &str) -> Result<Pep440Version, VersionError> {
                 break;
             }
         }
+        budget += segments.len();
         if segments.len() > MAX_COMPONENTS {
             return Err(VersionError::TooLong);
         }
@@ -402,6 +404,10 @@ fn parse_version(raw: &str) -> Result<Pep440Version, VersionError> {
 
     if !c.at_end() {
         return Err(VersionError::Malformed);
+    }
+    budget += usize::from(pre.is_some()) + usize::from(post.is_some()) + usize::from(dev.is_some());
+    if budget > MAX_COMPONENTS {
+        return Err(VersionError::TooLong);
     }
     Ok(Pep440Version {
         epoch,
@@ -439,6 +445,9 @@ impl VersionScheme for Pep440 {
     /// reads as an interval and never as a hit or a miss. This includes P itself
     /// when P already ends in `.dev0`.
     fn candidate(&self, raw: &str) -> Result<Candidate<Pep440Version>, VersionError> {
+        if raw.trim_ascii().len() != raw.len() {
+            return Err(VersionError::Malformed);
+        }
         let v = parse_version(raw)?;
         if v.local.is_none() {
             return Ok(Candidate::Exact(v));

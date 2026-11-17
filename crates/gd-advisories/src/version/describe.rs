@@ -2,12 +2,13 @@
 //! (design 2.1, section 2, "Git-describe").
 //!
 //! A description is `<tag>-<distance>-g<hash>`, optionally followed by a dirty
-//! marker (`-dirty`; git's `-broken` and CLN's `-modded` inside a tag are refused).
-//! It is parsed from the right, so the tag may hold hyphens itself. The tag is a version;
-//! the distance and hash are evidence about one build, never a
-//! release: `1.1.2-148-g4cd3cf6` is neither `1.1.2` nor proved below `1.1.3`. Only
-//! the tag, never the whole description, goes to the SemVer scheme, where
-//! `148-g4cd3cf6` would read as a prerelease and sort it below `1.1.2`.
+//! marker (`-dirty`; git's `-broken` and CLN's `-modded` inside a tag are
+//! refused). It is parsed from the right, so the tag may hold hyphens itself.
+//! The tag is a version; the distance and hash are evidence about one build,
+//! never a release: `1.1.2-148-g4cd3cf6` is neither `1.1.2` nor proved below
+//! `1.1.3`. Only the tag, never the whole description, goes to the SemVer
+//! scheme, where `148-g4cd3cf6` would read as a prerelease and sort it below
+//! `1.1.2`.
 
 use std::fmt;
 
@@ -130,8 +131,11 @@ fn holds_a_description(s: &str) -> bool {
 fn parse_tag(raw: &str) -> Result<TagVersion, VersionError> {
     let (head, meta) = raw.split_once('+').map_or((raw, ""), |(h, m)| (h, m));
     let marked = |part: &str| ["-modded", "-broken"].iter().any(|m| part.ends_with(m));
+    let dirty_marked = |part: &str| part.ends_with("-dirty");
     if holds_a_description(raw)
-        || head.ends_with("-dirty")
+        || dirty_marked(raw)
+        || dirty_marked(head)
+        || dirty_marked(meta)
         || marked(raw)
         || marked(head)
         || marked(meta)

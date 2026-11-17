@@ -979,7 +979,7 @@ fn every_fixture_and_catalog_version_for_cln_and_strfry_parses() {
         assert_eq!(Calver.candidate(&v).unwrap(), Candidate::Exact(cln(&v)));
     }
     let v = service_version("lab-regtest", "strfry");
-    assert_eq!(v, FIXTURE_STRFRY);
+    assert!(v == FIXTURE_STRFRY, "strfry fixture version");
     assert!(GitDescribe.parse_describe(&v).is_ok());
     assert!(GitDescribe.candidate(&v).is_ok());
     // The old synthetic setup runs no strfry.
@@ -1017,13 +1017,16 @@ fn cln_fixture_pairs_give_the_version_subresult_the_fixture_states() {
     assert_eq!(adv.affected.len(), 1);
     for (setup, installed_is) in [("lab-old-synthetic", "25.09"), ("lab-regtest", "26.06.9")] {
         let installed = service_version(setup, "core-lightning");
-        assert_eq!(installed, installed_is);
+        assert!(installed == installed_is, "cln fixture version {setup}");
         let got = evaluate_entry(&Calver, &adv, 0, Some(&installed));
         let expected = expected_version(setup, advisory);
-        assert_eq!(kind(&got), expected, "{setup} {advisory}");
+        assert!(kind(&got) == expected, "cln fixture subresult {setup}");
         // The same version spelled as the lab reports it (with `v`).
         let got = evaluate_entry(&Calver, &adv, 0, Some(&format!("v{installed}")));
-        assert_eq!(kind(&got), expected, "{setup} with a v prefix");
+        assert!(
+            kind(&got) == expected,
+            "cln fixture subresult {setup} with v"
+        );
     }
     // The in-range answer is decided by the `fixed` event of the one range.
     assert_eq!(
@@ -1680,4 +1683,25 @@ fn cln_legacy_four_part_and_two_part_tags_are_refused_not_cleared() {
         reason(&cln_ev(r#"[{"introduced":"0"},{"fixed":"24.11"}]"#, "v0.6")),
         UnknownReason::InstalledVersionUnparseable
     );
+    let listed = git_advisory(json!([]), json!(["v0.7.2.1"]));
+    assert_eq!(
+        reason(&evaluate_entry(&Calver, &listed, 0, Some("v24.11"))),
+        UnknownReason::UnreadableListedVersion
+    );
+}
+
+#[test]
+fn strfry_dirty_marker_inside_the_residual_tag_is_refused() {
+    let r = r#"[{"introduced":"0"},{"fixed":"2.0.0"}]"#;
+    for installed in [
+        "2.0.0+vendor-dirty-1-gabcd",
+        "2.0.0-dirty-1-gabcd",
+        "2.0.0-rc1-dirty-1-gabcd",
+    ] {
+        assert!(
+            reason(&describe_ev(r, installed)) == UnknownReason::InstalledVersionUnparseable,
+            "strfry residual dirty marker, case {}",
+            installed.len()
+        );
+    }
 }

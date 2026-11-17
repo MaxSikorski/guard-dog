@@ -213,9 +213,15 @@ fn normalization_rules() {
         // order of the parts is fixed on output
         ("1!2.3a4.post5.dev6+x.7", "1!2.3a4.post5.dev6+x.7"),
     ] {
-        assert_eq!(p(raw).to_string(), normalized, "{raw:?}");
+        assert!(
+            p(raw).to_string() == normalized,
+            "normalization of a table spelling"
+        );
         // Normalization is idempotent.
-        assert_eq!(p(normalized).to_string(), normalized, "{normalized}");
+        assert!(
+            p(normalized).to_string() == normalized,
+            "normalization is not idempotent"
+        );
         assert_eq!(p(raw), p(normalized));
     }
 }
@@ -417,9 +423,9 @@ fn budgets_are_named_errors() {
     assert!(Pep440.parse(&ok).is_ok());
     let many = vec!["1"; 65].join(".");
     assert_eq!(Pep440.parse(&many), Err(VersionError::TooLong));
-    let local_ok = format!("1.0+{}", vec!["a"; 64].join("."));
+    let local_ok = format!("1.0+{}", vec!["a"; 62].join("."));
     assert!(Pep440.parse(&local_ok).is_ok());
-    let local_many = format!("1.0+{}", vec!["a"; 65].join("."));
+    let local_many = format!("1.0+{}", vec!["a"; 63].join("."));
     assert_eq!(Pep440.parse(&local_many), Err(VersionError::TooLong));
     // 256 bytes read; more do not. Whitespace outside counts.
     let at = format!("1.{}", "9".repeat(254));
@@ -471,8 +477,11 @@ fn candidate_is_exact_and_flags_are_declared() {
 fn parse_and_order_agree_with_the_recorded_packaging_vectors() {
     let path = root().join("crates/gd-advisories/tests/reference/pep440-vectors.json");
     let data: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-    assert_eq!(data["generator"], "packaging.version.Version");
-    assert_eq!(data["packaging"], "26.3");
+    assert!(
+        data["generator"] == "packaging.version.Version",
+        "vector file generator"
+    );
+    assert!(data["packaging"] == "26.3", "vector file packaging version");
     let inputs: Vec<&str> = data["inputs"]
         .as_array()
         .unwrap()
@@ -485,27 +494,33 @@ fn parse_and_order_agree_with_the_recorded_packaging_vectors() {
 
     let mut readable = 0usize;
     let mut refused = 0usize;
-    for (raw, n) in inputs.iter().zip(normalized) {
+    for (idx, (raw, n)) in inputs.iter().zip(normalized).enumerate() {
         match n.as_str() {
             Some(expected) => {
                 readable += 1;
                 let v = Pep440
                     .parse(raw)
-                    .unwrap_or_else(|e| panic!("{raw:?} should parse: {e}"));
-                assert_eq!(v.to_string(), expected, "{raw:?}");
+                    .unwrap_or_else(|_| panic!("vector {idx} should parse"));
+                assert!(
+                    v.to_string() == expected,
+                    "vector {idx} normalizes differently"
+                );
             }
             None => {
                 refused += 1;
-                assert!(Pep440.parse(raw).is_err(), "{raw:?} should be refused");
-                assert!(Pep440.candidate(raw).is_err(), "{raw:?} should be refused");
+                assert!(Pep440.parse(raw).is_err(), "vector {idx} should be refused");
+                assert!(
+                    Pep440.candidate(raw).is_err(),
+                    "vector {idx} should be refused"
+                );
             }
         }
     }
-    assert!(readable >= 100 && refused >= 25, "{readable} {refused}");
+    assert!(readable >= 100 && refused >= 25, "vector counts look wrong");
 
     let pairs = data["pairs"].as_array().unwrap();
     assert_eq!(pairs.len(), readable * (readable - 1) / 2);
-    for pair in pairs {
+    for (pair_idx, pair) in pairs.iter().enumerate() {
         let pair = pair.as_array().unwrap();
         let (i, j) = (
             usize::try_from(pair[0].as_u64().unwrap()).unwrap(),
@@ -517,9 +532,12 @@ fn parse_and_order_agree_with_the_recorded_packaging_vectors() {
             _ => Ordering::Greater,
         };
         let (a, b) = (p(inputs[i]), p(inputs[j]));
-        assert_eq!(a.cmp(&b), want, "{:?} vs {:?}", inputs[i], inputs[j]);
-        assert_eq!(b.cmp(&a), want.reverse());
-        assert_eq!(a == b, want == Ordering::Equal);
+        assert!(a.cmp(&b) == want, "pair {pair_idx} order");
+        assert!(b.cmp(&a) == want.reverse(), "pair {pair_idx} reverse order");
+        assert!(
+            (a == b) == (want == Ordering::Equal),
+            "pair {pair_idx} equality"
+        );
     }
 }
 
@@ -593,9 +611,15 @@ fn cashu_fixture_pairs_give_the_version_subresult_the_fixture_states() {
     assert_eq!(adv.affected.len(), 1);
     for (setup, installed_is) in [("lab-old-synthetic", "0.17.0"), ("lab-regtest", "0.21.0")] {
         let installed = service_version(setup, "nutshell");
-        assert_eq!(installed, installed_is);
+        assert!(
+            installed == installed_is,
+            "nutshell fixture version {setup}"
+        );
         let got = evaluate_entry(&Pep440, &adv, 0, Some(&installed));
-        assert_eq!(kind(&got), expected_version(setup, advisory), "{setup}");
+        assert!(
+            kind(&got) == expected_version(setup, advisory),
+            "nutshell fixture subresult {setup}"
+        );
     }
     assert_eq!(
         evaluate_entry(&Pep440, &adv, 0, Some("0.17.0")),
@@ -1387,4 +1411,35 @@ fn a_local_build_listed_with_another_spelling_is_a_spelling_question() {
         reason(&listed("0.16.0+umbrel2", "0.16.0+umbrel1")),
         UnknownReason::CandidateIsAnInterval
     );
+}
+
+#[test]
+fn installed_whitespace_is_refused_but_advisory_side_is_normalized() {
+    let r = r#"[{"introduced":"0"},{"fixed":"0.18.0"}]"#;
+    for installed in [" 0.18.0\n", " 0.18.0", "0.18.0\n", "\t0.18.0"] {
+        assert!(
+            reason(&ev(r, installed)) == UnknownReason::InstalledVersionUnparseable,
+            "installed value with whitespace, case {}",
+            installed.len()
+        );
+    }
+    assert!(kind(&ev(r, "0.18.0")) == "out-of-range");
+    // Boundaries keep the advisory-side normalization.
+    let padded = r#"[{"introduced":"0"},{"fixed":" 0.18.0 "}]"#;
+    assert!(kind(&ev(padded, "0.17.0")) == "in-range");
+}
+
+#[test]
+fn the_component_budget_covers_the_whole_version() {
+    let long = format!("{}+{}", vec!["2"; 33].join("."), vec!["x"; 33].join("."));
+    assert!(long.len() <= 256);
+    assert!(Pep440.parse(&long) == Err(VersionError::TooLong));
+    let adv = pypi_advisory(json!([]), json!([long]));
+    assert!(
+        reason(&evaluate_entry(&Pep440, &adv, 0, Some("1.0")))
+            == UnknownReason::UnreadableListedVersion
+    );
+    // Within the budget in total is still read.
+    let ok = format!("{}+{}", vec!["2"; 31].join("."), vec!["x"; 31].join("."));
+    assert!(Pep440.parse(&ok).is_ok());
 }
