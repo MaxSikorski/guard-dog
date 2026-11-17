@@ -6,7 +6,7 @@ Judge C asks one question: does anything leave the box that shouldn't, including
 - **F2** a planted canary or a secret-shaped value in any form from the decoding set, anywhere a byte could have gone
 - **F3** a packet that fell into the black hole, meaning it tried to leave without being redirected
 - **F4** a missing control: a judge that sees nothing must never pass
-- **F5** a capture that can't be read, is incomplete, or disagrees with itself (gaps, fragments, extra DNS sections, compressed bodies, a missing end marker)
+- **F5** a capture that can't be read, is incomplete, or disagrees with itself (gaps, lost tails, kernel drops, fragments, extra or cut-off DNS records, compressed bodies, a missing end marker)
 
 The checker is `crates/gd-egress` (`gd-egress check`). Today it runs on **synthetic** captures only; the live lab that makes real captures arrives in the next piece.
 
@@ -29,19 +29,23 @@ Those are the job of the never-have list and least privilege (threat model secti
 
 **Compressed request bodies fail the judge** (`undecoded-content-encoding`). Decompression arrives in PR 1b, and is required before `allowlist.toml` gets its first entry.
 
+## What the lab must supply
+
+Besides the files in the capture directory layout, the judge needs `pcap/tcpdump.log`: tcpdump's own closing summary (`N packets captured`, `N packets received by filter`, `N packets dropped by kernel`). `netns.sh` already writes tcpdump's messages to `tcpdump.log`; the lab piece stops tcpdump with SIGINT, waits for it to exit and keeps that file as `pcap/tcpdump.log`. A missing file, missing lines, any drop, or a packet count that differs from the pcap is F5. The recorder's addon should write a global `seq` number on every `http` and `tcp` event so requests on different connections can be put back in order (without it the line number is used).
+
 ## What is in this folder
 
 | Path | What |
 |---|---|
-| `synthetic/` | 54 expected reports, one per scenario. **Synthetic: built by `crates/gd-egress/tests/support/mod.rs`, never a real capture.** Each was written before the code that makes it pass. |
+| `synthetic/` | 61 expected reports, one per scenario. **Synthetic: built by `crates/gd-egress/tests/support/mod.rs`, never a real capture.** Each was written before the code that makes it pass. |
 | `golden/canaries-seed-1.json` | The canaries made from seed 1 (`canaries.json` format 2, with the raw bytes of each), byte for byte. Pins the generator. |
 | `expected-rules.txt` | The firewall and route dump the sealed box must have. **Provisional** until the lab arrives; the lab piece replaces it with the real, reviewed dump. |
 
 Reports contain no counts, no times and never a canary (those print as `<canary:CLASS>`), so an expected file is the same for every seed.
 
-## The 54 scenarios
+## The 61 scenarios
 
-S01 to S18 are the first set; S19 to S54 each cover one review finding (O = Opus, C = Codex).
+S01 to S18 are the first set; S19 to S61 each cover one review finding (O = Opus, C = Codex, then the second Codex round).
 
 | # | Scenario | What it proves |
 |---|---|---|
@@ -99,6 +103,13 @@ S01 to S18 are the first set; S19 to S54 each cover one review finding (O = Opus
 | S52 | lo-duplicate-outgoing | Outgoing copies of loopback records are ignored |
 | S53 | workload-before-pre | A workload connection numbered before the pre control: F5 |
 | S54 | mitm-no-end | The recorder's end marker is missing: F5 |
+| S55 | control-ciphertext-lost | The control's handshake is captured but its request bytes are not, though the server acknowledged them: F4, F5 |
+| S56 | kernel-drops | tcpdump says the kernel dropped a packet: F5 |
+| S57 | nsec-double-percent | An nsec percent-encoded twice |
+| S58 | hex-colon-pairs | An nsec's bytes in hex with a colon between pairs |
+| S59 | ipv4-split-bodies | An IPv4 address split over four requests on two connections |
+| S60 | dns-truncated-opt | A DNS query with a cut-off OPT record: F5 |
+| S61 | dst-ip-redacted | The planted IPv4 as the original destination prints redacted |
 
 ## Regenerating the golden file
 
