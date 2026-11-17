@@ -82,7 +82,7 @@ If your money and identity live on your own infrastructure, you're your own secu
 
 - **Judge A, recorded setups:** does it find every service and its version on a real setup? Coming next.
 - **Judge B, real advisories:** does it report every advisory that applies, and nothing that doesn't? So far there's a corpus of 23 advisories, checked against the OSV schema. The matching comes later.
-- **Judge C, egress:** does anything leave the box that shouldn't? Coming next.
+- **Judge C, egress:** does anything leave the box that shouldn't? The checker is in and passes 61 synthetic captures; running it on real captures from the lab comes next.
 - **Judge D, injection:** can hostile text make it do or show something it shouldn't? 48 hostile payloads, and 48 of 48 pass. A naive renderer fails 36 of them, so the judge has teeth.
 
 The details are in [tests/README.md](tests/README.md).

@@ -21,10 +21,10 @@ What you get from this phase is nothing to run yet, but a way to trust what come
 
 - **Done:** one command builds and tests everything, from a pinned Rust toolchain, with only permissively licensed dependencies.
 - **Running today: Judge D.** It feeds a corpus of injection attacks (fake changelogs, relay descriptions, banners) through Guard Dog on every pull request, and fails if any of them makes Guard Dog take an action or step outside its fixed set of answers. It's a tripwire, not proof.
-- **In progress: Judge B.** It will check advisory matching against real historical advisories, with the expected answers written down in advance. The corpus of past advisories is in, but it can't be run until Judge A's recorded setups exist.
-- **Not started: Judge A.** It will check Guard Dog against snapshots of real setups, with every identifier replaced by made-up values.
-- **Not started: Judge C.** It will record outbound network activity in CI and fail on any connection that isn't on the expected list, or that carries one of the planted test secrets.
-- **Done: the regtest lab.** A throwaway Bitcoin network that can never touch real money, with five real services pinned by digest and a funded channel, up in about a minute. A static test checks the lab's compose file for unsafe settings. A nightly CI run of the lab is written and waiting for review.
+- **In progress: Judge B.** It checks advisory matching against real historical advisories, with the expected answers written down before any matcher exists. The corpus of 23 past advisories is in, and so are the expected answers for the lab's two setups (#17). The matcher itself comes in the next phase, so today it scores zero by design. More setups come once Judge A lands.
+- **In progress: Judge A.** It will check Guard Dog against snapshots of real setups, with every secret and identifier replaced by made-up values. The recorder is written, but it still has open review findings and isn't merged yet.
+- **In progress: Judge C.** It records outbound network activity and fails on any connection that isn't on the expected list, or that carries one of the planted test secrets, even encoded (on synthetic captures so far). Part 1, the checker, is merged and tested on 61 synthetic captures (#21). Next: decoding compressed bodies, then running it on real captures from the lab.
+- **Done: the regtest lab.** A throwaway Bitcoin network that can never touch real money, with five real services pinned by digest and a funded channel, up in about a minute. A static test checks the lab's compose file for unsafe settings. The lab runs every night in CI (#16), and every test run and every nightly run checks that the lab and our test fixtures show the judges the same setup (#19, #20).
 
 ## Next: the first useful version
 
