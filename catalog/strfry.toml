@@ -1,0 +1,79 @@
+# strfry. Format: catalog/README.md. Checked by crates/gd-core/tests/catalog.rs.
+format = 1
+id = "strfry"
+name = "strfry"
+kind = "service"
+aliases = []
+summary = "A Nostr relay."
+money = false
+licence = "GPL-3.0"
+
+[upstream]
+repo = "https://github.com/hoytech/strfry"
+release_feed = "https://github.com/hoytech/strfry/tags.atom"
+
+[recognize]
+images = ["ghcr.io/hoytech/strfry"]
+binaries = ["strfry"]
+units = []
+
+[[recognize.ports]]
+port = 7777
+proto = "tcp"
+what = "relay websocket"
+exposure = "public-ok"
+source = "lab/compose.yml"
+
+[[recognize.probes]]
+kind = "nip11"
+method = "GET"
+path = "/"
+accept = "application/nostr+json"
+port = 7777
+field = "software"
+match = '^git\+https://github\.com/hoytech/strfry(\.git)?$'
+
+[version]
+source = "nip11"
+endpoint_port = 7777
+credential = "none"
+regex = '^(?P<version>\d+\.\d+\.\d+(?:-\d+-g[0-9a-f]{7,})?)$'
+scheme = "git-describe"
+
+[version.call]
+method = "GET"
+path = "/"
+accept = "application/nostr+json"
+field = "version"
+
+[[version.examples]]
+raw = "1.1.2-148-g4cd3cf6"
+version = "1.1.2-148-g4cd3cf6"
+source = "fixtures/lab-recorded/manifest.toml"
+
+[advisories]
+osv_packages = ["GIT https://github.com/hoytech/strfry"]
+ghsa = false
+feeds = []
+blind_spot = "No SECURITY.md, no advisories, not in OSV (spike d, 2026-11-16)."
+
+[signing]
+level = "unsigned"
+method = "lightweight tags, no GitHub releases"
+reproducible = "unverified"
+images_signed = false
+
+[review]
+last_reviewed = 2026-11-17
+sources = [
+  "https://github.com/hoytech/strfry",
+]
+todo = [
+  "licence: the lab comment says GPL-3.0; confirm -only or -or-later upstream",
+  "website: none recorded in the repo",
+  "ports: 7777 comes from the lab healthcheck; confirm it is the upstream default",
+  "units: RaspiBlitz and myNode systemd unit names",
+  "version: map git describe hashes to release tags (spike b)",
+  "security_policy: spike d found none; ask the project for a contact",
+  "release_feed: the tags feed is assumed from the GitHub tags page; confirm",
+]

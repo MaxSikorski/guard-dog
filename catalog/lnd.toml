@@ -1,0 +1,87 @@
+# LND. Format: catalog/README.md. Checked by crates/gd-core/tests/catalog.rs.
+format = 1
+id = "lnd"
+name = "LND"
+kind = "service"
+aliases = []
+summary = "Lightning Labs' Lightning Network node."
+money = true
+licence = "MIT"
+
+[upstream]
+repo = "https://github.com/lightningnetwork/lnd"
+release_feed = "https://github.com/lightningnetwork/lnd/releases.atom"
+
+[recognize]
+images = ["docker.io/lightninglabs/lnd"]
+binaries = ["lnd", "lncli"]
+units = []
+
+[[recognize.ports]]
+port = 9735
+proto = "tcp"
+what = "peer connections"
+exposure = "public-ok"
+source = "lab/compose.yml"
+
+[[recognize.ports]]
+port = 10009
+proto = "tcp"
+what = "gRPC"
+exposure = "never-public"
+source = "lab/compose.yml"
+
+[[recognize.probes]]
+kind = "grpc"
+method = "lnrpc.State/GetState"
+port = 10009
+
+[version]
+source = "grpc"
+endpoint_port = 10009
+credential = "macaroon baked with info:read"
+regex = '^(?P<version>\d+\.\d+\.\d+-beta(?:\.rc\d+)?)$'
+scheme = "semver-beta"
+
+[version.call]
+method = "verrpc.Versioner/GetVersion"
+field = "version"
+
+[version.tls]
+cert_source = "node-tls-cert"
+server_name = "localhost"
+
+[[version.examples]]
+raw = "0.21.6-beta"
+version = "0.21.6-beta"
+source = "fixtures/lab-recorded/manifest.toml"
+
+[advisories]
+osv_packages = ["Go github.com/lightningnetwork/lnd"]
+ghsa = true
+feeds = [{ kind = "atom", url = "https://security.lightning.engineering/feed.xml" }]
+
+[signing]
+level = "signed-multi"
+method = "manifest-<tag>.txt + one detached .sig per signer, OpenTimestamps proofs"
+keys_url = "https://github.com/lightningnetwork/lnd/tree/master/scripts/keys"
+reproducible = "yes"
+images_signed = false
+
+[review]
+last_reviewed = 2026-11-17
+sources = [
+  "https://github.com/lightningnetwork/lnd/blob/master/docs/release.md",
+  "https://docs.lightning.engineering/lightning-network-tools/lnd/macaroons",
+  "https://security.lightning.engineering/",
+]
+todo = [
+  "version.tls.server_name: LND's own certificate always lists localhost; the lab adds `lnd` with --tlsextradomain=lnd, and other platforms may add other names",
+  "licence: the lab comment says MIT; confirm against the upstream LICENSE file",
+  "upstream.security_policy: not found in the repo records",
+  "ports: 9735 and 10009 are as set in lab/compose.yml; confirm they are upstream defaults; REST (8080) is not enabled in the lab (--norest) and is left out until a source is checked",
+  "units: RaspiBlitz and myNode systemd unit names",
+  "signing.min_signatures: the latest release had 5 signer files; the rule is not confirmed",
+  "signing.keys: fingerprints of the 11 keys in scripts/keys",
+  "platform_map: app ids on UmbrelOS, StartOS, RaspiBlitz and myNode",
+]
