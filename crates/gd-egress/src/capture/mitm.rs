@@ -200,20 +200,6 @@ fn parse_event(obj: &Map<String, Value>, name: &str) -> Result<Event, Fail> {
     }
 }
 
-/// Whether a request says its body is compressed or otherwise encoded.
-fn encoded(event: &HttpEvent) -> bool {
-    event.headers.iter().any(|(name, value)| {
-        name.eq_ignore_ascii_case(b"content-encoding")
-            && !matches!(
-                String::from_utf8_lossy(value)
-                    .trim()
-                    .to_ascii_lowercase()
-                    .as_str(),
-                "" | "identity"
-            )
-    })
-}
-
 fn header_ok(line: &str) -> bool {
     let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(line) else {
         return false;
@@ -303,9 +289,6 @@ pub fn parse(bytes: &[u8]) -> MitmLog {
             Event::Http { event, truncated } => {
                 if truncated {
                     log.errors.insert("body-truncated");
-                }
-                if encoded(&event) {
-                    log.errors.insert("undecoded-content-encoding");
                 }
                 conn.http.push(HttpEvent { seq, ..event });
             }

@@ -1,0 +1,4 @@
+Judge C (egress capture): FAIL
+control: dns ok, https ok, wire ok, blocked-path ok
+destinations: 0 unlisted, 2 allowlisted
+F5 capture-unreadable mitm: decode-bound

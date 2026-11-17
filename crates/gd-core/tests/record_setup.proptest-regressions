@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 870711f1060c5900096076f8320db772b1b1fd70ffd37e973cccedcb75fb06c9 # shrinks to case = TorCase { kept_ips: ["11.101.101.101"], folders: [("aaaaaa", "aaa")], dropped: ["aaaaaaaaaaadMqB0VpRf"], bridge_ips: ["72.133.123.145"], homes: ["xzraxzacyh"] }

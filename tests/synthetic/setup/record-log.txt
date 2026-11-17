@@ -1,0 +1,8 @@
+record-setup.sh format 2
+mode record
+platform-hint raspiblitz
+collected binaries-version.txt
+collected replies/strfry/nip11.json
+collected systemctl-list-units.txt
+kept-domain github.com
+secret-shaped-values-removed 0

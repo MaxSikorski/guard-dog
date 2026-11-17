@@ -5,10 +5,14 @@
 //! Each canary is searched for as its text, its hex, its alignments, its raw
 //! bytes, and (for IP addresses) by value in every textual form. Base64,
 //! base32 and hex tokens are decoded and scanned again, two layers deep.
-//! Shape detectors catch lab-style secrets this run did not plant.
+//! Key bytes written out as source code (`0x8d, 0x1f`, `[141, 31]`, `\x8d\x1f`), an xpub
+//! re-encoded under another version, and IP addresses in host-name, reverse-lookup and
+//! IPv4-mapped forms are read too. Shape detectors catch lab-style secrets this run did not plant.
 
 use crate::canary::{CanarySet, Class};
-use crate::encode::{base32_decode_loose, base32_lower, base64, base64_decode_loose, hex};
+use crate::encode::{
+    base32_decode_loose, base32_lower, base58_decode, base64, base64_decode_loose, hex, is_base58,
+};
 use regex::bytes::Regex;
 use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -29,6 +33,11 @@ pub const TOTAL_BUDGET: u64 = 256 * 1024 * 1024;
 pub const TOKEN_BUDGET: usize = 4096;
 /// Tokens shorter than this are not decoded.
 const MIN_TOKEN: usize = 16;
+/// Base58 runs shorter or longer than this are not decoded (an extended key is about 111).
+const MIN_BASE58: usize = 100;
+const MAX_BASE58: usize = 200;
+/// An extended key: 111 base58 characters.
+const KEY_BASE58: usize = 111;
 /// Token decoding goes this many layers deep (the haystack is layer 0).
 const MAX_LAYER: u8 = 2;
 
@@ -174,6 +183,12 @@ fn hex4(bytes: &[u8], at: usize) -> Option<u32> {
 /// JSON string escapes undone: `\" \\ \/ \b \f \n \r \t` and `\uXXXX` (with
 /// surrogate pairs). An invalid or unfinished escape is left as it is. Case is kept.
 fn json_unescape(bytes: &[u8]) -> Vec<u8> {
+    json_unescape_with(bytes, false)
+}
+
+/// As [`json_unescape`]; with `latin1`, a `\u00XX` escape (and any `\uXXXX` up to `\u00FF`) is the
+/// one byte `XX` rather than its UTF-8 form, which is how raw key bytes are written into JSON.
+fn json_unescape_with(bytes: &[u8], latin1: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while let Some(&c) = bytes.get(i) {
@@ -218,8 +233,13 @@ fn json_unescape(bytes: &[u8]) -> Vec<u8> {
             .flatten();
         match unicode {
             Some((ch, used)) => {
-                let mut buf = [0u8; 4];
-                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                match u8::try_from(u32::from(ch)) {
+                    Ok(byte) if latin1 => out.push(byte),
+                    _ => {
+                        let mut buf = [0u8; 4];
+                        out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                    }
+                }
                 i += used;
             }
             None => {
@@ -245,6 +265,154 @@ fn letters(lowered: &[u8]) -> Vec<u8> {
         .filter(|b| b.is_ascii_lowercase())
         .copied()
         .collect()
+}
+
+/// `0x` and `\x` markers taken out, so `[0x8d, 0x1f]` and `\x8d\x1f` read as plain hex pairs.
+/// A `0x` only counts at the start of a number, not inside a longer word.
+fn without_hex_markers(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while let Some(&c) = bytes.get(i) {
+        let marker = match (c, bytes.get(i + 1)) {
+            (b'\\', Some(b'x' | b'X')) => true,
+            (b'0', Some(b'x' | b'X')) => {
+                let boundary = i
+                    .checked_sub(1)
+                    .and_then(|p| bytes.get(p))
+                    .is_none_or(|p| !p.is_ascii_alphanumeric());
+                boundary && bytes.get(i + 2).copied().and_then(hex_value).is_some()
+            }
+            _ => false,
+        };
+        if marker {
+            i += 2;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// One decimal number as a byte: 0 to 255, or a signed byte -128 to -1 (Java prints those).
+fn decimal_byte(token: &[u8]) -> Option<u8> {
+    match token.split_first() {
+        Some((b'-', digits)) => {
+            let n = small_number(digits, 3)?;
+            u8::try_from(256u64.checked_sub(n).filter(|_| (1..=128).contains(&n))?).ok()
+        }
+        _ => u8::try_from(small_number(token, 3)?).ok(),
+    }
+}
+
+/// One or two hex digits as a byte, with an optional `0x` in front (`b9`, `1`, `0x1`, `0XB9`).
+fn hex_byte(token: &[u8]) -> Option<u8> {
+    let digits = token
+        .strip_prefix(b"0x")
+        .or_else(|| token.strip_prefix(b"0X"))
+        .unwrap_or(token);
+    if digits.is_empty() || digits.len() > 2 {
+        return None;
+    }
+    digits
+        .iter()
+        .try_fold(0u8, |acc, &d| Some((acc << 4) | hex_value(d)?))
+}
+
+/// Byte lists written out as numbers: decimal (`141, 31`, signed `-71`) and hex (`b9, 1`, `0x1`),
+/// separated by commas, semicolons, white space or brackets, eight or more in a row, turned into
+/// the bytes they stand for. One pass; a token that is neither ends both runs it breaks.
+fn listed_byte_runs(view: &[u8]) -> Vec<Vec<u8>> {
+    let separator = |b: &u8| {
+        matches!(
+            *b,
+            b',' | b';' | b' ' | b'\t' | b'\r' | b'\n' | b'[' | b']' | b'(' | b')' | b'{' | b'}'
+        )
+    };
+    let mut runs: Vec<Vec<u8>> = Vec::new();
+    let (mut dec, mut hexes): (Vec<u8>, Vec<u8>) = (Vec::new(), Vec::new());
+    let end = |run: &mut Vec<u8>, runs: &mut Vec<Vec<u8>>| {
+        if run.len() >= 8 {
+            runs.push(std::mem::take(run));
+        }
+        run.clear();
+    };
+    for token in view.split(separator).filter(|t| !t.is_empty()) {
+        match decimal_byte(token) {
+            Some(b) => dec.push(b),
+            None => end(&mut dec, &mut runs),
+        }
+        match hex_byte(token) {
+            Some(b) => hexes.push(b),
+            None => end(&mut hexes, &mut runs),
+        }
+    }
+    end(&mut dec, &mut runs);
+    end(&mut hexes, &mut runs);
+    runs
+}
+
+/// The bytes inside Python `b'...'` and `b"..."` literals, as `repr(bytes)` prints them:
+/// printable characters as themselves, `\xNN`, `\n \r \t \\ \' \"` and `\0`.
+/// Literals of eight or more bytes only.
+fn python_bytes_literals(view: &[u8]) -> Vec<Vec<u8>> {
+    let mut runs = Vec::new();
+    let mut at = 0;
+    while let Some(&c) = view.get(at) {
+        let opens = c == b'b'
+            && matches!(view.get(at + 1), Some(b'\'' | b'"'))
+            && at
+                .checked_sub(1)
+                .and_then(|p| view.get(p))
+                .is_none_or(|p| !p.is_ascii_alphanumeric());
+        if !opens {
+            at += 1;
+            continue;
+        }
+        let quote = view.get(at + 1).copied().unwrap_or(b'\'');
+        let mut bytes = Vec::new();
+        let mut i = at + 2;
+        while let Some(&b) = view.get(i) {
+            if b == quote {
+                break;
+            }
+            if b != b'\\' {
+                bytes.push(b);
+                i += 1;
+                continue;
+            }
+            match view.get(i + 1) {
+                Some(b'x') => {
+                    let pair = view.get(i + 2..i + 4).and_then(|d| {
+                        Some((hex_value(*d.first()?)? << 4) | hex_value(*d.get(1)?)?)
+                    });
+                    if let Some(byte) = pair {
+                        bytes.push(byte);
+                        i += 4;
+                        continue;
+                    }
+                    bytes.push(b);
+                    i += 1;
+                }
+                Some(&e) => {
+                    bytes.push(match e {
+                        b'n' => b'\n',
+                        b'r' => b'\r',
+                        b't' => b'\t',
+                        b'0' => 0,
+                        other => other,
+                    });
+                    i += 2;
+                }
+                None => i += 1,
+            }
+        }
+        if bytes.len() >= 8 {
+            runs.push(bytes);
+        }
+        at = i + 1;
+    }
+    runs
 }
 
 fn digit_free(hay: &[u8], start: usize, len: usize) -> bool {
@@ -273,11 +441,53 @@ fn small_number(digits: &[u8], max_len: usize) -> Option<u64> {
     })
 }
 
+/// Records an IPv6 address, and the IPv4 address inside it when it is an IPv4-mapped one
+/// (`::ffff:198.51.100.7`, which is also written `::ffff:c633:6407`).
+fn add_v6(out: &mut IpValues, addr: Ipv6Addr) {
+    out.v6.insert(addr.octets());
+    if let Some(v4) = addr.to_ipv4_mapped() {
+        out.v4.insert(u32::from(v4));
+    }
+}
+
+/// The longest run at the end of `label` whose bytes all satisfy `member`.
+fn trailing(label: &[u8], member: fn(&u8) -> bool) -> &[u8] {
+    let start = label.iter().rposition(|b| !member(b)).map_or(0, |p| p + 1);
+    label.get(start..).unwrap_or(&[])
+}
+
+/// Where reverse-lookup names end in `view`: for each `in-addr.arpa` and `ip6.arpa` (any case),
+/// the offset where that suffix starts and whether it is the IPv6 one. One pass.
+fn arpa_suffixes(view: &[u8]) -> Vec<(usize, bool)> {
+    let mut found = Vec::new();
+    for (at, window) in view.windows(4).enumerate() {
+        if !window.eq_ignore_ascii_case(b"arpa") {
+            continue;
+        }
+        let before = view.get(..at).unwrap_or(&[]);
+        let ends = |suffix: &[u8]| {
+            before
+                .len()
+                .checked_sub(suffix.len())
+                .and_then(|from| before.get(from..))
+                .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
+        };
+        if ends(b"in-addr.") {
+            found.push((at - 8, false));
+        } else if ends(b"ip6.") {
+            found.push((at - 4, true));
+        }
+    }
+    found
+}
+
 /// Finds the IP addresses in `view`.
 pub fn ip_values(view: &[u8]) -> IpValues {
     let mut out = IpValues::default();
-    for run in view.split(|b| !(b.is_ascii_digit() || *b == b'.')) {
-        let parts: Vec<&[u8]> = run.split(|b| *b == b'.').collect();
+    // Four numbers in a row, separated by dots, dashes or underscores: `198.51.100.7`,
+    // `ip-198-51-100-7`, `ip_198_51_100_7`. Single numbers are read as decimal integers.
+    for run in view.split(|b| !(b.is_ascii_digit() || matches!(*b, b'.' | b'-' | b'_'))) {
+        let parts: Vec<&[u8]> = run.split(|b| matches!(*b, b'.' | b'-' | b'_')).collect();
         for window in parts.windows(4) {
             let octets: Option<Vec<u8>> = window
                 .iter()
@@ -293,6 +503,59 @@ pub fn ip_values(view: &[u8]) -> IpValues {
                 .filter(|_| plain)
                 .and_then(|n| u32::try_from(n).ok());
             out.v4.extend(number);
+        }
+    }
+    // A reverse lookup name: the four numbers backwards, then `in-addr.arpa`. The first label may
+    // have other text stuck to it, so only its trailing digits count.
+    let arpa = arpa_suffixes(view);
+    for at in arpa.iter().filter(|(_, v6)| !v6).map(|(at, _)| *at) {
+        let before = view.get(..at.saturating_sub(1)).unwrap_or(&[]);
+        let labels: Vec<&[u8]> = before.rsplit(|b| *b == b'.').take(4).collect();
+        let octets: Option<Vec<u8>> = labels
+            .iter()
+            .enumerate()
+            .map(|(i, label)| {
+                let label = if i == 3 {
+                    trailing(label, u8::is_ascii_digit)
+                } else {
+                    label
+                };
+                small_number(label, 3).and_then(|n| u8::try_from(n).ok())
+            })
+            .collect();
+        // The name runs last number first, so reading it from the end gives the address in order.
+        if let Some(o) = octets.and_then(|o| <[u8; 4]>::try_from(o).ok()) {
+            out.v4.insert(u32::from_be_bytes(o));
+        }
+    }
+    // The IPv6 form: 32 single-digit labels, the last nibble first, then `ip6.arpa`.
+    for at in arpa.iter().filter(|(_, v6)| *v6).map(|(at, _)| *at) {
+        let before = view.get(..at.saturating_sub(1)).unwrap_or(&[]);
+        let nibbles: Vec<u8> = before
+            .rsplit(|b| *b == b'.')
+            .take(32)
+            .enumerate()
+            .filter_map(|(i, label)| {
+                let label = if i == 31 {
+                    trailing(label, u8::is_ascii_hexdigit)
+                } else {
+                    label
+                };
+                match label {
+                    [c] => hex_value(*c),
+                    _ => None,
+                }
+            })
+            .collect();
+        if nibbles.len() == 32 {
+            // Read from the end of the name, the nibbles come in the address's own order.
+            let mut octets = [0u8; 16];
+            for (octet, pair) in octets.iter_mut().zip(nibbles.chunks(2)) {
+                if let [hi, lo] = pair {
+                    *octet = (hi << 4) | lo;
+                }
+            }
+            add_v6(&mut out, Ipv6Addr::from(octets));
         }
     }
     for (i, window) in view.windows(10).enumerate() {
@@ -320,7 +583,7 @@ pub fn ip_values(view: &[u8]) -> IpValues {
                 .ok()
                 .and_then(|s| s.parse::<Ipv6Addr>().ok())
             {
-                out.v6.insert(addr.octets());
+                add_v6(&mut out, addr);
             }
         }
     }
@@ -380,6 +643,8 @@ pub struct Scanner<'a> {
     needles: &'a Needles,
     scanned: Cell<u64>,
     over: Cell<bool>,
+    /// What this session may still unpack out of tokens.
+    decode_left: Cell<crate::decode::Budget>,
 }
 
 impl Scanner<'_> {
@@ -423,13 +688,54 @@ impl Scanner<'_> {
             .filter(|b| b.is_ascii_alphanumeric())
             .copied()
             .collect();
+        // Hex written with `0x` or `\x` markers reads as plain hex once they are gone.
+        let has_marker = hay
+            .windows(2)
+            .any(|w| matches!(w, [b'\\' | b'0', b'x' | b'X']));
+        let marker_free: Vec<u8> = if has_marker {
+            without_hex_markers(hay)
+                .into_iter()
+                .filter(u8::is_ascii_alphanumeric)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // Raw key bytes written into JSON as `\u00XX`: one byte per escape, not UTF-8.
+        let latin1 = if hay.windows(2).any(|w| w == b"\\u") {
+            json_unescape_with(hay, true)
+        } else {
+            Vec::new()
+        };
         let mut children: Vec<Vec<u8>> = Vec::new();
-        for candidate in [percent_decode(hay), json_unescape(hay), alnum] {
-            if candidate != hay && !children.contains(&candidate) {
+        for candidate in [
+            percent_decode(hay),
+            json_unescape(hay),
+            alnum,
+            marker_free,
+            latin1,
+        ] {
+            if !candidate.is_empty() && candidate != hay && !children.contains(&candidate) {
                 children.push(candidate);
             }
         }
         children.extend(self.decode_tokens(hay, tokens));
+        // Anything that now starts like gzip or zlib (a base64 or hex token holding a packed file)
+        // is unpacked too, within the scanner's own decode budget. A stream that will not unpack
+        // is taken for chance; a bound is a failed run.
+        let mut unpacked: Vec<Vec<u8>> = Vec::new();
+        for child in children
+            .iter()
+            .filter(|c| crate::decode::starts_compressed(c))
+        {
+            let mut budget = self.decode_left.get();
+            let decoded = crate::decode::decode_with(&[], child, &mut budget);
+            self.decode_left.set(budget);
+            if decoded.problems.contains(crate::decode::BOUND) {
+                self.over.set(true);
+            }
+            unpacked.extend(decoded.layers);
+        }
+        children.extend(unpacked);
         for child in children {
             self.layer(&child, depth + 1, hits, tokens);
         }
@@ -471,6 +777,48 @@ impl Scanner<'_> {
                     crate::encode::hex_decode(&String::from_utf8_lossy(usable)).unwrap_or_default(),
                 );
             }
+        }
+        // A key re-encoded under another version (xpub as zpub, ypub, tpub, ...) is a base58 run
+        // of about 111 characters; decoded, the key data inside is the same. Whole runs of 100 to
+        // 200 characters are decoded, and in any run the 111 characters that start at each
+        // extended-key prefix, so a character stuck in front, or another key beside it, does not hide it.
+        for run in plain_runs(view, is_base58) {
+            let whole = (MIN_BASE58..=MAX_BASE58).contains(&run.len());
+            if whole {
+                if !take(tokens) {
+                    return out;
+                }
+                out.extend(base58_decode(run));
+            }
+            for (at, window) in run.windows(4).enumerate() {
+                let prefix = matches!(
+                    window,
+                    [
+                        b'x' | b'y' | b'z' | b't' | b'u' | b'v' | b'Y' | b'Z' | b'U' | b'V',
+                        b'p',
+                        b'u',
+                        b'b'
+                    ]
+                );
+                let key = run.get(at..at + KEY_BASE58).filter(|_| prefix);
+                if let Some(key) = key.filter(|_| !(whole && at == 0)) {
+                    if !take(tokens) {
+                        return out;
+                    }
+                    out.extend(base58_decode(key));
+                }
+            }
+        }
+        // Key bytes written as lists of numbers (`[141, 31, ...]`, `[b9, 1, ...]`, `-71`), and
+        // Python bytes literals (`b'\xb9\x01T...'`).
+        for bytes in listed_byte_runs(view)
+            .into_iter()
+            .chain(python_bytes_literals(view))
+        {
+            if !take(tokens) {
+                return out;
+            }
+            out.push(bytes);
         }
         out
     }
@@ -564,8 +912,12 @@ impl Needles {
                         }
                     }
                     Class::Xpub => {
-                        // The chain code and the key, found on their own.
-                        for part in [bytes.get(13..45), bytes.get(45..78)].into_iter().flatten() {
+                        // The key data without its four version bytes (a zpub or tpub carries
+                        // the same), the chain code and the key, found on their own.
+                        for part in [bytes.get(4..78), bytes.get(13..45), bytes.get(45..78)]
+                            .into_iter()
+                            .flatten()
+                        {
                             raw.add(class, part.to_vec(), false);
                         }
                     }
@@ -577,6 +929,21 @@ impl Needles {
                     let words: Vec<&str> = lowered.split(' ').collect();
                     for window in words.windows(3) {
                         letters_set.add(class, window.concat().into_bytes(), false);
+                    }
+                    // Words cut to their first four letters (the list's words differ in them).
+                    let short: Vec<&str> = words.iter().map(|w| w.get(..4).unwrap_or(w)).collect();
+                    for window in short.windows(3) {
+                        letters_set.add(class, window.concat().into_bytes(), false);
+                    }
+                    // SeedQR: each word as its position in the list, four digits, run together.
+                    let list = crate::bip39::words();
+                    let digits: Vec<String> = words
+                        .iter()
+                        .filter_map(|w| list.iter().position(|x| x == w))
+                        .map(|i| format!("{i:04}"))
+                        .collect();
+                    for window in digits.windows(3) {
+                        stripped_set.add(class, window.concat().into_bytes(), false);
                     }
                 }
                 Class::Ipv4 => ipv4 = parse_ipv4(&canary.text),
@@ -635,6 +1002,7 @@ impl Needles {
             needles: self,
             scanned: Cell::new(0),
             over: Cell::new(false),
+            decode_left: Cell::new(crate::decode::Budget::capture()),
         }
     }
 
