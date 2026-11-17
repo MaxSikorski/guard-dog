@@ -36,6 +36,8 @@ const MIN_TOKEN: usize = 16;
 /// Base58 runs shorter or longer than this are not decoded (an extended key is about 111).
 const MIN_BASE58: usize = 100;
 const MAX_BASE58: usize = 200;
+/// An extended key: 111 base58 characters.
+const KEY_BASE58: usize = 111;
 /// Token decoding goes this many layers deep (the haystack is layer 0).
 const MAX_LAYER: u8 = 2;
 
@@ -181,6 +183,12 @@ fn hex4(bytes: &[u8], at: usize) -> Option<u32> {
 /// JSON string escapes undone: `\" \\ \/ \b \f \n \r \t` and `\uXXXX` (with
 /// surrogate pairs). An invalid or unfinished escape is left as it is. Case is kept.
 fn json_unescape(bytes: &[u8]) -> Vec<u8> {
+    json_unescape_with(bytes, false)
+}
+
+/// As [`json_unescape`]; with `latin1`, a `\u00XX` escape (and any `\uXXXX` up to `\u00FF`) is the
+/// one byte `XX` rather than its UTF-8 form, which is how raw key bytes are written into JSON.
+fn json_unescape_with(bytes: &[u8], latin1: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while let Some(&c) = bytes.get(i) {
@@ -225,8 +233,13 @@ fn json_unescape(bytes: &[u8]) -> Vec<u8> {
             .flatten();
         match unicode {
             Some((ch, used)) => {
-                let mut buf = [0u8; 4];
-                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                match u8::try_from(u32::from(ch)) {
+                    Ok(byte) if latin1 => out.push(byte),
+                    _ => {
+                        let mut buf = [0u8; 4];
+                        out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                    }
+                }
                 i += used;
             }
             None => {
@@ -281,37 +294,124 @@ fn without_hex_markers(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Numbers 0 to 255 written in decimal and separated by commas, semicolons or white space,
-/// eight or more in a row, turned into the bytes they stand for.
-fn decimal_byte_runs(view: &[u8]) -> Vec<Vec<u8>> {
-    let mut runs: Vec<Vec<u8>> = Vec::new();
-    let mut current: Vec<u8> = Vec::new();
-    let end_run = |current: &mut Vec<u8>, runs: &mut Vec<Vec<u8>>| {
-        if current.len() >= 8 {
-            runs.push(std::mem::take(current));
+/// One decimal number as a byte: 0 to 255, or a signed byte -128 to -1 (Java prints those).
+fn decimal_byte(token: &[u8]) -> Option<u8> {
+    match token.split_first() {
+        Some((b'-', digits)) => {
+            let n = small_number(digits, 3)?;
+            u8::try_from(256u64.checked_sub(n).filter(|_| (1..=128).contains(&n))?).ok()
         }
-        current.clear();
+        _ => u8::try_from(small_number(token, 3)?).ok(),
+    }
+}
+
+/// One or two hex digits as a byte, with an optional `0x` in front (`b9`, `1`, `0x1`, `0XB9`).
+fn hex_byte(token: &[u8]) -> Option<u8> {
+    let digits = token
+        .strip_prefix(b"0x")
+        .or_else(|| token.strip_prefix(b"0X"))
+        .unwrap_or(token);
+    if digits.is_empty() || digits.len() > 2 {
+        return None;
+    }
+    digits
+        .iter()
+        .try_fold(0u8, |acc, &d| Some((acc << 4) | hex_value(d)?))
+}
+
+/// Byte lists written out as numbers: decimal (`141, 31`, signed `-71`) and hex (`b9, 1`, `0x1`),
+/// separated by commas, semicolons, white space or brackets, eight or more in a row, turned into
+/// the bytes they stand for. One pass; a token that is neither ends both runs it breaks.
+fn listed_byte_runs(view: &[u8]) -> Vec<Vec<u8>> {
+    let separator = |b: &u8| {
+        matches!(
+            *b,
+            b',' | b';' | b' ' | b'\t' | b'\r' | b'\n' | b'[' | b']' | b'(' | b')' | b'{' | b'}'
+        )
     };
-    let mut at = 0;
-    while let Some(&c) = view.get(at) {
-        if c.is_ascii_digit() {
-            let start = at;
-            while view.get(at).is_some_and(u8::is_ascii_digit) {
-                at += 1;
-            }
-            let digits = view.get(start..at).unwrap_or(&[]);
-            match small_number(digits, 3).and_then(|n| u8::try_from(n).ok()) {
-                Some(byte) => current.push(byte),
-                None => end_run(&mut current, &mut runs),
-            }
-        } else {
-            if !matches!(c, b',' | b';' | b' ' | b'\t' | b'\r' | b'\n') {
-                end_run(&mut current, &mut runs);
-            }
-            at += 1;
+    let mut runs: Vec<Vec<u8>> = Vec::new();
+    let (mut dec, mut hexes): (Vec<u8>, Vec<u8>) = (Vec::new(), Vec::new());
+    let end = |run: &mut Vec<u8>, runs: &mut Vec<Vec<u8>>| {
+        if run.len() >= 8 {
+            runs.push(std::mem::take(run));
+        }
+        run.clear();
+    };
+    for token in view.split(separator).filter(|t| !t.is_empty()) {
+        match decimal_byte(token) {
+            Some(b) => dec.push(b),
+            None => end(&mut dec, &mut runs),
+        }
+        match hex_byte(token) {
+            Some(b) => hexes.push(b),
+            None => end(&mut hexes, &mut runs),
         }
     }
-    end_run(&mut current, &mut runs);
+    end(&mut dec, &mut runs);
+    end(&mut hexes, &mut runs);
+    runs
+}
+
+/// The bytes inside Python `b'...'` and `b"..."` literals, as `repr(bytes)` prints them:
+/// printable characters as themselves, `\xNN`, `\n \r \t \\ \' \"` and `\0`.
+/// Literals of eight or more bytes only.
+fn python_bytes_literals(view: &[u8]) -> Vec<Vec<u8>> {
+    let mut runs = Vec::new();
+    let mut at = 0;
+    while let Some(&c) = view.get(at) {
+        let opens = c == b'b'
+            && matches!(view.get(at + 1), Some(b'\'' | b'"'))
+            && at
+                .checked_sub(1)
+                .and_then(|p| view.get(p))
+                .is_none_or(|p| !p.is_ascii_alphanumeric());
+        if !opens {
+            at += 1;
+            continue;
+        }
+        let quote = view.get(at + 1).copied().unwrap_or(b'\'');
+        let mut bytes = Vec::new();
+        let mut i = at + 2;
+        while let Some(&b) = view.get(i) {
+            if b == quote {
+                break;
+            }
+            if b != b'\\' {
+                bytes.push(b);
+                i += 1;
+                continue;
+            }
+            match view.get(i + 1) {
+                Some(b'x') => {
+                    let pair = view.get(i + 2..i + 4).and_then(|d| {
+                        Some((hex_value(*d.first()?)? << 4) | hex_value(*d.get(1)?)?)
+                    });
+                    if let Some(byte) = pair {
+                        bytes.push(byte);
+                        i += 4;
+                        continue;
+                    }
+                    bytes.push(b);
+                    i += 1;
+                }
+                Some(&e) => {
+                    bytes.push(match e {
+                        b'n' => b'\n',
+                        b'r' => b'\r',
+                        b't' => b'\t',
+                        b'0' => 0,
+                        other => other,
+                    });
+                    i += 2;
+                }
+                None => i += 1,
+            }
+        }
+        if bytes.len() >= 8 {
+            runs.push(bytes);
+        }
+        at = i + 1;
+    }
     runs
 }
 
@@ -543,6 +643,8 @@ pub struct Scanner<'a> {
     needles: &'a Needles,
     scanned: Cell<u64>,
     over: Cell<bool>,
+    /// What this session may still unpack out of tokens.
+    decode_left: Cell<crate::decode::Budget>,
 }
 
 impl Scanner<'_> {
@@ -598,13 +700,42 @@ impl Scanner<'_> {
         } else {
             Vec::new()
         };
+        // Raw key bytes written into JSON as `\u00XX`: one byte per escape, not UTF-8.
+        let latin1 = if hay.windows(2).any(|w| w == b"\\u") {
+            json_unescape_with(hay, true)
+        } else {
+            Vec::new()
+        };
         let mut children: Vec<Vec<u8>> = Vec::new();
-        for candidate in [percent_decode(hay), json_unescape(hay), alnum, marker_free] {
+        for candidate in [
+            percent_decode(hay),
+            json_unescape(hay),
+            alnum,
+            marker_free,
+            latin1,
+        ] {
             if !candidate.is_empty() && candidate != hay && !children.contains(&candidate) {
                 children.push(candidate);
             }
         }
         children.extend(self.decode_tokens(hay, tokens));
+        // Anything that now starts like gzip or zlib (a base64 or hex token holding a packed file)
+        // is unpacked too, within the scanner's own decode budget. A stream that will not unpack
+        // is taken for chance; a bound is a failed run.
+        let mut unpacked: Vec<Vec<u8>> = Vec::new();
+        for child in children
+            .iter()
+            .filter(|c| crate::decode::starts_compressed(c))
+        {
+            let mut budget = self.decode_left.get();
+            let decoded = crate::decode::decode_with(&[], child, &mut budget);
+            self.decode_left.set(budget);
+            if decoded.problems.contains(crate::decode::BOUND) {
+                self.over.set(true);
+            }
+            unpacked.extend(decoded.layers);
+        }
+        children.extend(unpacked);
         for child in children {
             self.layer(&child, depth + 1, hits, tokens);
         }
@@ -648,18 +779,42 @@ impl Scanner<'_> {
             }
         }
         // A key re-encoded under another version (xpub as zpub, ypub, tpub, ...) is a base58 run
-        // of about 111 characters; decoded, the key data inside is the same.
+        // of about 111 characters; decoded, the key data inside is the same. Whole runs of 100 to
+        // 200 characters are decoded, and in any run the 111 characters that start at each
+        // extended-key prefix, so a character stuck in front, or another key beside it, does not hide it.
         for run in plain_runs(view, is_base58) {
-            if run.len() < MIN_BASE58 || run.len() > MAX_BASE58 {
-                continue;
+            let whole = (MIN_BASE58..=MAX_BASE58).contains(&run.len());
+            if whole {
+                if !take(tokens) {
+                    return out;
+                }
+                out.extend(base58_decode(run));
             }
-            if !take(tokens) {
-                return out;
+            for (at, window) in run.windows(4).enumerate() {
+                let prefix = matches!(
+                    window,
+                    [
+                        b'x' | b'y' | b'z' | b't' | b'u' | b'v' | b'Y' | b'Z' | b'U' | b'V',
+                        b'p',
+                        b'u',
+                        b'b'
+                    ]
+                );
+                let key = run.get(at..at + KEY_BASE58).filter(|_| prefix);
+                if let Some(key) = key.filter(|_| !(whole && at == 0)) {
+                    if !take(tokens) {
+                        return out;
+                    }
+                    out.extend(base58_decode(key));
+                }
             }
-            out.extend(base58_decode(run));
         }
-        // Key bytes written as a list of decimal numbers (`[141, 31, ...]`).
-        for bytes in decimal_byte_runs(view) {
+        // Key bytes written as lists of numbers (`[141, 31, ...]`, `[b9, 1, ...]`, `-71`), and
+        // Python bytes literals (`b'\xb9\x01T...'`).
+        for bytes in listed_byte_runs(view)
+            .into_iter()
+            .chain(python_bytes_literals(view))
+        {
             if !take(tokens) {
                 return out;
             }
@@ -847,6 +1002,7 @@ impl Needles {
             needles: self,
             scanned: Cell::new(0),
             over: Cell::new(false),
+            decode_left: Cell::new(crate::decode::Budget::capture()),
         }
     }
 

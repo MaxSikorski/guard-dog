@@ -12,7 +12,7 @@
 //! removed, so it is not a compression. What decoded before a corrupt stream went bad is still scanned; what a bound cut off is dropped.
 
 use brotli_decompressor::{BrotliDecompressStream, BrotliResult, BrotliState, StandardAlloc};
-use flate2::bufread::{DeflateDecoder, MultiGzDecoder, ZlibDecoder};
+use flate2::bufread::{DeflateDecoder, GzDecoder, MultiGzDecoder, ZlibDecoder};
 use std::collections::BTreeSet;
 use std::io::Read;
 
@@ -51,9 +51,33 @@ impl Budget {
     }
 }
 
-/// Like [`decode_body`], but charged to a capture-wide `budget`.
-pub fn decode_with(headers: &[(Vec<u8>, Vec<u8>)], body: &[u8], _budget: &mut Budget) -> Decoded {
-    decode_body(headers, body)
+/// One body may have at most this many decoded layers.
+pub const MAX_BODY_LAYERS: usize = 1024;
+/// At most this many gzip streams are tried inside one plain body or layer.
+const MAX_EMBEDDED: usize = 64;
+
+/// What one decode may use: the body's own bounds, cut down to what the capture has left.
+#[derive(Debug, Clone, Copy)]
+struct Caps {
+    output: usize,
+    layers: usize,
+    /// Look for gzip streams inside plain bytes (off for a framed gRPC body, whose messages are
+    /// looked at one by one instead).
+    embedded: bool,
+}
+
+/// Like [`decode_body`], but charged to a capture-wide `budget`: what this body decodes to, and
+/// the layers it takes, are taken off it. Past it the answer is [`BOUND`].
+pub fn decode_with(headers: &[(Vec<u8>, Vec<u8>)], body: &[u8], budget: &mut Budget) -> Decoded {
+    let caps = Caps {
+        output: MAX_OUTPUT.min(budget.output),
+        layers: MAX_BODY_LAYERS.min(budget.layers),
+        embedded: true,
+    };
+    let out = decode_caps(headers, body, caps);
+    budget.output = budget.output.saturating_sub(out.total());
+    budget.layers = budget.layers.saturating_sub(out.layers.len());
+    out
 }
 
 /// What decoding one body gave.
@@ -105,7 +129,7 @@ fn sniff(data: &[u8]) -> Option<Coding> {
     let starts = |magic: &[u8]| data.starts_with(magic);
     if starts(&[0x1f, 0x8b]) {
         Some(Coding::Gzip)
-    } else if matches!(data, [0x78, 0x01 | 0x5e | 0x9c | 0xda, ..]) {
+    } else if zlib_header(data) {
         Some(Coding::Deflate)
     } else if starts(&[0x28, 0xb5, 0x2f, 0xfd])
         || starts(&[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00])
@@ -117,6 +141,11 @@ fn sniff(data: &[u8]) -> Option<Coding> {
     } else {
         None
     }
+}
+
+/// Whether `data` starts like a gzip or zlib stream.
+pub fn starts_compressed(data: &[u8]) -> bool {
+    matches!(sniff(data), Some(Coding::Gzip | Coding::Deflate))
 }
 
 /// How a decode ended, besides success.
@@ -185,10 +214,13 @@ fn brotli(data: &[u8], limit: usize) -> (Vec<u8>, Result<(), Fail>) {
     }
 }
 
-/// A zlib header: deflate method and a header checksum that divides by 31.
+/// A zlib header: deflate method, no preset dictionary (nobody could decode one) and a header
+/// checksum that divides by 31.
 fn zlib_header(data: &[u8]) -> bool {
     matches!(data, [cmf, flg, ..]
-        if cmf & 0x0f == 8 && ((u16::from(*cmf) << 8) | u16::from(*flg)) % 31 == 0)
+        if cmf & 0x0f == 8
+            && flg & 0x20 == 0
+            && ((u16::from(*cmf) << 8) | u16::from(*flg)) % 31 == 0)
 }
 
 /// Decodes one layer. `budget` is what the body may still decode in all.
@@ -202,15 +234,21 @@ fn decode_one(coding: Coding, data: &[u8], budget: usize) -> (Vec<u8>, Result<()
         }
         Coding::Brotli => brotli(data, limit),
         Coding::Deflate => {
-            // HTTP says zlib; some clients send raw deflate. Try the zlib reading first when it
-            // looks like one, then the raw one.
+            // HTTP says zlib; some clients send raw deflate. A zlib header means zlib: its output
+            // is kept, and bytes left over after it are a failure. Only when that gave nothing at
+            // all, or there is no zlib header, is the raw reading used.
             if zlib_header(data) {
                 let result = read_limited(ZlibDecoder::new(&mut unread), limit);
                 let first = all_used(result, unread);
-                if !matches!(first.1, Err(Fail::Corrupt)) {
+                if !first.0.is_empty() || !matches!(first.1, Err(Fail::Corrupt)) {
                     return first;
                 }
                 unread = data;
+                let raw = all_used(
+                    read_limited(DeflateDecoder::new(&mut unread), limit),
+                    unread,
+                );
+                return if raw.1.is_ok() { raw } else { first };
             }
             let result = read_limited(DeflateDecoder::new(&mut unread), limit);
             all_used(result, unread)
@@ -221,7 +259,7 @@ fn decode_one(coding: Coding, data: &[u8], budget: usize) -> (Vec<u8>, Result<()
 
 /// Applies `steps` (then whatever the first bytes show) to `data`, from layer `depth` on.
 /// Every decoded layer is added to `out`. Returns false once a problem has stopped the decoding.
-fn unpack(data: &[u8], steps: &[Coding], mut depth: usize, out: &mut Decoded) -> bool {
+fn unpack(data: &[u8], steps: &[Coding], mut depth: usize, out: &mut Decoded, caps: Caps) -> bool {
     let mut declared = steps.iter().copied();
     let mut last: Option<usize> = None;
     loop {
@@ -229,14 +267,27 @@ fn unpack(data: &[u8], steps: &[Coding], mut depth: usize, out: &mut Decoded) ->
             .and_then(|i| out.layers.get(i))
             .map_or(data, Vec::as_slice);
         let Some(coding) = declared.next().or_else(|| sniff(input)) else {
-            return true;
+            let offsets = if caps.embedded {
+                gzip_offsets(input)
+            } else {
+                Vec::new()
+            };
+            if offsets.is_empty() {
+                return true;
+            }
+            // Copied, so the layers can grow while the bytes are read.
+            let copy = input.to_vec();
+            return embedded_gzip(&copy, &offsets, depth, out, caps);
         };
         if coding == Coding::Unsupported {
             out.problems.insert(UNDECODED);
             return false;
         }
-        let budget = MAX_OUTPUT.saturating_sub(out.total());
-        if depth >= MAX_LAYERS || (budget == 0 && !input.is_empty()) {
+        let budget = caps.output.saturating_sub(out.total());
+        if depth >= MAX_LAYERS
+            || out.layers.len() >= caps.layers
+            || (budget == 0 && !input.is_empty())
+        {
             out.problems.insert(BOUND);
             return false;
         }
@@ -261,9 +312,58 @@ fn unpack(data: &[u8], steps: &[Coding], mut depth: usize, out: &mut Decoded) ->
     }
 }
 
+/// Where `1f 8b 08` occurs after the first byte, up to 64 places.
+fn gzip_offsets(input: &[u8]) -> Vec<usize> {
+    input
+        .windows(3)
+        .enumerate()
+        .skip(1)
+        .filter(|(_, w)| *w == [0x1f, 0x8b, 0x08])
+        .map(|(at, _)| at)
+        .take(MAX_EMBEDDED)
+        .collect()
+}
+
+/// A gzip stream somewhere inside plain bytes (a file part of a multipart upload, say): tried at
+/// each `1f 8b 08` after the start, up to 64 of them. A try that does not decode is chance and is
+/// ignored; one that does is a layer, unpacked further like any other.
+fn embedded_gzip(
+    input: &[u8],
+    offsets: &[usize],
+    depth: usize,
+    out: &mut Decoded,
+    caps: Caps,
+) -> bool {
+    for &at in offsets {
+        let mut unread = input.get(at..).unwrap_or(&[]);
+        let budget = caps.output.saturating_sub(out.total());
+        let limit = budget.min(unread.len().saturating_mul(MAX_RATIO));
+        let (decoded, result) = read_limited(GzDecoder::new(&mut unread), limit);
+        match result {
+            Err(Fail::Corrupt) => {}
+            Err(Fail::Bound) => {
+                out.problems.insert(BOUND);
+                return false;
+            }
+            Ok(()) => {
+                if depth >= MAX_LAYERS || out.layers.len() >= caps.layers {
+                    out.problems.insert(BOUND);
+                    return false;
+                }
+                out.layers.push(decoded.clone());
+                if !unpack(&decoded, &[], depth + 1, out, caps) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 /// The gRPC messages of a body: a flag (0 plain, 1 compressed by `grpc-encoding`), a four-byte
-/// length, the message. Every message is decoded in its own right.
-fn unpack_grpc(body: &[u8], coding: Coding, depth: usize, out: &mut Decoded) {
+/// length, the message. Every message is decoded in its own right. A message flagged compressed
+/// when no coding was named cannot be read.
+fn unpack_grpc(body: &[u8], coding: Option<Coding>, depth: usize, out: &mut Decoded, caps: Caps) {
     let mut rest = body;
     while !rest.is_empty() {
         let frame = rest.get(..5).and_then(|h| {
@@ -277,8 +377,15 @@ fn unpack_grpc(body: &[u8], coding: Coding, depth: usize, out: &mut Decoded) {
             out.problems.insert(UNDECODED);
             return;
         };
-        let steps: &[Coding] = if flag == 1 { &[coding] } else { &[] };
-        if !unpack(message, steps, depth, out) {
+        let steps: Vec<Coding> = match (flag, coding) {
+            (0, _) => Vec::new(),
+            (_, Some(coding)) => vec![coding],
+            (_, None) => {
+                out.problems.insert(UNDECODED);
+                return;
+            }
+        };
+        if !unpack(message, &steps, depth, out, caps) {
             return;
         }
         rest = rest.get(5 + message.len()..).unwrap_or(&[]);
@@ -303,8 +410,21 @@ fn unsupported_content_type(media: &str) -> bool {
     )
 }
 
-/// Decodes `body` as its headers (and its first bytes) say, layer by layer.
+/// Decodes `body` as its headers (and its first bytes) say, layer by layer, within the bounds
+/// of one body.
 pub fn decode_body(headers: &[(Vec<u8>, Vec<u8>)], body: &[u8]) -> Decoded {
+    decode_caps(
+        headers,
+        body,
+        Caps {
+            output: MAX_OUTPUT,
+            layers: MAX_BODY_LAYERS,
+            embedded: true,
+        },
+    )
+}
+
+fn decode_caps(headers: &[(Vec<u8>, Vec<u8>)], body: &[u8], caps: Caps) -> Decoded {
     let mut out = Decoded::default();
     if body.is_empty() {
         return out;
@@ -340,16 +460,28 @@ pub fn decode_body(headers: &[(Vec<u8>, Vec<u8>)], body: &[u8]) -> Decoded {
     if unsupported_content_type(&media) {
         out.problems.insert(UNDECODED);
     }
-    let decoded_whole = unpack(body, &steps, 0, &mut out);
+    // A gRPC body is a run of framed messages, whether or not a coding is named.
+    let framed = grpc.is_some() || media.starts_with("application/grpc");
+    let whole = Caps {
+        embedded: caps.embedded && !framed,
+        ..caps
+    };
+    let decoded_whole = unpack(body, &steps, 0, &mut out, whole);
     match grpc {
         Some(Coding::Unsupported) => {
             out.problems.insert(UNDECODED);
         }
-        Some(coding) if decoded_whole => {
+        _ if framed && decoded_whole => {
             // The messages inside whatever the whole body decoded to (usually the body itself).
             let inner = out.layers.last().cloned();
             let depth = out.layers.len();
-            unpack_grpc(inner.as_deref().unwrap_or(body), coding, depth, &mut out);
+            unpack_grpc(
+                inner.as_deref().unwrap_or(body),
+                grpc,
+                depth,
+                &mut out,
+                caps,
+            );
         }
         _ => {}
     }

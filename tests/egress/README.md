@@ -17,7 +17,9 @@ The checker is `crates/gd-egress` (`gd-egress check`). Today it runs on **synthe
 - every flow went to an allowlisted destination
 - the capture is complete from a proven start (the control before the workload) to a proven end (the control after it, and the recorder's end marker)
 - no planted canary appears in the recorder's decrypted requests, the resolver log, the packet capture's loopback traffic to the recorder and resolver, or anything sent to the black hole, under the decoding set, up to two nested layers: raw, lowercase, percent-escaped, JSON-escaped, separator-stripped and letters-only views; base64, base64url, base32 and hex tokens decoded two layers deep; key bytes written as source code (`[0x8d, 0x1f]`, `[141, 31]`, `\x8d\x1f`); an xpub re-encoded under another version (zpub, ypub, tpub, ...); seed words as their first four letters and as SeedQR digits; IP addresses matched by value in dotted, integer, `0x`, IPv6, dashed host-name (`ip-198-51-100-7`), reverse-lookup (`in-addr.arpa`, `ip6.arpa`) and IPv4-mapped forms
-- request bodies are decoded first: gzip, zlib, raw deflate and brotli, named by `Content-Encoding`, `Transfer-Encoding` (anything but `chunked` and `identity`), `grpc-encoding` (message by message), a gzip content type, or by the first bytes of the body and of every decoded layer
+- request bodies are decoded first: gzip, zlib, raw deflate and brotli, named by `Content-Encoding`, `Transfer-Encoding` (anything but `chunked` and `identity`), `grpc-encoding` (message by message), a gzip content type, or by the first bytes of the body and of every decoded layer (gzip is also looked for at every `1f 8b 08` inside a body, such as a file part of a multipart upload, and inside any base64, hex or base32 token that starts like gzip or zlib)
+- all bodies of one capture together decode to at most 64 MiB in at most 4096 layers, then F5 `decode-bound`; nothing more is decoded once the scanner's own budget is spent
+- byte lists written as numbers: decimal (also signed, as Java prints them), hex with or without `0x` and without zero padding (Rust `{:x?}`, Python `hex()`), in brackets or rows, Python `b'...'` literals, and raw bytes written as JSON `\u00XX`
 
 **Not covered**, and caught or bounded by other layers instead:
 
@@ -25,6 +27,9 @@ The checker is `crates/gd-egress` (`gd-egress check`). Today it runs on **synthe
 - covert timing and size channels
 - secrets inside end-to-end-encrypted payloads to allowed destinations (NIP-44, until Phase 5 gives the judge the test key)
 - encodings outside the decoding set, or nested three or more deep
+- raw deflate or brotli that no header names, alone or inside a decoded layer: they have no first bytes to recognise
+- WebSocket messages compressed with permessage-deflate, unless the recorder undoes it (see below)
+- gzip inside a decoded token when the token is itself inside a decoded layer (the token step runs on the views of the first two layers)
 - a value deliberately split across successive request paths or headers (a body split across requests is joined; paths and headers are scanned one by one, and joined only in the destination's whole stream)
 - loopback traffic to ports other than the recorder's 8080 and the resolver's 5353 is counted but not scanned: it cannot leave the box
 - whether the recorder logged every client byte the kernel acknowledged (a pipelined request after a `503` with `Connection: close`): the per-connection byte count arrives with the recorder in PR 2
@@ -37,19 +42,25 @@ Those are the job of the never-have list and least privilege (threat model secti
 
 Besides the files in the capture directory layout, the judge needs `pcap/tcpdump.log`: tcpdump's own closing summary (`N packets captured`, `N packets received by filter`, `N packets dropped by kernel`). The lab piece (PR 2; its `netns.sh` is not in the repository yet) writes tcpdump's messages to `tcpdump.log`, stops tcpdump with SIGINT, waits for it to exit and keeps that file as `pcap/tcpdump.log`. A missing file, a missing or repeated count line, any drop, or a packet count that differs from the pcap is F5. The recorder's addon should write a global `seq` number on every `http` and `tcp` event so requests on different connections can be put back in order (without it the line number is used). A request logged after a control request on the control's own connection (keep-alive) must have a larger `seq`, or it is F5 `order`.
 
+**What the recorder must log, for the judge to work (PR 2):**
+- Every HTTP request body is the raw, still-encoded body with the original headers (mitmproxy's `raw_content`). If the addon logs a body it has already decoded while the `Content-Encoding` header stays, every compressed request reads as corrupt and the judge is red on every run (it fails closed, so it is never a false pass).
+- WebSocket messages (all Nostr relay traffic) are logged after `permessage-deflate` is undone. If a connection negotiated `permessage-deflate` and the addon cannot undo it, the run must be F5: per-message raw deflate has no first bytes and passes a scan.
+
+**Running out of budget is F5 and says so.** `F5 capture-unreadable scan: scan-budget` means a busy or odd capture used up the scanner's token budget (4096 tokens per scan) or its 256 MiB byte budget, or a stream was over 64 MiB. It is not a leak and not a pass; read the capture or raise the budget on purpose.
+
 ## What is in this folder
 
 | Path | What |
 |---|---|
-| `synthetic/` | 81 expected reports, one per scenario. **Synthetic: built by `crates/gd-egress/tests/support/mod.rs`, never a real capture.** Each was written before the code that makes it pass. |
+| `synthetic/` | 88 expected reports, one per scenario. **Synthetic: built by `crates/gd-egress/tests/support/mod.rs`, never a real capture.** Each was written before the code that makes it pass. |
 | `golden/canaries-seed-1.json` | The canaries made from seed 1 (`canaries.json` format 2, with the raw bytes of each), byte for byte. Pins the generator. |
 | `expected-rules.txt` | The firewall and route dump the sealed box must have. **Provisional** until the lab arrives; the lab piece replaces it with the real, reviewed dump. |
 
 Reports contain no counts, no times and never a canary (those print as `<canary:CLASS>`), so an expected file is the same for every seed.
 
-## The 81 scenarios
+## The 88 scenarios
 
-S01 to S18 are the first set; S19 to S61 each cover one review finding (O = Opus, C = Codex, then the second Codex round); S62 to S81 cover the third review (Opus) and the decoders.
+S01 to S18 are the first set; S19 to S61 each cover one review finding (O = Opus, C = Codex, then the second Codex round); S62 to S81 cover the third review (Opus) and the decoders; S82 to S88 the review of the decoders.
 
 | # | Scenario | What it proves |
 |---|---|---|
@@ -134,6 +145,13 @@ S01 to S18 are the first set; S19 to S61 each cover one review finding (O = Opus
 | S79 | dns-client-response | A message with the response bit set sent to the resolver: F5, and its question is still judged |
 | S80 | tcp-no-syn | Data to the recorder with no handshake before it: F5 `tcp-gap` |
 | S81 | keep-alive-before-post-control | A request on the post control's connection logged before it: F5 `order` |
+| S82 | multipart-gzip-part | A multipart upload whose `.gz` file part holds an nsec |
+| S83 | base64-gzip-in-json | `{"blob": "<base64 of gzip>"}` with an nsec inside |
+| S84 | grpc-compressed-no-encoding | A gRPC frame flagged compressed, no `grpc-encoding`: F5 |
+| S85 | zlib-trailing-bytes | `Content-Encoding: deflate`, a zlib stream and a tail: the secret is found, and the tail is F5 |
+| S86 | python-bytes-repr | The nsec's key bytes as Python `repr(bytes)` |
+| S87 | json-u-escapes-of-key-bytes | The key bytes as JSON `\u00XX` escapes |
+| S88 | zpub-with-a-character-in-front | A zpub with one extra base58 character in front |
 
 ## Regenerating the golden file
 

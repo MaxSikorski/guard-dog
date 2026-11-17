@@ -42,6 +42,8 @@ struct Judge<'a> {
     unreadable: BTreeSet<&'static str>,
     /// Classes found in a single field, per printed destination.
     field_hits: BTreeMap<String, BTreeSet<HitKind>>,
+    /// What the capture may still decode, shared by every body.
+    decode_budget: decode::Budget,
 }
 
 impl Judge<'_> {
@@ -323,7 +325,6 @@ pub fn judge_with_limits(
     expected_rules: &str,
     limits: Limits,
 ) -> Verdict {
-    let _ = limits;
     let needles = Needles::new(set);
     let mut j = Judge {
         needles: &needles,
@@ -331,6 +332,10 @@ pub fn judge_with_limits(
         findings: BTreeSet::new(),
         unreadable: BTreeSet::new(),
         field_hits: BTreeMap::new(),
+        decode_budget: decode::Budget {
+            output: limits.decode_output,
+            layers: limits.decode_layers,
+        },
     };
 
     // Parse the sources. A source that cannot be read gives an empty result and an F5.
@@ -716,7 +721,11 @@ fn scan_everything(j: &mut Judge, dns: &dns_log::DnsLog, mitm: &MitmLog, wire: &
             j.scan(&event.body, "http-body", &dest);
             // Compressed bodies are unpacked and every layer scanned; a body that cannot be
             // unpacked, or hits a bound, is never a pass.
-            let decoded = decode::decode_body(&event.headers, &event.body);
+            // Once the scanner has run out of budget nothing more is decoded.
+            if j.scanner.budget_exceeded() {
+                j.decode_budget.output = 0;
+            }
+            let decoded = decode::decode_with(&event.headers, &event.body, &mut j.decode_budget);
             for code in &decoded.problems {
                 j.note("mitm", code);
             }
@@ -754,6 +763,14 @@ fn scan_everything(j: &mut Judge, dns: &dns_log::DnsLog, mitm: &MitmLog, wire: &
     }
     for (dest, pieces) in &mut ordered {
         pieces.sort_by_key(|p| (p.0, p.1));
+        // Checked on the pieces, before anything is joined into one buffer.
+        let all_len: usize = pieces.iter().map(|p| p.3.len()).sum();
+        let body_len: usize = pieces.iter().filter(|p| p.2).map(|p| p.3.len()).sum();
+        if all_len > STREAM_BUDGET || body_len > STREAM_BUDGET {
+            j.findings
+                .insert("F5 capture-unreadable scan: scan-budget".into());
+            continue;
+        }
         let everything: Vec<u8> = pieces.iter().flat_map(|p| p.3.iter().copied()).collect();
         let bodies: Vec<u8> = pieces
             .iter()
