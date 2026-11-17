@@ -12,6 +12,7 @@ use crate::canary::CanarySet;
 use crate::capture::mitm::{Conn, HttpEvent, MitmLog};
 use crate::capture::pcap::{self, L4, Packet, Wire};
 use crate::capture::{RawCapture, dns_log};
+use crate::decode;
 use crate::needle::{HitKind, Needles, Scanner};
 use crate::rules;
 use gd_core::Untrusted;
@@ -41,6 +42,8 @@ struct Judge<'a> {
     unreadable: BTreeSet<&'static str>,
     /// Classes found in a single field, per printed destination.
     field_hits: BTreeMap<String, BTreeSet<HitKind>>,
+    /// What the capture may still decode, shared by every body.
+    decode_budget: decode::Budget,
 }
 
 impl Judge<'_> {
@@ -250,31 +253,57 @@ fn control_seen(phase: &Phase, dns: &dns_log::DnsLog, mitm: &MitmLog, wire: &Wir
 /// Checks tcpdump's closing summary: all three counts present, nothing dropped, and the number
 /// of packets it says it wrote equal to the records in the file (when the file was readable).
 fn check_stats(text: &str, records: Option<usize>) -> Option<&'static str> {
-    let count = |what: &str| {
-        text.lines().find_map(|line| {
-            let line = line.trim();
-            let (number, rest) = line.split_once(' ')?;
-            (rest.trim() == what)
-                .then(|| number.parse::<u64>().ok())
-                .flatten()
-        })
+    // Every line that says `<number> <what>`; a line with a non-number counts, as `None`.
+    let lines = |what: &str| -> Vec<Option<u64>> {
+        text.lines()
+            .filter_map(|line| {
+                let (number, rest) = line.trim().split_once(' ')?;
+                (rest.trim() == what).then(|| number.parse::<u64>().ok())
+            })
+            .collect()
+    };
+    // Each of the three counts must be there exactly once: a second line could say something else.
+    let once = |what: &str| match lines(what).as_slice() {
+        [Some(n)] => Some(*n),
+        _ => None,
     };
     let (Some(captured), Some(received), Some(dropped)) = (
-        count("packets captured"),
-        count("packets received by filter"),
-        count("packets dropped by kernel"),
+        once("packets captured"),
+        once("packets received by filter"),
+        once("packets dropped by kernel"),
     ) else {
         return Some("bad-stats");
     };
-    if dropped != 0
-        || count("packets dropped by interface").is_some_and(|n| n != 0)
-        || received != captured
-    {
+    let interface = match lines("packets dropped by interface").as_slice() {
+        [] => 0,
+        [Some(n)] => *n,
+        _ => return Some("bad-stats"),
+    };
+    if dropped != 0 || interface != 0 || received != captured {
         return Some("capture-drops");
     }
     match records {
         Some(n) if u64::try_from(n).ok() != Some(captured) => Some("stats-mismatch"),
         _ => None,
+    }
+}
+
+/// The bounds a judge run works under. The defaults are the real ones; tests lower them to
+/// reach a bound quickly.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// Decoded bytes allowed across every body of the capture.
+    pub decode_output: usize,
+    /// Decoded layers allowed across every body of the capture.
+    pub decode_layers: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Limits {
+        Limits {
+            decode_output: crate::decode::MAX_CAPTURE_OUTPUT,
+            decode_layers: crate::decode::MAX_CAPTURE_LAYERS,
+        }
     }
 }
 
@@ -285,6 +314,17 @@ pub fn judge(
     allow: &Allowlist,
     expected_rules: &str,
 ) -> Verdict {
+    judge_with_limits(raw, set, allow, expected_rules, Limits::default())
+}
+
+/// [`judge`] under explicit bounds.
+pub fn judge_with_limits(
+    raw: &RawCapture,
+    set: &CanarySet,
+    allow: &Allowlist,
+    expected_rules: &str,
+    limits: Limits,
+) -> Verdict {
     let needles = Needles::new(set);
     let mut j = Judge {
         needles: &needles,
@@ -292,6 +332,10 @@ pub fn judge(
         findings: BTreeSet::new(),
         unreadable: BTreeSet::new(),
         field_hits: BTreeMap::new(),
+        decode_budget: decode::Budget {
+            output: limits.decode_output,
+            layers: limits.decode_layers,
+        },
     };
 
     // Parse the sources. A source that cannot be read gives an empty result and an F5.
@@ -402,6 +446,26 @@ pub fn judge(
         .is_some_and(|c| Some(c) != highest);
     if pre_misplaced || post_misplaced {
         j.note("mitm", "order");
+    }
+    // Requests that share a control request's connection (keep-alive) must come in the order the
+    // recorder numbered them: after the control if logged after it. The packet order below cannot
+    // show this, because the control's connection is left out of the workload there.
+    for request in seen.iter().filter_map(|s| s.request) {
+        let (id, at) = request;
+        let events = mitm
+            .conns
+            .get(&id)
+            .map(|c| c.http.as_slice())
+            .unwrap_or(&[]);
+        if let Some(base) = events.get(at).map(|e| e.seq) {
+            let disordered = events
+                .iter()
+                .enumerate()
+                .any(|(i, e)| (i > at && e.seq <= base) || (i < at && e.seq >= base));
+            if disordered {
+                j.note("mitm", "order");
+            }
+        }
     }
     // In capture order, the pre packet comes before all workload traffic and the post packet after it.
     let control_ports: BTreeSet<u16> = seen
@@ -655,6 +719,19 @@ fn scan_everything(j: &mut Judge, dns: &dns_log::DnsLog, mitm: &MitmLog, wire: &
                 j.scan(value, "http-header", &dest);
             }
             j.scan(&event.body, "http-body", &dest);
+            // Compressed bodies are unpacked and every layer scanned; a body that cannot be
+            // unpacked, or hits a bound, is never a pass.
+            // Once the scanner has run out of budget nothing more is decoded.
+            if j.scanner.budget_exceeded() {
+                j.decode_budget.output = 0;
+            }
+            let decoded = decode::decode_with(&event.headers, &event.body, &mut j.decode_budget);
+            for code in &decoded.problems {
+                j.note("mitm", code);
+            }
+            for layer in &decoded.layers {
+                j.scan(layer, "http-body", &dest);
+            }
             let pieces = ordered.entry(dest).or_default();
             let mut add = |body: bool, bytes: &[u8]| {
                 counter += 1;
@@ -666,6 +743,9 @@ fn scan_everything(j: &mut Judge, dns: &dns_log::DnsLog, mitm: &MitmLog, wire: &
                 add(false, value);
             }
             add(true, &event.body);
+            for layer in &decoded.layers {
+                add(true, layer);
+            }
         }
         let mut joined = Vec::new();
         for (data, seq) in conn.tcp.iter().zip(&conn.tcp_seqs) {
@@ -683,6 +763,14 @@ fn scan_everything(j: &mut Judge, dns: &dns_log::DnsLog, mitm: &MitmLog, wire: &
     }
     for (dest, pieces) in &mut ordered {
         pieces.sort_by_key(|p| (p.0, p.1));
+        // Checked on the pieces, before anything is joined into one buffer.
+        let all_len: usize = pieces.iter().map(|p| p.3.len()).sum();
+        let body_len: usize = pieces.iter().filter(|p| p.2).map(|p| p.3.len()).sum();
+        if all_len > STREAM_BUDGET || body_len > STREAM_BUDGET {
+            j.findings
+                .insert("F5 capture-unreadable scan: scan-budget".into());
+            continue;
+        }
         let everything: Vec<u8> = pieces.iter().flat_map(|p| p.3.iter().copied()).collect();
         let bodies: Vec<u8> = pieces
             .iter()

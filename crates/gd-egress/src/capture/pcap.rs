@@ -368,7 +368,8 @@ pub fn parse_dns(payload: &[u8]) -> Result<DnsMessage, &'static str> {
         let (rtype, data_start, next) = read_record(payload, cursor).ok_or(framing)?;
         let additional = index >= usize::from(an) + usize::from(ns);
         if !response && additional && usize::from(ar) == 1 {
-            if rtype != 41 {
+            // Only a root-named OPT record is the normal one: another owner name is free text.
+            if rtype != 41 || payload.get(cursor) != Some(&0) {
                 unexpected_section = true;
             } else if !options_fill(payload, data_start, next) {
                 return Err(framing);
@@ -460,6 +461,11 @@ impl Building {
     /// a retransmission that disagrees with earlier bytes is `tcp-overlap-conflict`.
     fn finish(self) -> (Stream, BTreeSet<&'static str>) {
         let mut errors = BTreeSet::new();
+        // Data with no SYN before it: the start of the stream is not in the capture, so it cannot
+        // be shown complete.
+        if self.isn.is_none() && !self.segments.is_empty() {
+            errors.insert("tcp-gap");
+        }
         let base = self.isn.map_or_else(
             || self.segments.iter().map(|s| s.0).min().unwrap_or(0),
             |isn| isn.wrapping_add(1),
@@ -746,8 +752,14 @@ pub fn analyze(packets: &[Packet], links: &BTreeMap<u32, String>) -> Wire {
             wire.errors.insert("dns-unexpected-section");
         }
         match parse_dns(payload) {
-            Ok(m) if from_client && !m.response => {
-                queries.insert((client, m.id));
+            Ok(m) if from_client => {
+                // A client sends queries. A message marked as a response is still read, so the
+                // names in it are judged, but it is an error: it is not what a resolver client sends.
+                if m.response {
+                    wire.errors.insert("dns-client-response");
+                } else {
+                    queries.insert((client, m.id));
+                }
                 for (name, qtype) in m.questions {
                     wire.dns_questions.push(WireQuestion {
                         client_port: client,
