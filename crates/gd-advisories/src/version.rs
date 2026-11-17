@@ -8,11 +8,18 @@
 use std::fmt;
 
 mod bitcoin;
+mod calver;
 mod channel;
+mod describe;
+mod num;
+mod pep440;
 mod semver;
 
 pub use bitcoin::{BitcoinCore, CoreVersion, RcEvidence};
+pub use calver::{Calver, ClnVersion};
 pub use channel::{Channel, ChannelScheme, ChannelVersion, evaluate_channel_entry};
+pub use describe::{Commit, Described, GitDescribe, TagVersion};
+pub use pep440::{Pep440, Pep440Version};
 pub use semver::{GoTag, SemVer, SemVerVersion};
 
 /// Why a scheme could not read a version string.
@@ -65,8 +72,9 @@ pub enum Candidate<V> {
 /// - `same_identity` compares exact identity after only the scheme's documented
 ///   normalization. `None` means the scheme cannot say (a string it cannot read).
 /// - `candidate` reads the installed value (advisory boundaries always go
-///   through `parse`). The default is an exact version; a scheme that can only
-///   place the installed value in an interval returns `Between`.
+///   through `parse_boundary`, which defaults to `parse`). The default is an exact
+///   version; a scheme that can only place the installed value in an interval
+///   returns `Between`.
 /// - A scheme that has no order at all (opaque, equality only) returns `false`
 ///   from `orders`: every ordered range is then unknown, and only the listed
 ///   versions are checked, by identity.
@@ -83,6 +91,17 @@ pub trait VersionScheme {
     /// Reads one version string.
     fn parse(&self, raw: &str) -> Result<Self::Version, VersionError>;
 
+    /// Reads an advisory's range boundary (`introduced`, `fixed`,
+    /// `last_affected` or a limit). The default is [`VersionScheme::parse`]; a
+    /// scheme overrides it to refuse a version that is fine as an installed or
+    /// listed value but cannot mark a boundary (PEP 440's local labels).
+    ///
+    /// # Errors
+    /// The same as `parse`; a refused boundary makes its range `Unknown`.
+    fn parse_boundary(&self, raw: &str) -> Result<Self::Version, VersionError> {
+        self.parse(raw)
+    }
+
     /// Reads the installed version.
     fn candidate(&self, raw: &str) -> Result<Candidate<Self::Version>, VersionError> {
         self.parse(raw).map(Candidate::Exact)
@@ -97,6 +116,16 @@ pub trait VersionScheme {
     /// same identity is never treated as a miss.
     fn same_version(&self, installed: &Self::Version, listed: &str) -> Option<bool> {
         self.parse(listed).ok().map(|l| l == *installed)
+    }
+
+    /// For an installed value that is only an interval: whether a listed
+    /// version string is that very build. `Some(true)` is the same build (a
+    /// hit), `Some(false)` the same release spelled or built differently (not a
+    /// hit and not a miss), `None` no opinion, so the interval rule applies. A
+    /// described build never answers here; only a scheme whose interval comes
+    /// from a local build does.
+    fn interval_list_match(&self, _installed: &str, _listed: &str) -> Option<bool> {
+        None
     }
 
     /// The question to ask when the installed value is only known to lie in an

@@ -306,6 +306,19 @@ where
         let listed = item.expose_untrusted().trim_ascii();
         let place = Place::Listed { index };
         match &candidate {
+            Some(Candidate::Between { .. })
+                if scheme.interval_list_match(raw, listed).is_some() =>
+            {
+                if scheme.interval_list_match(raw, listed) == Some(true) {
+                    positive.get_or_insert(place);
+                } else {
+                    keep_smallest(
+                        &mut first_unknown,
+                        UnknownReason::SameVersionDifferentSpelling,
+                        place,
+                    );
+                }
+            }
             Some(Candidate::Between { low, high }) => match scheme.parse(listed) {
                 Ok(l) if l >= *low && high.as_ref().is_none_or(|h| l < *h) => {
                     keep_smallest(
@@ -326,7 +339,15 @@ where
                     positive.get_or_insert(place);
                 }
                 Some(false) => {
-                    if let Some(Candidate::Exact(v)) = other
+                    if scheme.parse(listed).is_err() {
+                        // The scheme could compare the two strings but cannot
+                        // read the listed one as a version: never a miss.
+                        keep_smallest(
+                            &mut first_unknown,
+                            UnknownReason::UnreadableListedVersion,
+                            place,
+                        );
+                    } else if let Some(Candidate::Exact(v)) = other
                         && scheme.same_version(v, listed) == Some(true)
                     {
                         keep_smallest(
@@ -476,7 +497,7 @@ fn eval_range<S: VersionScheme + ?Sized>(
                     kind: Kind::Introduced,
                     index,
                 }),
-                s => match scheme.parse(s) {
+                s => match scheme.parse_boundary(s) {
                     Ok(v) => steps.push(Step {
                         coordinate: Coordinate::At(v),
                         kind: Kind::Introduced,
@@ -495,7 +516,7 @@ fn eval_range<S: VersionScheme + ?Sized>(
                 };
                 match v.expose_untrusted().trim_ascii() {
                     "0" => keep_smallest(&mut problem, UnknownReason::MalformedRange, at(index)),
-                    s => match scheme.parse(s) {
+                    s => match scheme.parse_boundary(s) {
                         Ok(v) => steps.push(Step {
                             coordinate: Coordinate::At(v),
                             kind,
@@ -512,7 +533,7 @@ fn eval_range<S: VersionScheme + ?Sized>(
             Event::Limit(v) => match v.expose_untrusted().trim_ascii() {
                 "*" => unbounded = true,
                 "0" => keep_smallest(&mut problem, UnknownReason::MalformedRange, at(index)),
-                s => match scheme.parse(s) {
+                s => match scheme.parse_boundary(s) {
                     Ok(v) => limits.push(v),
                     Err(_) => {
                         keep_smallest(&mut problem, UnknownReason::UnparseableLimit, at(index));

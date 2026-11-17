@@ -15,7 +15,8 @@ use std::fmt;
 
 use crate::MAX_VERSION_BYTES;
 
-use super::semver::{Num, check_length, parse_num};
+use super::num::Num;
+use super::semver::{check_length, parse_num};
 use super::{GoTag, SemVer, SemVerVersion, VersionError, VersionScheme};
 use crate::osv::{Advisory, RangeKind};
 use crate::range::{
