@@ -1,4 +1,4 @@
-//! The 61 synthetic capture scenarios. Each expected report in
+//! The 81 synthetic capture scenarios. Each expected report in
 //! `tests/egress/synthetic/` was written before the code that makes it pass.
 //! None of these is a real capture.
 
@@ -64,6 +64,32 @@ fn with_api_body(name: &str, seed: u64, make: impl Fn(&Scenario) -> Vec<u8>) -> 
     let body = make(&s);
     api_post(&mut s, &body);
     s
+}
+
+/// A body to the allowlisted host with these headers, made from the scenario's canaries.
+fn with_api_request(
+    name: &str,
+    seed: u64,
+    headers: &[(&str, &str)],
+    make: impl Fn(&Scenario) -> Vec<u8>,
+) -> Scenario {
+    let mut s = Scenario::new(name, seed);
+    let body = make(&s);
+    let c = api_conn(&mut s, true, "198.18.0.1", 443, API);
+    post(&mut s, c, "POST", headers, &body);
+    s
+}
+
+fn nsec_text(s: &Scenario) -> Vec<u8> {
+    s.canary(Class::Nsec).into_bytes()
+}
+
+/// The reversed dotted name a PTR lookup of the planted IPv4 address asks for.
+fn reverse_name(s: &Scenario) -> String {
+    let ip = s.canary(Class::Ipv4);
+    let mut parts: Vec<&str> = ip.split('.').collect();
+    parts.reverse();
+    format!("{}.in-addr.arpa", parts.join("."))
 }
 
 fn near_misses(ip: &str) -> Vec<String> {
@@ -270,7 +296,21 @@ fn s49(seed: u64) -> Scenario {
     s
 }
 
-/// All 54, as (file stem, scenario).
+/// A DNS query datagram with one OPT record whose owner name is `owner` (a root name is `[0]`).
+fn opt_query(owner: &[u8]) -> Vec<u8> {
+    let mut q = vec![0x00, 0x07, 0x01, 0x00, 0, 0, 0, 0, 0, 0, 0, 1];
+    q.extend(owner);
+    q.extend([0, 41, 0x10, 0, 0, 0, 0, 0, 0, 0]);
+    q
+}
+
+fn s81(seed: u64) -> Scenario {
+    let mut s = Scenario::new("s81", seed);
+    s.post_extra_seq = Some(0);
+    s
+}
+
+/// All of them, as (file stem, scenario).
 fn all(seed: u64) -> Vec<(&'static str, Scenario)> {
     let mut s02 = Scenario::bare("s02", seed);
     s02.control(
@@ -391,10 +431,10 @@ fn all(seed: u64) -> Vec<(&'static str, Scenario)> {
         c,
         "POST",
         &[("Content-Encoding", "gzip")],
-        &gzip_fixed_huffman(nsec.as_bytes()),
+        &gzip(nsec.as_bytes()),
     );
     let mut s42 = Scenario::new("s42", seed);
-    s42.raw_lo_tcp_dns(51_000, &[0x00, 0x40, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66]);
+    s42.lo_tcp_dns_stream(51_000, &[0x00, 0x40, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66]);
     let mut s43 = Scenario::new("s43", seed);
     s43.raw_lo_udp(51_001, 5353, &[0u8; 6]);
     let s44 = with_api_body("s44", seed, |s| {
@@ -500,6 +540,83 @@ fn all(seed: u64) -> Vec<(&'static str, Scenario)> {
     let c = api_conn(&mut s61, true, &planted, 443, API);
     post(&mut s61, c, "POST", &[], b"x");
 
+    let s62 = with_api_request("s62", seed, &[("Content-Encoding", "deflate")], |s| {
+        zlib(&nsec_text(s))
+    });
+    let s63 = with_api_request("s63", seed, &[("Content-Encoding", "br")], |s| {
+        // A gzip stream inside a brotli one: the bytes in the body show no readable text.
+        brotli_stored(&gzip(&nsec_text(s)))
+    });
+    let s64 = with_api_request("s64", seed, &[("Content-Encoding", "gzip")], |_| {
+        gzip(b"{\"hello\":\"world\"}")
+    });
+    let s65 = with_api_request("s65", seed, &[("Content-Encoding", "gzip")], |_| {
+        gzip_best(&vec![0u8; 8 * 1024 * 1024])
+    });
+    let s66 = with_api_request("s66", seed, &[("Content-Encoding", "gzip")], |s| {
+        gzip_layers(&nsec_text(s), 3)
+    });
+    let s67 = with_api_request("s67", seed, &[("Content-Encoding", "gzip")], |s| {
+        gzip_layers(&nsec_text(s), 4)
+    });
+    let s68 = with_api_request("s68", seed, &[("Content-Encoding", "gzip")], |_| {
+        let whole = gzip(&b"harmless text, repeated. ".repeat(40));
+        whole[..whole.len() / 2].to_vec()
+    });
+    let s69 = with_api_request(
+        "s69",
+        seed,
+        &[
+            ("Content-Type", "application/grpc"),
+            ("grpc-encoding", "gzip"),
+        ],
+        |s| grpc_frame(true, &gzip(&nsec_text(s))),
+    );
+    let s70 = with_api_request(
+        "s70",
+        seed,
+        &[
+            ("Content-Type", "application/grpc"),
+            ("grpc-encoding", "zstd"),
+        ],
+        |_| grpc_frame(true, b"opaque"),
+    );
+    let s71 = with_api_request(
+        "s71",
+        seed,
+        &[("Transfer-Encoding", "gzip, chunked")],
+        |s| gzip(&nsec_text(s)),
+    );
+    let s72 = with_api_request("s72", seed, &[("Content-Type", "application/gzip")], |s| {
+        gzip(&nsec_text(s))
+    });
+    let s73 = with_api_request("s73", seed, &[], |s| gzip(&nsec_text(s)));
+    let s74 = with_api_request("s74", seed, &[], |_| {
+        let mut body = vec![0x28, 0xb5, 0x2f, 0xfd];
+        body.extend(b"opaque frame content");
+        body
+    });
+    let mut s75 = Scenario::new("s75", seed);
+    let name = reverse_name(&s75);
+    s75.dns_query_typed(&name, "PTR");
+    let s76 = with_api_body("s76", seed, |s| {
+        format!("{:?}", s.canary_bytes(Class::Nsec)).into_bytes()
+    });
+    let s77 = with_api_body("s77", seed, |s| {
+        let mut zpub = vec![0x04, 0xb2, 0x47, 0x46];
+        zpub.extend(&s.canary_bytes(Class::Xpub)[4..]);
+        gd_egress::encode::base58check(&zpub).into_bytes()
+    });
+    let mut s78 = Scenario::new("s78", seed);
+    s78.raw_lo_udp(51_004, 5353, &opt_query(&[1, b'a', 0]));
+    let mut s79 = Scenario::new("s79", seed);
+    let mut response = Scenario::dns_query_bytes("qr.example.net", 8, 1, None);
+    response[2] = 0x81;
+    response[3] = 0x80;
+    s79.raw_lo_udp(51_005, 5353, &response);
+    let mut s80 = Scenario::new("s80", seed);
+    s80.raw_lo_tcp_recorder(51_006, b"no handshake before this");
+
     vec![
         ("S01-clean-baseline", Scenario::new("s01", seed)),
         ("S02-blind-mitm", s02),
@@ -562,6 +679,26 @@ fn all(seed: u64) -> Vec<(&'static str, Scenario)> {
         ("S59-ipv4-split-bodies", s59),
         ("S60-dns-truncated-opt", s60),
         ("S61-dst-ip-redacted", s61),
+        ("S62-deflate-zlib-leak", s62),
+        ("S63-brotli-leak", s63),
+        ("S64-gzip-clean", s64),
+        ("S65-gzip-ratio-bomb", s65),
+        ("S66-gzip-three-deep", s66),
+        ("S67-gzip-four-deep", s67),
+        ("S68-gzip-truncated", s68),
+        ("S69-grpc-gzip-leak", s69),
+        ("S70-grpc-zstd", s70),
+        ("S71-transfer-encoding-gzip", s71),
+        ("S72-content-type-gzip", s72),
+        ("S73-gzip-magic-no-header", s73),
+        ("S74-zstd-magic", s74),
+        ("S75-ptr-name-leak", s75),
+        ("S76-nsec-key-as-byte-list", s76),
+        ("S77-zpub-leak", s77),
+        ("S78-dns-opt-owner-not-root", s78),
+        ("S79-dns-client-response", s79),
+        ("S80-tcp-no-syn", s80),
+        ("S81-keep-alive-before-post-control", s81(seed)),
     ]
 }
 
@@ -576,7 +713,7 @@ fn find(seed: u64, prefix: &str) -> Scenario {
 #[test]
 fn every_synthetic_scenario_gives_its_expected_report() {
     let scenarios = all(1);
-    assert_eq!(scenarios.len(), 61);
+    assert_eq!(scenarios.len(), 81);
     let mut failures = Vec::new();
     for (stem, scenario) in &scenarios {
         let (got, want) = (scenario.report(), expected_report(stem));
@@ -645,7 +782,7 @@ fn capture_statistics_are_required_and_must_be_clean() {
     };
     let log = |dir: &std::path::Path| dir.join("pcap/tcpdump.log");
     assert!(judged(&|_| {}).starts_with("Judge C (egress capture): PASS"));
-    let cases: [(&str, &str); 5] = [
+    let cases: [(&str, &str); 8] = [
         ("missing-file", ""),
         ("bad-stats", "tcpdump: listening on any\n"),
         (
@@ -655,6 +792,19 @@ fn capture_statistics_are_required_and_must_be_clean() {
         (
             "capture-drops",
             "22 packets captured\n25 packets received by filter\n0 packets dropped by kernel\n",
+        ),
+        // Each count exactly once: a second line, even a harmless one, is refused.
+        (
+            "bad-stats",
+            "22 packets captured\n22 packets captured\n22 packets received by filter\n0 packets dropped by kernel\n",
+        ),
+        (
+            "bad-stats",
+            "22 packets captured\n22 packets received by filter\n0 packets dropped by kernel\n3 packets dropped by kernel\n",
+        ),
+        (
+            "bad-stats",
+            "22 packets captured\n22 packets received by filter\n22 packets received by filter\n0 packets dropped by kernel\n",
         ),
         (
             "stats-mismatch",
@@ -672,6 +822,85 @@ fn capture_statistics_are_required_and_must_be_clean() {
         assert!(
             report.contains(&format!("F5 capture-unreadable stats: {code}")),
             "{code}: {report}"
+        );
+    }
+}
+
+const UNDECODED_LINE: &str = "F5 capture-unreadable mitm: undecoded-content-encoding";
+
+#[test]
+fn every_unsupported_compression_magic_fails_closed() {
+    // One request per format, no headers: the first bytes alone give it away.
+    let magics: [(&str, &[u8]); 5] = [
+        ("zstd", &[0x28, 0xb5, 0x2f, 0xfd]),
+        ("xz", &[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]),
+        ("bzip2", &[0x42, 0x5a, 0x68, 0x39]),
+        ("zip", &[0x50, 0x4b, 0x03, 0x04]),
+        ("7z", &[0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]),
+    ];
+    for (name, magic) in magics {
+        let mut s = Scenario::new("magic", 1);
+        let mut body = magic.to_vec();
+        body.extend(b"opaque content");
+        api_post(&mut s, &body);
+        let report = s.report();
+        assert!(report.contains(UNDECODED_LINE), "{name}: {report}");
+    }
+    // Declared by header or content type, whatever the bytes say.
+    for (header, value) in [
+        ("Content-Encoding", "zstd"),
+        ("Content-Encoding", "compress"),
+        ("Content-Encoding", "gzip, zstd"),
+        ("Content-Type", "application/zstd"),
+        ("Content-Type", "application/x-xz"),
+        ("Content-Type", "application/zip"),
+        ("Transfer-Encoding", "compress, chunked"),
+    ] {
+        let mut s = Scenario::new("declared", 1);
+        let c = api_conn(&mut s, true, "198.18.0.1", 443, API);
+        post(&mut s, c, "POST", &[(header, value)], b"plain bytes");
+        let report = s.report();
+        assert!(
+            report.contains(UNDECODED_LINE),
+            "{header}: {value}: {report}"
+        );
+    }
+}
+
+#[test]
+fn plain_bodies_and_harmless_headers_still_pass() {
+    for headers in [
+        vec![("Content-Encoding", "identity")],
+        vec![("Transfer-Encoding", "chunked")],
+        vec![("Transfer-Encoding", "identity")],
+        vec![("grpc-encoding", "identity")],
+        vec![("Content-Type", "application/json")],
+    ] {
+        let mut s = Scenario::new("plain", 1);
+        let c = api_conn(&mut s, true, "198.18.0.1", 443, API);
+        post(&mut s, c, "POST", &headers, b"{\"a\":1}");
+        let report = s.report();
+        assert!(
+            report.starts_with("Judge C (egress capture): PASS"),
+            "{headers:?}: {report}"
+        );
+    }
+}
+
+#[test]
+fn a_keep_alive_request_after_the_post_control_must_come_later() {
+    let want = "Judge C (egress capture): FAIL\ncontrol: dns ok, https ok, wire ok, blocked-path ok\ndestinations: 1 unlisted, 0 allowlisted\nF1 unlisted-destination https evil.invalid:443\n";
+    let mut later = Scenario::new("later", 1);
+    later.post_extra_seq = Some(1_000_000);
+    assert_eq!(later.report(), want);
+    // The same request logged with a sequence number at or before the control's own: out of order.
+    for seq in [0, 5] {
+        let mut early = Scenario::new("early", 1);
+        early.post_extra_seq = Some(seq);
+        let report = early.report();
+        assert!(
+            report.contains("F5 capture-unreadable mitm: order"),
+            "seq {seq}: {report}"
         );
     }
 }

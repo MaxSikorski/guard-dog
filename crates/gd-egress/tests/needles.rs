@@ -391,3 +391,314 @@ proptest! {
         }
     }
 }
+
+fn key_bytes(set: &gd_egress::canary::CanarySet, class: Class) -> Vec<u8> {
+    set.get(class).and_then(|c| c.bytes.clone()).unwrap()
+}
+
+#[test]
+fn key_bytes_written_as_source_code_are_found() {
+    let set = generate(7);
+    let needles = Needles::new(&set);
+    let list = |bytes: &[u8], each: &dyn Fn(u8) -> String, sep: &str| {
+        bytes.iter().map(|b| each(*b)).collect::<Vec<_>>().join(sep)
+    };
+    for class in [
+        Class::Nsec,
+        Class::SeedPhrase,
+        Class::Macaroon,
+        Class::ClnRune,
+        Class::Onion,
+        Class::NodePubkey,
+    ] {
+        let bytes = key_bytes(&set, class);
+        let forms = [
+            (
+                "rust hex list",
+                format!("[{}]", list(&bytes, &|b| format!("0x{b:02x}"), ", ")),
+            ),
+            (
+                "upper hex list",
+                format!("{{{}}}", list(&bytes, &|b| format!("0X{b:02X}"), ",")),
+            ),
+            (
+                "go byte slice",
+                format!(
+                    "[]byte{{{}}}",
+                    list(&bytes, &|b| format!("0x{b:02x}"), ", ")
+                ),
+            ),
+            ("rust debug", format!("{bytes:?}")),
+            (
+                "json array",
+                format!("[{}]", list(&bytes, &|b| b.to_string(), ",")),
+            ),
+            (
+                "space separated decimal",
+                list(&bytes, &|b| b.to_string(), " "),
+            ),
+            ("padded decimal", list(&bytes, &|b| format!("{b:03}"), ", ")),
+            (
+                "python escapes",
+                format!("b'{}'", list(&bytes, &|b| format!("\\x{b:02x}"), "")),
+            ),
+            (
+                "python escapes upper",
+                list(&bytes, &|b| format!("\\x{b:02X}"), ""),
+            ),
+            (
+                "hex with spaces",
+                list(&bytes, &|b| format!("{b:02x}"), " "),
+            ),
+        ];
+        for (label, text) in forms {
+            let hay = format!("payload = {text};\n");
+            assert!(
+                classes_found(&needles, hay.as_bytes()).contains(&class),
+                "{} as {label}",
+                class.name()
+            );
+        }
+        // Negative twins: one byte changed, or only a few bytes.
+        let mut changed = bytes.clone();
+        let last = changed.len() - 1;
+        changed[last] ^= 0x55;
+        for text in [
+            format!("{changed:?}"),
+            format!("[{}]", list(&changed, &|b| format!("0x{b:02x}"), ", ")),
+            list(&changed, &|b| format!("\\x{b:02x}"), ""),
+            format!("{:?}", &bytes[..6]),
+            list(&bytes[..6], &|b| format!("\\x{b:02x}"), ""),
+        ] {
+            assert!(
+                classes_found(&needles, text.as_bytes()).is_empty(),
+                "{} twin {text}",
+                class.name()
+            );
+        }
+    }
+}
+
+fn xpub_with_version(set: &gd_egress::canary::CanarySet, version: [u8; 4]) -> String {
+    let mut payload = version.to_vec();
+    payload.extend(&key_bytes(set, Class::Xpub)[4..]);
+    gd_egress::encode::base58check(&payload)
+}
+
+#[test]
+fn an_xpub_written_with_other_version_bytes_is_found() {
+    let set = generate(7);
+    let needles = Needles::new(&set);
+    assert_eq!(
+        xpub_with_version(&set, [0x04, 0x88, 0xb2, 0x1e]),
+        set.text(Class::Xpub),
+        "the helper reproduces the planted xpub"
+    );
+    // zpub, ypub, tpub, vpub, upub, Zpub, Ypub, and a made-up version.
+    for (name, version) in [
+        ("zpub", [0x04, 0xb2, 0x47, 0x46]),
+        ("ypub", [0x04, 0x9d, 0x7c, 0xb2]),
+        ("tpub", [0x04, 0x35, 0x87, 0xcf]),
+        ("vpub", [0x04, 0x5f, 0x1c, 0xf6]),
+        ("upub", [0x04, 0x4a, 0x52, 0x62]),
+        ("Zpub", [0x02, 0xaa, 0x7e, 0xd3]),
+        ("Ypub", [0x02, 0x95, 0xb4, 0x3f]),
+        ("made up", [0x01, 0x02, 0x03, 0x04]),
+    ] {
+        let text = xpub_with_version(&set, version);
+        for hay in [
+            text.clone(),
+            format!("{{\"key\": \"{text}\"}}"),
+            format!("descriptor wpkh({text}/0/*)"),
+        ] {
+            assert!(
+                classes_found(&needles, hay.as_bytes()).contains(&Class::Xpub),
+                "{name}: {hay}"
+            );
+        }
+    }
+    // Negative twin: another seed's key under the same version is not ours.
+    let other = generate(8);
+    let foreign = xpub_with_version(&other, [0x04, 0xb2, 0x47, 0x46]);
+    assert!(classes_found(&needles, foreign.as_bytes()).is_empty());
+}
+
+fn ip_forms(set: &gd_egress::canary::CanarySet) -> (Vec<String>, Vec<String>) {
+    let ip: std::net::Ipv4Addr = set.text(Class::Ipv4).parse().unwrap();
+    let o = ip.octets();
+    let value = u32::from(ip);
+    let mapped = |v: u32| {
+        vec![
+            format!("::ffff:{:x}:{:x}", v >> 16, v & 0xffff),
+            format!("::ffff:{}", std::net::Ipv4Addr::from(v)),
+            format!("[::ffff:{:x}:{:x}]:443", v >> 16, v & 0xffff),
+            format!("0:0:0:0:0:ffff:{:04x}:{:04x}", v >> 16, v & 0xffff),
+        ]
+    };
+    let forms = |o: [u8; 4], v: u32| {
+        let mut out = vec![
+            format!("ip-{}-{}-{}-{}", o[0], o[1], o[2], o[3]),
+            format!(
+                "ec2-{}-{}-{}-{}.compute-1.example.net",
+                o[0], o[1], o[2], o[3]
+            ),
+            format!("ip_{}_{}_{}_{}", o[0], o[1], o[2], o[3]),
+            format!("{}.{}.{}.{}.in-addr.arpa", o[3], o[2], o[1], o[0]),
+            format!("{}.{}.{}.{}.IN-ADDR.ARPA.", o[3], o[2], o[1], o[0]),
+        ];
+        out.extend(mapped(v));
+        out
+    };
+    let near = {
+        let mut n = o;
+        n[3] = n[3].wrapping_add(1);
+        forms(n, value.wrapping_add(1))
+    };
+    (forms(o, value), near)
+}
+
+#[test]
+fn ip_addresses_in_host_name_and_mapped_forms_are_found() {
+    let set = generate(1);
+    let needles = Needles::new(&set);
+    let (exact, near) = ip_forms(&set);
+    for text in &exact {
+        assert!(
+            classes_found(&needles, format!(" {text} ").as_bytes()).contains(&Class::Ipv4),
+            "{text}"
+        );
+    }
+    for text in &near {
+        assert!(
+            classes_found(&needles, format!(" {text} ").as_bytes()).is_empty(),
+            "near miss {text}"
+        );
+    }
+    // The reversed numbers without the arpa name are a different address.
+    let o = set
+        .text(Class::Ipv4)
+        .parse::<std::net::Ipv4Addr>()
+        .unwrap()
+        .octets();
+    let reversed = format!("{}.{}.{}.{}", o[3], o[2], o[1], o[0]);
+    assert!(classes_found(&needles, format!(" {reversed} ").as_bytes()).is_empty());
+    // ip_values reads the mapped form as an IPv4 value too.
+    let value = u32::from(std::net::Ipv4Addr::from(o));
+    let values = gd_egress::needle::ip_values(
+        format!("::ffff:{:x}:{:x}", value >> 16, value & 0xffff).as_bytes(),
+    );
+    assert!(values.v4.contains(&value));
+}
+
+#[test]
+fn an_ipv6_address_as_a_reverse_lookup_name_is_found() {
+    let set = generate(1);
+    let needles = Needles::new(&set);
+    let bytes = key_bytes(&set, Class::Ipv6);
+    let nibbles: Vec<String> = bytes
+        .iter()
+        .flat_map(|b| [b >> 4, b & 15])
+        .rev()
+        .map(|n| format!("{n:x}"))
+        .collect();
+    let name = format!("{}.ip6.arpa", nibbles.join("."));
+    assert!(classes_found(&needles, format!(" {name} ").as_bytes()).contains(&Class::Ipv6));
+    assert!(
+        classes_found(
+            &needles,
+            format!("{}.IP6.ARPA.", nibbles.join(".")).as_bytes()
+        )
+        .contains(&Class::Ipv6)
+    );
+    // One nibble different: another address.
+    let mut changed = nibbles.clone();
+    changed[3] = if changed[3] == "0" {
+        "1".into()
+    } else {
+        "0".into()
+    };
+    assert!(
+        classes_found(
+            &needles,
+            format!(" {}.ip6.arpa ", changed.join(".")).as_bytes()
+        )
+        .is_empty()
+    );
+    // The nibbles in the wrong order are another address, too.
+    let forward: Vec<String> = nibbles.iter().rev().cloned().collect();
+    assert!(
+        classes_found(
+            &needles,
+            format!(" {}.ip6.arpa ", forward.join(".")).as_bytes()
+        )
+        .is_empty()
+    );
+}
+
+fn prefix(word: &str) -> &str {
+    &word[..word.len().min(4)]
+}
+
+#[test]
+fn seed_words_as_four_letter_prefixes_and_seedqr_digits_are_found() {
+    let set = generate(5);
+    let needles = Needles::new(&set);
+    let phrase = set.text(Class::SeedPhrase).to_string();
+    let words: Vec<&str> = phrase.split(' ').collect();
+    let prefixes: Vec<&str> = words.iter().map(|w| prefix(w)).collect();
+    for separator in [" ", ",", "\n", "-", "\", \""] {
+        let hay = format!("backup: {}", prefixes.join(separator));
+        assert!(
+            classes_found(&needles, hay.as_bytes()).contains(&Class::SeedPhrase),
+            "prefixes with {separator:?}"
+        );
+    }
+    let three = prefixes[5..8].join(" ");
+    assert!(classes_found(&needles, three.as_bytes()).contains(&Class::SeedPhrase));
+    assert!(classes_found(&needles, prefixes[5..7].join(" ").as_bytes()).is_empty());
+    let other = generate(6);
+    let other_phrase = other.text(Class::SeedPhrase).to_string();
+    let others: Vec<&str> = other_phrase.split(' ').map(prefix).collect();
+    assert!(classes_found(&needles, others.join(" ").as_bytes()).is_empty());
+
+    // SeedQR: each word as its position in the list, four digits, zero-padded, run together.
+    let list = gd_egress::bip39::words();
+    let index = |w: &str| list.iter().position(|x| *x == w).unwrap();
+    let digits = |ws: &[&str]| {
+        ws.iter()
+            .map(|w| format!("{:04}", index(w)))
+            .collect::<String>()
+    };
+    assert_eq!(digits(&words).len(), 96);
+    for (label, text) in [
+        ("24 words", digits(&words)),
+        ("first 12", digits(&words[..12])),
+        ("three words", digits(&words[9..12])),
+        ("inside text", format!("qr=\"{}\"\n", digits(&words[3..9]))),
+    ] {
+        assert!(
+            classes_found(&needles, text.as_bytes()).contains(&Class::SeedPhrase),
+            "{label}"
+        );
+    }
+    // With a space or a line break between indices the stripped view still reads it.
+    let spaced = words[..12]
+        .iter()
+        .map(|w| format!("{:04}", index(w)))
+        .collect::<Vec<_>>();
+    for sep in [" ", "\n", ","] {
+        assert!(
+            classes_found(&needles, spaced.join(sep).as_bytes()).contains(&Class::SeedPhrase),
+            "{sep:?}"
+        );
+    }
+    // Negative twins: two indices only, one digit changed, another seed's indices.
+    assert!(classes_found(&needles, digits(&words[..2]).as_bytes()).is_empty());
+    let mut broken = digits(&words[..12]).into_bytes();
+    for at in [3usize, 15, 27, 39] {
+        broken[at] = if broken[at] == b'7' { b'8' } else { b'7' };
+    }
+    assert!(classes_found(&needles, &broken).is_empty());
+    let other_words: Vec<&str> = other_phrase.split(' ').collect();
+    assert!(classes_found(&needles, digits(&other_words).as_bytes()).is_empty());
+}

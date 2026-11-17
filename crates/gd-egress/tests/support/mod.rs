@@ -158,35 +158,68 @@ pub fn b64(bytes: &[u8]) -> String {
     BASE64.encode(bytes)
 }
 
-/// A gzip file whose deflate data uses the fixed Huffman codes, written by hand so no compressor
-/// crate is needed. The data is bit-shifted, so no readable run of it survives. The checksum fields
-/// are zero: only the shape matters here.
-pub fn gzip_fixed_huffman(data: &[u8]) -> Vec<u8> {
-    let mut bits: Vec<bool> = vec![true, true, false]; // final block, type 01 (least significant bit first)
-    let mut code = |value: u32, width: u32| {
-        for i in (0..width).rev() {
-            bits.push((value >> i) & 1 == 1);
-        }
-    };
-    for &byte in data {
-        let lit = u32::from(byte);
-        if lit < 144 {
-            code(0x30 + lit, 8);
-        } else {
-            code(0x190 + lit - 144, 9);
-        }
-    }
-    code(0, 7); // end of block
-    let mut out = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 3];
-    for chunk in bits.chunks(8) {
-        out.push(
-            chunk
-                .iter()
-                .enumerate()
-                .fold(0u8, |acc, (i, b)| acc | (u8::from(*b) << i)),
-        );
-    }
-    out.extend([0u8; 8]);
+/// A gzip file (default compression).
+pub fn gzip(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(data).unwrap();
+    enc.finish().unwrap()
+}
+
+/// A gzip file made of stored (uncompressed) blocks: ratio about 1:1, and fast to build.
+pub fn gzip_stored(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::none());
+    enc.write_all(data).unwrap();
+    enc.finish().unwrap()
+}
+
+/// A gzip file at the best compression (for bombs: zeros shrink about 1000 to 1).
+pub fn gzip_best(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+    enc.write_all(data).unwrap();
+    enc.finish().unwrap()
+}
+
+/// `gzip` applied `layers` times.
+pub fn gzip_layers(data: &[u8], layers: usize) -> Vec<u8> {
+    (0..layers).fold(data.to_vec(), |acc, _| gzip(&acc))
+}
+
+/// A zlib stream (what HTTP `Content-Encoding: deflate` is meant to be).
+pub fn zlib(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(data).unwrap();
+    enc.finish().unwrap()
+}
+
+/// Raw deflate, no header (what some clients send as `deflate`).
+pub fn deflate_raw(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(data).unwrap();
+    enc.finish().unwrap()
+}
+
+/// A brotli stream holding `data` (at most 65,536 bytes) in one uncompressed meta-block, written
+/// by hand so no brotli compressor is needed: window bits, meta-block header, the bytes, then the
+/// empty last meta-block.
+pub fn brotli_stored(data: &[u8]) -> Vec<u8> {
+    assert!(!data.is_empty() && data.len() <= 65_536);
+    let header = (u32::try_from(data.len() - 1).unwrap() << 4) | (1 << 20);
+    let mut out = header.to_le_bytes()[..3].to_vec();
+    out.extend(data);
+    out.push(0x03);
+    out
+}
+
+/// One gRPC message frame: a compressed flag, a four-byte big-endian length, the message.
+pub fn grpc_frame(compressed: bool, message: &[u8]) -> Vec<u8> {
+    let mut out = vec![u8::from(compressed)];
+    out.extend(u32::try_from(message.len()).unwrap().to_be_bytes());
+    out.extend(message);
     out
 }
 
@@ -248,6 +281,10 @@ pub struct Scenario {
     /// Packets tcpdump says the kernel dropped.
     pub kernel_drops: u64,
     pub next_conn: u64,
+    /// After the post control, one more request on its connection, logged with this `seq`.
+    pub post_extra_seq: Option<u64>,
+    /// The next `http` or `tcp` event takes this `seq` instead of the running count.
+    force_seq: Option<u64>,
     /// Global request sequence, written as `seq` on http and tcp events.
     seq: u64,
     next_dns_id: u16,
@@ -275,6 +312,8 @@ impl Scenario {
             lo_duplicate_outgoing: false,
             kernel_drops: 0,
             next_conn: 1,
+            post_extra_seq: None,
+            force_seq: None,
             seq: 0,
             next_dns_id: 100,
             next_dns_port: 50_000,
@@ -343,6 +382,7 @@ impl Scenario {
         let number = match qtype {
             "AAAA" => 28,
             "TXT" => 16,
+            "PTR" => 12,
             _ => 1,
         };
         self.wire_dns(name, number, true);
@@ -467,6 +507,9 @@ impl Scenario {
     }
 
     fn next_seq(&mut self) -> u64 {
+        if let Some(forced) = self.force_seq.take() {
+            return forced;
+        }
         self.seq += 1;
         self.seq
     }
@@ -650,8 +693,14 @@ impl Scenario {
         self.lo_frag(17, 0x2000, udp(sport, dport, payload));
     }
 
-    /// TCP payload sent to the resolver port, with no handshake.
-    pub fn raw_lo_tcp_dns(&mut self, client_port: u16, bytes: &[u8]) {
+    /// TCP payload sent to the recorder's port with no handshake before it.
+    pub fn raw_lo_tcp_recorder(&mut self, client_port: u16, bytes: &[u8]) {
+        self.lo(6, tcp(client_port, 8080, 1, PSH_ACK, bytes));
+    }
+
+    /// A DNS-over-TCP stream to the resolver with its handshake, so only its framing is in question.
+    pub fn lo_tcp_dns_stream(&mut self, client_port: u16, bytes: &[u8]) {
+        self.lo(6, tcp(client_port, 5353, 0, SYN, b""));
         self.lo(6, tcp(client_port, 5353, 1, PSH_ACK, bytes));
     }
 
@@ -706,7 +755,22 @@ impl Scenario {
         let mut s = self.clone();
         let cut = s.frames.len();
         if let Some(opts) = s.post {
-            s.control("post", opts);
+            let c = s.control("post", opts);
+            if let Some(seq) = s.post_extra_seq {
+                s.force_seq = Some(seq);
+                s.http(
+                    c,
+                    "https",
+                    "GET",
+                    "evil.invalid",
+                    443,
+                    "/",
+                    &[],
+                    b"",
+                    false,
+                    false,
+                );
+            }
         }
         if s.cut_post_pcap {
             s.frames.truncate(cut);
