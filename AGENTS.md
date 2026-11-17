@@ -11,7 +11,7 @@ This file is for AI coding agents working **on this repository**. If someone ask
 - Guard Dog never holds keys or moves funds, and never changes a system without the user's approval. Don't add code that does.
 - Only scan or test machines the user owns. Active tests run only against regtest or signet, never mainnet.
 - Rust core (pinned toolchain, always `--locked`); plain HTML, CSS and JavaScript for the UI, no frameworks; Python only through `uv`.
-- Permissive dependencies only (checked with `cargo deny`); no GPL, AGPL or non-commercial code.
+- Permissive Rust dependencies only (checked with `cargo deny`); no GPL, AGPL or non-commercial code. Vendored website files are listed in THIRD-PARTY-NOTICES.md.
 - Security problems are reported privately ([SECURITY.md](SECURITY.md)), never in a public issue or pull request.
 - Plain English in docs and pull requests: what changed, why, how you tested it, and what you didn't test.
 
@@ -33,4 +33,5 @@ From the repository root (rustup installs the pinned toolchain from `rust-toolch
 | `crates/` | The Rust code; which crate owns what: [crates/README.md](crates/README.md) |
 | `tests/README.md` | Every test and judge, one line each |
 | `lab/` | The regtest lab (`lab/up.sh`, `lab/down.sh`): [lab/README.md](lab/README.md) |
-| `catalog/`, `advisories/` | Coming next: services as data, advisories |
+| `advisories/` | The advisory corpus (23 OSV records) and its vendored schema, checked by `crates/gd-core/tests/advisory_corpus.rs` |
+| `catalog/` | Coming next: services as data |

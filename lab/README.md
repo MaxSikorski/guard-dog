@@ -15,7 +15,7 @@ You need Docker with Compose v2, `jq` and `openssl`. Run one lab at a time; `up.
 2. Starts the five services below and waits until each one's health check passes.
 3. Asks bitcoind, LND and Core Lightning which chain they're on. If any of them says anything but `regtest`, it removes the lab and stops (exit 3).
 4. Mines 101 blocks, sends 1 BTC each to LND and Core Lightning, and opens a 1,000,000 sat channel from LND to Core Lightning. It waits until both sides say the channel is active.
-5. Proves the least-privileged logins Guard Dog will use, and saves them in `lab/.data/creds/`. Each must read the version, and each must be refused a wider call:
+5. Proves the least-privileged logins Guard Dog will use, and saves them (the LND macaroon and the Core Lightning rune go in `lab/.data/creds/`; the bitcoind `gdwatch` login stays in `lab/.data/lab.env`). Each must read the version, and each must be refused a wider call:
    - bitcoind: user `gdwatch`, limited to `getnetworkinfo` and `getblockchaininfo`
    - LND: a macaroon baked with only `info:read`
    - Core Lightning: a rune limited to `getinfo`

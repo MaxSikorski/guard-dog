@@ -59,7 +59,7 @@ If your money and identity live on your own infrastructure, you're your own secu
   - the base layer underneath
 
   You can also register the hardware wallets and apps it can't see, and paste in any git repo you want it to watch.
-- **Tell you when something becomes dangerous.** It matches what you run against security advisories, including conditions like "only if this port is open to the internet". Alerts come by Nostr DM, ntfy, Signal/Telegram or email, with step-by-step fixes.
+- **Tell you when something becomes dangerous.** It matches what you run against security advisories, including conditions like "only if this port is open to the internet". Alerts come by Nostr DM, ntfy or email, with step-by-step fixes.
 - **See what an attacker sees.**
   - Exposure checks for ports, router mappings, Tor, tunnels and proxies.
   - An outside-in probe from a buddy's Guard Dog.
@@ -83,7 +83,7 @@ If your money and identity live on your own infrastructure, you're your own secu
 - **Judge A, recorded setups:** does it find every service and its version on a real setup? Coming next.
 - **Judge B, real advisories:** does it report every advisory that applies, and nothing that doesn't? So far there's a corpus of 23 advisories, checked against the OSV schema. The matching comes later.
 - **Judge C, egress:** does anything leave the box that shouldn't? The checker is in and passes 61 synthetic captures; running it on real captures from the lab comes next.
-- **Judge D, injection:** can hostile text make it do or show something it shouldn't? 48 hostile payloads, and 48 of 48 pass. A naive renderer fails 36 of them, so the judge has teeth.
+- **Judge D, injection:** can hostile text make it do or show something it shouldn't? 48 hostile payloads, and 48 of 48 pass both renderer checks (what Guard Dog shows on a terminal and in HTML). The checks that it takes no action and puts no untrusted text in a privileged prompt are counted but not yet applicable; they need code from later phases. A naive renderer fails 36 of them, so the judge has teeth.
 
 The details are in [tests/README.md](tests/README.md).
 
