@@ -994,25 +994,41 @@ struct CatalogVersion {
     examples: Vec<(Option<String>, Option<String>)>,
 }
 
-fn catalog_version(text: &str) -> CatalogVersion {
+fn catalog_version(text: &str) -> Result<CatalogVersion, String> {
     let mut out = CatalogVersion {
         scheme: None,
         examples: Vec::new(),
     };
     let mut in_version = false;
     let mut in_example = false;
-    let mut in_string = false;
+    // The delimiter of the multiline string being read, if any; only the
+    // same delimiter closes it.
+    let mut open: Option<&str> = None;
     for line in text.lines() {
         let l = line.trim();
-        let was_in_string = in_string;
-        for quote in ["\"\"\"", "\'\'\'"] {
-            if l.matches(quote).count() % 2 == 1 {
-                in_string = !in_string;
+        if let Some(d) = open {
+            if l.matches(d).count() % 2 == 1 {
+                open = None;
             }
-        }
-        if was_in_string {
             continue;
         }
+        // A multiline string opens when a value starts with a triple quote
+        // that is not closed on the same line; a triple quote of the other
+        // kind inside a one-line value is plain text.
+        let value = l.split_once('=').map_or("", |(_, v)| v.trim_start());
+        let opens = ["\"\"\"", "'''"]
+            .into_iter()
+            .find(|d| value.starts_with(d) && value.matches(d).count() % 2 == 1);
+        if opens.is_some()
+            && in_example
+            && (!toml_values(l, "raw").is_empty() || !toml_values(l, "version").is_empty())
+        {
+            return Err(format!(
+                "catalog example #{} raw or version is multiline",
+                out.examples.len().saturating_sub(1)
+            ));
+        }
+        open = opens;
         if l.starts_with('[') {
             in_version = l == "[version]";
             in_example = l == "[[version.examples]]";
@@ -1030,13 +1046,13 @@ fn catalog_version(text: &str) -> CatalogVersion {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[test]
 fn catalog_names_and_examples_parse_in_their_schemes() {
     let core_toml = fs::read_to_string(root().join("catalog/bitcoin-core.toml")).unwrap();
-    let core_cat = catalog_version(&core_toml);
+    let core_cat = catalog_version(&core_toml).unwrap();
     assert!(
         core_cat.scheme.as_deref() == Some("bitcoin-core"),
         "Core catalog scheme"
@@ -1053,7 +1069,7 @@ fn catalog_names_and_examples_parse_in_their_schemes() {
         assert!(core().parse(v).is_ok(), "Core example #{n}");
     }
     let lnd_toml = fs::read_to_string(root().join("catalog/lnd.toml")).unwrap();
-    let lnd_cat = catalog_version(&lnd_toml);
+    let lnd_cat = catalog_version(&lnd_toml).unwrap();
     assert!(
         lnd_cat.scheme.as_deref() == Some("semver-beta"),
         "LND catalog scheme"
@@ -1072,13 +1088,31 @@ fn catalog_names_and_examples_parse_in_their_schemes() {
 fn a_scheme_line_inside_a_multiline_string_is_not_the_catalog_scheme() {
     let text = "[upstream]\nnote = \'\'\'\nscheme = \"operator-private-marker\"\n\'\'\'\n\n[version]\nscheme = \"semver-beta\"\n\n[version.call]\nscheme = \"other\"\n";
     assert!(
-        catalog_version(text).scheme.as_deref() == Some("semver-beta"),
+        catalog_version(text).unwrap().scheme.as_deref() == Some("semver-beta"),
         "the real scheme"
     );
     let text = "[version]\ndoc = \"\"\"\nscheme = \"operator-private-marker\"\n\"\"\"\nscheme = \"semver-beta\"\n";
     assert!(
-        catalog_version(text).scheme.as_deref() == Some("semver-beta"),
+        catalog_version(text).unwrap().scheme.as_deref() == Some("semver-beta"),
         "the real scheme after a multiline doc"
+    );
+}
+
+#[test]
+fn a_multiline_raw_or_version_is_refused_and_delimiters_do_not_mix() {
+    let text = "[version]\nscheme = \"semver-beta\"\n\n[[version.examples]]\nversion = \"0.21.6-beta\"\nraw = \"\"\"0.21.6-beta\nscheme = \"operator-private-marker\"\n\"\"\"\n";
+    assert!(catalog_version(text).is_err(), "multiline raw refused");
+    let text = "[[version.examples]]\nversion = \"\"\"1.0\n\"\"\"\n";
+    assert!(catalog_version(text).is_err(), "multiline version refused");
+    let text = "[upstream]\nnote = '''\ntext \"\"\" more\nscheme = \"operator-private-marker\"\n'''\n\n[version]\nscheme = \"semver-beta\"\n";
+    assert!(
+        catalog_version(text).unwrap().scheme.as_deref() == Some("semver-beta"),
+        "a triple quote of the other kind inside a string does not close it"
+    );
+    let text = "[version]\nnote = \"a '''b\"\nscheme = \"semver-beta\"\n";
+    assert!(
+        catalog_version(text).unwrap().scheme.as_deref() == Some("semver-beta"),
+        "a one-line value holding the other delimiter does not toggle state"
     );
 }
 
@@ -1219,6 +1253,9 @@ fn applicable_entries_checked(adv: &Advisory, pkg: (&str, &str)) -> Result<Vec<u
 fn applicable_entries(adv: &Advisory, adv_index: usize, pkg: (&str, &str)) -> Vec<usize> {
     match applicable_entries_checked(adv, pkg) {
         Ok(v) => v,
+        Err(_) if adv.gaps.iter().any(|g| g.kind == GapKind::GapsTruncated) => {
+            panic!("advisory #{adv_index} gap list truncated")
+        }
         Err(e) => panic!("advisory #{adv_index} entry {e} has an unreviewed platform note"),
     }
 }
