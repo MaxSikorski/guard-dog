@@ -88,7 +88,10 @@ impl VersionScheme for TestScheme {
             return Err(VersionError::Malformed);
         }
         let (core, rc) = match raw.split_once("-rc") {
-            Some((c, r)) => (c, Some(r.parse::<u64>().map_err(|_| VersionError::Malformed)?)),
+            Some((c, r)) => (
+                c,
+                Some(r.parse::<u64>().map_err(|_| VersionError::Malformed)?),
+            ),
             None => (raw, None),
         };
         let mut nums = Vec::new();
@@ -178,7 +181,8 @@ fn row_introduced_zero_fixed() {
 
 #[test]
 fn row_reintroduction_reopens() {
-    let r = r#"[{"introduced":"1.0.0"},{"fixed":"1.0.2"},{"introduced":"3.0.0"},{"fixed":"3.2.5"}]"#;
+    let r =
+        r#"[{"introduced":"1.0.0"},{"fixed":"1.0.2"},{"introduced":"3.0.0"},{"fixed":"3.2.5"}]"#;
     assert!(is_out(r, "0.9.0"));
     assert!(is_in(r, "1.0.0"));
     assert!(is_out(r, "2.0.0"));
@@ -316,7 +320,9 @@ fn event_order_never_changes_the_result() {
         json!({"fixed": "4"}),
         json!({"limit": "9"}),
     ];
-    let cands = ["0.5", "1", "1.5", "2", "2.5", "3", "3.9", "4", "8", "9", "10"];
+    let cands = [
+        "0.5", "1", "1.5", "2", "2.5", "3", "3.9", "4", "8", "9", "10",
+    ];
     let expected: Vec<&str> = cands
         .iter()
         .map(|c| {
@@ -324,7 +330,12 @@ fn event_order_never_changes_the_result() {
             kind(&evaluate_entry(&scheme(), 0, &entry, Some(c)))
         })
         .collect();
-    assert_eq!(expected, ["out", "in", "in", "out", "out", "in", "in", "out", "out", "out", "out"]);
+    assert_eq!(
+        expected,
+        [
+            "out", "in", "in", "out", "out", "in", "in", "out", "out", "out", "out"
+        ]
+    );
     let mut idx: Vec<usize> = (0..events.len()).collect();
     let mut count = 0;
     permute(&mut idx, 0, &mut |p| {
@@ -594,7 +605,9 @@ fn a_git_range_is_unknown_and_asks_for_a_release() {
     assert!(matches!(entry.ranges[0].kind, RangeKind::Git));
     let e = evaluate_entry(&scheme(), 0, &entry, Some("1.2.3"));
     match &e {
-        VersionEvidence::Unknown { reason, question, .. } => {
+        VersionEvidence::Unknown {
+            reason, question, ..
+        } => {
             assert_eq!(*reason, UnknownReason::NoCommitGraph);
             let q = question.to_lowercase();
             assert!(q.contains("release") && q.contains("tag"), "{question}");
@@ -693,7 +706,11 @@ fn unknown_installed_version_is_never_out_of_range() {
     );
     let e = evaluate_entry(&scheme(), 4, &entry, None);
     match e {
-        VersionEvidence::Unknown { reason, question, at } => {
+        VersionEvidence::Unknown {
+            reason,
+            question,
+            at,
+        } => {
             assert_eq!(reason, UnknownReason::InstalledVersionUnknown);
             assert!(!question.is_empty());
             assert_eq!(at.entry, 4);
@@ -715,7 +732,9 @@ fn every_unknown_carries_a_question() {
     ];
     for r in cases {
         match ev(r, "1.5") {
-            VersionEvidence::Unknown { question, .. } => assert!(!question.trim().is_empty(), "{r}"),
+            VersionEvidence::Unknown { question, .. } => {
+                assert!(!question.trim().is_empty(), "{r}")
+            }
             other => panic!("{r}: {other:?}"),
         }
     }
@@ -1018,5 +1037,8 @@ fn every_corpus_boundary_and_neighbour_gives_a_deterministic_answer() {
         }
     }
     // The run is not vacuous: every kind of answer occurs on real records.
-    assert!(ins > 0 && outs > 0 && unknowns > 0, "{ins} {outs} {unknowns}");
+    assert!(
+        ins > 0 && outs > 0 && unknowns > 0,
+        "{ins} {outs} {unknowns}"
+    );
 }
