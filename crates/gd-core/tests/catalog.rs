@@ -164,20 +164,36 @@ fn validate(stem: &str, text: &str) -> Result<Table, String> {
     toml::from_str(text).map_err(|e| format!("{stem}: not valid TOML: {e}"))
 }
 
-/// Every regular file under `fixtures/`, `advisories/` and `lab/`, as a path
-/// relative to the repo root with `/` separators. Found with `symlink_metadata`,
-/// so a symlink is never followed and is not in the list: a citation cannot
-/// reach outside the repo through one.
-fn inventory() -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    for top in ["fixtures", "advisories", "lab"] {
-        walk_files(&root().join(top), top, &mut out);
+/// The trusted inventory: every regular file under `fixtures/` and `advisories/`,
+/// plus `lab/compose.yml` and nothing else of `lab/`, as repo-relative paths with
+/// `/` separators, each mapped to the path the walk found. Found with
+/// `symlink_metadata`, so a symlink is never followed and is not in the list: a
+/// citation cannot reach outside the repo through one.
+fn inventory() -> BTreeMap<String, PathBuf> {
+    inventory_at(&root())
+}
+
+/// [`inventory`] for the tree at `root`. A top folder that is a symlink (or not a
+/// folder) holds nothing; `lab/` counts only when it is a real folder holding a
+/// regular `compose.yml`, and only that file is listed.
+fn inventory_at(root: &Path) -> BTreeMap<String, PathBuf> {
+    let real_dir = |p: &Path| fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
+    let mut out = BTreeMap::new();
+    for top in ["fixtures", "advisories"] {
+        let dir = root.join(top);
+        if real_dir(&dir) {
+            walk_files(&dir, top, &mut out);
+        }
+    }
+    let compose = root.join(LAB_FILE);
+    if real_dir(&root.join("lab")) && fs::symlink_metadata(&compose).is_ok_and(|m| m.is_file()) {
+        out.insert(LAB_FILE.to_string(), compose);
     }
     out
 }
 
 /// The regular files below `dir` (symlinks skipped, never followed), as `rel/...` paths.
-fn walk_files(dir: &Path, rel: &str, out: &mut BTreeSet<String>) {
+fn walk_files(dir: &Path, rel: &str, out: &mut BTreeMap<String, PathBuf>) {
     let Ok(items) = fs::read_dir(dir) else { return };
     for item in items.flatten() {
         let name = item.file_name().to_string_lossy().into_owned();
@@ -192,33 +208,32 @@ fn walk_files(dir: &Path, rel: &str, out: &mut BTreeSet<String>) {
         if meta.is_dir() {
             walk_files(&path, &rel, out);
         } else if meta.is_file() {
-            out.insert(rel);
+            out.insert(rel, path);
         }
     }
 }
 
 /// A `source` is a URL (the loader checked it is under the upstream and that a
-/// file name has no `..`) or a file in the trusted inventory, still inside the
-/// repo root once canonicalised. A failure names the field and the item's
-/// index only: the cited text is never used as a path or shown.
+/// file name has no `..`; `Ok(None)`) or a file in the trusted inventory, still
+/// inside the repo root once canonicalised (`Ok(Some(path))`, the path to read).
+/// A failure names the field and the item's index only: the cited text is never
+/// used as a path or shown.
 fn source_exists(
-    inv: &BTreeSet<String>,
+    inv: &BTreeMap<String, PathBuf>,
     field: &str,
     index: usize,
     src: &str,
-) -> Result<(), String> {
+) -> Result<Option<PathBuf>, String> {
     if src.starts_with("https://") {
-        return Ok(());
+        return Ok(None);
     }
     let bad =
         || format!("{field} (item {index}) must be a file in the repo or a URL under the upstream");
-    if !inv.contains(src) {
-        return Err(bad());
-    }
+    let found = inv.get(src).ok_or_else(bad)?;
     let root = fs::canonicalize(root()).map_err(|_| bad())?;
-    let real = fs::canonicalize(root.join(src)).map_err(|_| bad())?;
+    let real = fs::canonicalize(found).map_err(|_| bad())?;
     if real.starts_with(&root) && real.is_file() {
-        Ok(())
+        Ok(Some(real))
     } else {
         Err(bad())
     }
@@ -234,19 +249,36 @@ fn check_files(e: &Entry) -> Result<(), String> {
         }
     }
     for (i, ex) in e.version_call().examples().iter().enumerate() {
-        source_exists(&inv, "version.examples.source", i, &ex.source)?;
-        if ex.advisory {
-            advisory_has_version(&ex.source, &ex.version, &e.advisories().osv_packages)?;
+        let found = source_exists(&inv, "version.examples.source", i, &ex.source)?;
+        if ex.advisory
+            && let Some(path) = found
+        {
+            advisory_has_version(
+                &path,
+                "version.examples.source",
+                i,
+                &ex.version,
+                &e.advisories().osv_packages,
+            )?;
         }
     }
     Ok(())
 }
 
 /// Does the advisory file say `want` is an introduced, fixed or last-affected version of
-/// one of the entry's own OSV packages (`<ECOSYSTEM> <name>`)? The file is parsed, not searched.
-fn advisory_has_version(src: &str, want: &str, osv_packages: &[String]) -> Result<(), String> {
-    let doc: serde_json::Value =
-        serde_json::from_str(&read(src)).map_err(|e| format!("{src} is not valid JSON: {e}"))?;
+/// one of the entry's own OSV packages (`<ECOSYSTEM> <name>`)? The file is parsed, not
+/// searched, and it is the resolved `path` that is read, never the cited text. A failure
+/// names the field and the item index only: no file name, parser message or version.
+fn advisory_has_version(
+    path: &Path,
+    field: &str,
+    index: usize,
+    want: &str,
+    osv_packages: &[String],
+) -> Result<(), String> {
+    let not_json = || format!("{field} (item {index}): the advisory file is not valid JSON");
+    let text = fs::read_to_string(path).map_err(|_| not_json())?;
+    let doc: serde_json::Value = serde_json::from_str(&text).map_err(|_| not_json())?;
     let affected = doc.get("affected").and_then(|a| a.as_array());
     for a in affected.into_iter().flatten() {
         let pkg = a.get("package");
@@ -284,7 +316,7 @@ fn advisory_has_version(src: &str, want: &str, osv_packages: &[String]) -> Resul
         }
     }
     Err(format!(
-        "`{want}` is not an introduced, fixed or last-affected version of this entry's osv_packages in {src}"
+        "{field} (item {index}): the advisory does not list this version for the entry's osv_packages"
     ))
 }
 
@@ -370,9 +402,10 @@ fn check_recordings(entries: &BTreeMap<String, Table>, rec: &[Recorded]) -> Resu
         let re = version_regex(table(entry, "version", id)?)?;
         let got = extract(&re, &r.raw);
         if got.as_deref() != Some(r.version.as_str()) {
+            // Never the reply or the versions: only the service and the id.
             return Err(format!(
-                "{id}: the regex on the {} reply gives {got:?}, the lab recorded `{}`",
-                r.service, r.version
+                "{id}: the regex on the {} reply does not give the version the lab recorded",
+                r.service
             ));
         }
     }
@@ -401,10 +434,11 @@ fn check_negative(entries: &BTreeMap<String, Table>, rec: &[Recorded]) -> Result
             }
         }
         for (what, re) in &patterns {
-            for (owner, raw) in &raws {
+            for (k, (owner, raw)) in raws.iter().enumerate() {
                 if owner != id && re.matches(&u(raw)).is_read() {
+                    // The index into the replies, never the reply text.
                     return Err(format!(
-                        "{id}: the {what} also matches {owner}'s reply `{raw}`"
+                        "{id}: the {what} also matches {owner}'s reply (recording {k})"
                     ));
                 }
             }
@@ -1435,16 +1469,27 @@ fn advisory_examples_are_refused_when_unbacked() {
         "advisory file in the repo",
     );
     // The version is not in the advisory, or the example is not the bare value.
-    a(
+    // A refusal names the field and the item, never the version or the advisory's path.
+    let unbacked = |from: &str, to: &str, leaked: &[&str]| {
+        let e = validate("alby-hub", &replaced(&alby, from, to)).unwrap_err();
+        assert!(
+            e.contains("version.examples.source (item 0): the advisory does not list this version"),
+            "{e}"
+        );
+        for l in leaked {
+            assert!(!e.contains(l), "{e}");
+        }
+    };
+    unbacked(
         "raw = \"1.19.0\"\nversion = \"1.19.0\"",
         "raw = \"1.99.0\"\nversion = \"1.99.0\"",
-        "is not an introduced, fixed or last-affected",
+        &["1.99.0", "advisories/corpus"],
     );
     // Another product's advisory (umbrelOS's), a page outside the corpus (the vendored schema).
-    a(
+    unbacked(
         &format!("raw = \"1.19.0\"\nversion = \"1.19.0\"\nsource = \"{file}\""),
         "raw = \"1.2.2\"\nversion = \"1.2.2\"\nsource = \"advisories/corpus/CVE-2024-49379.json\"",
-        "is not an introduced, fixed or last-affected",
+        &["1.2.2", "advisories/corpus"],
     );
     a(
         &source,
@@ -1561,10 +1606,10 @@ fn broken_cross_checks_are_refused() {
         "regex".into(),
         Value::String(r"^/Satoshi:(?P<version>\d+)\.\d+\.0/$".into()),
     );
+    let e = check_recordings(&bad, &rec).unwrap_err();
     assert!(
-        check_recordings(&bad, &rec)
-            .unwrap_err()
-            .contains("the lab recorded `32.1`")
+        e.contains("does not give the version the lab recorded") && !e.contains("32.1"),
+        "{e}"
     );
 
     // A recorded version the entry's regex cannot give.
@@ -1864,20 +1909,20 @@ fn broken_catalogs_are_refused() {
         "lnd",
         "aliases = []",
         "aliases = [\"strfry\"]",
-        "used by both",
+        "is already used as a name by `lnd`",
     );
     // fork_of and bundles: a missing target, a self-reference, a cycle.
     load_refused(
         "lnd",
         "licence = \"MIT\"\n",
         "licence = \"MIT\"\nfork_of = \"nope\"\n",
-        "not an entry",
+        "fork_of does not name an entry",
     );
     load_refused(
         "lnd",
         "licence = \"MIT\"\n",
         "licence = \"MIT\"\nbundles = [\"lnd\"]\n",
-        "itself",
+        "bundles item 0 names itself",
     );
     let mut files = entry_files();
     for (stem, from, to) in [
@@ -1937,7 +1982,8 @@ fn embedded_file_list_is_exactly_the_catalog_folder() {
     let disk_names: Vec<&str> = on_disk.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, disk_names, "catalog_files.rs differs from catalog/");
     for ((n, text), (_, disk)) in listed.iter().zip(&on_disk) {
-        assert_eq!(text, disk, "{n}: the embedded text is stale");
+        // A bool, so neither text is ever printed.
+        assert!(text == disk, "{n}: the embedded text is stale");
     }
 }
 
@@ -1968,6 +2014,11 @@ const IDENTITY_REPLIES: [(&str, &str); 4] = [
     ("nutshell", "Nutshell/0.21.0"),
     ("strfry", "git+https://github.com/hoytech/strfry.git"),
 ];
+
+/// A container key for tests that only need some container.
+fn ck() -> EndpointKey {
+    EndpointKey::for_container("docker", &u("c1")).unwrap()
+}
 
 /// The key of the one endpoint the tests observe.
 fn ep() -> EndpointKey {
@@ -2036,28 +2087,22 @@ fn identity_comes_before_the_version() {
         by_probe.read_version(&ep(), &u("0.21.6-beta")),
         VersionMatch::Read("0.21.6-beta")
     );
-    let by_image = match lnd.identify_image(&u("lightninglabs/lnd:v0.21.6-beta")) {
+    let by_image = match lnd.identify_image(&ck(), &u("lightninglabs/lnd:v0.21.6-beta")) {
         ReplyMatch::Read(i) => i,
         other => panic!("{other:?}"),
     };
     assert_eq!(by_image.by(), IdentifiedBy::Image);
     assert_eq!(
-        by_image.read_version(
-            &EndpointKey::for_image(&u("lightninglabs/lnd:v0.21.6-beta")),
-            &u("0.21.6-beta")
-        ),
+        by_image.read_version(&ck(), &u("0.21.6-beta")),
         VersionMatch::Unreadable(Unreadable::MissingEvidence)
     );
     let cln = cat.get("core-lightning").unwrap();
-    let cln_image = match cln.identify_image(&u("elementsproject/lightningd:v26.06.9")) {
+    let cln_image = match cln.identify_image(&ck(), &u("elementsproject/lightningd:v26.06.9")) {
         ReplyMatch::Read(i) => i,
         other => panic!("{other:?}"),
     };
     assert_eq!(
-        cln_image.read_version(
-            &EndpointKey::for_image(&u("elementsproject/lightningd:v26.06.9")),
-            &u("v26.06.9")
-        ),
+        cln_image.read_version(&ck(), &u("v26.06.9")),
         VersionMatch::Read("26.06.9")
     );
     assert!(matches!(
@@ -2069,29 +2114,29 @@ fn identity_comes_before_the_version() {
     let tapd = cat.get("tapd").unwrap();
     // An entry with no images cannot be identified by image: cannot tell, not "no".
     assert!(matches!(
-        tapd.identify_image(&u("docker.io/lightninglabs/tapd")),
+        tapd.identify_image(&ck(), &u("docker.io/lightninglabs/tapd")),
         ReplyMatch::Unreadable(Unreadable::MissingEvidence)
     ));
     assert!(matches!(
         cat.get("alby-hub")
             .unwrap()
-            .identify_image(&u("getalby/hub:v1.19.0")),
+            .identify_image(&ck(), &u("getalby/hub:v1.19.0")),
         ReplyMatch::Unreadable(Unreadable::MissingEvidence)
     ));
     assert!(matches!(
-        lnd.identify_image(&u("docker.io/evil/lnd")),
+        lnd.identify_image(&ck(), &u("docker.io/evil/lnd")),
         ReplyMatch::NoMatch
     ));
     assert!(matches!(
-        lnd.identify_image(&u("lnd\u{1b}[31m")),
+        lnd.identify_image(&ck(), &u("lnd\u{1b}[31m")),
         ReplyMatch::Unreadable(Unreadable::BadToken)
     ));
     assert!(matches!(
-        lnd.identify_image(&u(&"a".repeat(MAX_REPLY + 1))),
+        lnd.identify_image(&ck(), &u(&"a".repeat(MAX_REPLY + 1))),
         ReplyMatch::Unreadable(Unreadable::TooLong)
     ));
     assert!(matches!(
-        lnd.identify_image(&u("lnd\u{e9}")),
+        lnd.identify_image(&ck(), &u("lnd\u{e9}")),
         ReplyMatch::Unreadable(Unreadable::NonAscii)
     ));
     assert_eq!(
@@ -3068,6 +3113,23 @@ fn trust_roots_are_on_a_reviewed_forge_in_a_fixed_shape() {
             "upstream.security_policy must be a release feed",
         );
     }
+
+    // Codex r4 LOW 2: a git ref that git itself would not accept is not a trust root.
+    for bad in ["release.lock", ".hidden", "-x", "v1.", "RELEASE.LOCK"] {
+        let url = format!("https://github.com/lightningnetwork/lnd/blob/{bad}/SECURITY.md");
+        let policy = replaced(&lnd, feed, &format!("{feed}\nsecurity_policy = \"{url}\""));
+        refused(
+            "lnd",
+            &policy,
+            "upstream.security_policy must be a release feed",
+        );
+    }
+    let ok = "https://github.com/lightningnetwork/lnd/blob/v1.2/SECURITY.md";
+    validate(
+        "lnd",
+        &replaced(&lnd, feed, &format!("{feed}\nsecurity_policy = \"{ok}\"")),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -3241,68 +3303,97 @@ fn errors_never_quote_untrusted_values() {
     assert!(e.to_string().contains("URL must be ASCII"), "{e}");
 }
 
-/// A field of a recorded JSON reply, as outside text. `path` is dotted.
-fn recorded_field(file: &str, path: &str) -> Untrusted<String> {
+/// A field of a recorded JSON reply, as outside text. The field name comes from the
+/// catalog entry; this adapter only knows the protocol's own envelope (`result.` for
+/// the bitcoind JSON-RPC files, nothing for the others). `None` when the reply has no
+/// such string field.
+fn recorded_reply(file: &str, envelope: &str, field: &str) -> Option<Untrusted<String>> {
     let mut v: serde_json::Value =
         serde_json::from_str(&read(&format!("fixtures/lab-recorded/replies/{file}"))).unwrap();
-    for part in path.split('.') {
-        v = v[part].take();
+    for part in format!("{envelope}{field}").split('.') {
+        v = v.get_mut(part)?.take();
     }
-    u(v.as_str()
-        .unwrap_or_else(|| panic!("{file} {path} is not a string")))
+    v.as_str().map(u)
 }
 
 #[test]
 fn probes_read_the_recorded_replies() {
-    // Opus catalog r2 LOW 3: each entry's identity probe and version regex read the
-    // lab's own recorded replies. The lnd file is the REST `GET /v1/state` reply; its
-    // `state` is the same as gRPC `GetState`'s, which the probe calls today (K1 moves
-    // the probe to REST).
+    // Opus catalog r2 LOW 3, Codex r4 LOW 1: each entry's identity probe and version regex
+    // read the lab's own recorded replies, taking the field names from the loaded entry. The
+    // lnd file is the REST `GET /v1/state` reply; its `state` is the same as gRPC `GetState`'s,
+    // which the probe calls today (K1 moves the probe to REST).
     let cat = catalog::embedded().unwrap();
     let rec = recordings(&read("fixtures/lab-recorded/manifest.toml"));
+    // (id, probe reply file, version reply file, envelope, expected version)
     let cases = [
         (
             "lnd",
-            recorded_field("lnd/state.json", "state"),
-            recorded_field("lnd/versioner-version.json", "version"),
+            "lnd/state.json",
+            "lnd/versioner-version.json",
+            "",
             "0.21.6-beta",
         ),
         (
             "strfry",
-            recorded_field("strfry/nip11.json", "software"),
-            recorded_field("strfry/nip11.json", "version"),
+            "strfry/nip11.json",
+            "strfry/nip11.json",
+            "",
             "1.1.2-148-g4cd3cf6",
         ),
         (
             "nutshell",
-            recorded_field("nutshell/info.json", "version"),
-            recorded_field("nutshell/info.json", "version"),
+            "nutshell/info.json",
+            "nutshell/info.json",
+            "",
             "0.21.0",
         ),
         (
             "bitcoin-core",
-            recorded_field("bitcoind/getnetworkinfo.json", "result.subversion"),
-            recorded_field("bitcoind/getnetworkinfo.json", "result.subversion"),
+            "bitcoind/getnetworkinfo.json",
+            "bitcoind/getnetworkinfo.json",
+            "result.",
             "32.1",
         ),
     ];
-    for (id, probe_reply, version_reply, expected) in &cases {
+    for (id, probe_file, version_file, envelope, expected) in &cases {
         let e = cat.get(id).unwrap();
-        let proof = match e.identify_endpoint(&ep(), std::slice::from_ref(probe_reply)) {
+        let missing = format!("{id}: the recorded reply has no field named by the catalog");
+        let probe_field = e.identity_probes()[0].field();
+        let probe_reply = recorded_reply(probe_file, envelope, probe_field).expect(&missing);
+        let version_reply = recorded_reply(version_file, envelope, e.version_call().call().field())
+            .expect(&missing);
+        let proof = match e.identify_endpoint(&ep(), std::slice::from_ref(&probe_reply)) {
             ReplyMatch::Read(i) => i,
             other => panic!("{id}: {other:?}"),
         };
         assert_eq!(
-            proof.read_version(&ep(), version_reply),
+            proof.read_version(&ep(), &version_reply),
             VersionMatch::Read(expected),
             "{id}"
         );
         let manifest = rec.iter().find(|r| r.id == *id).unwrap();
         assert_eq!(manifest.version, *expected, "{id}");
     }
+    // A catalog field the recorded reply does not have fails the lookup.
+    let changed = replaced(&text_of("lnd"), "field = \"state\"", "field = \"status\"");
+    let lnd_changed = catalog::load("lnd", &changed).unwrap();
+    assert_eq!(lnd_changed.identity_probes()[0].field(), "status");
+    assert!(
+        recorded_reply(
+            "lnd/state.json",
+            "",
+            lnd_changed.identity_probes()[0].field()
+        )
+        .is_none()
+    );
     // Cross-check: lnd's probe does not read strfry's recorded reply.
     let lnd = cat.get("lnd").unwrap();
-    let fry_software = recorded_field("strfry/nip11.json", "software");
+    let fry_software = recorded_reply(
+        "strfry/nip11.json",
+        "",
+        cat.get("strfry").unwrap().identity_probes()[0].field(),
+    )
+    .unwrap();
     assert!(matches!(
         lnd.identify_endpoint(&ep(), &[fry_software]),
         ReplyMatch::NoMatch
@@ -3458,37 +3549,72 @@ fn identity_is_bound_to_one_observation() {
     );
     // The key shows nothing of its contents.
     assert_eq!(format!("{a:?}"), "EndpointKey(..)");
-    // An image proof is bound to the image (tag and digest do not matter).
-    let cli = cat.get("core-lightning").unwrap();
-    let img = u("elementsproject/lightningd:v26.06.9");
-    let by_image = match cli.identify_image(&img) {
+    // An image proof is bound to the container it was taken from, never to the image name.
+    let cln = cat.get("core-lightning").unwrap();
+    let cont = |runtime: &str, id: &str| EndpointKey::for_container(runtime, &u(id)).unwrap();
+    let ka = cont("docker", "aaaa1111");
+    let kb = cont("docker", "bbbb2222");
+    let by_image = match cln.identify_image(&ka, &u("elementsproject/lightningd:v26.06.9")) {
         ReplyMatch::Read(i) => i,
         other => panic!("{other:?}"),
     };
-    let same = EndpointKey::for_image(&u("docker.io/elementsproject/lightningd:v26.06.8"));
     assert_eq!(
-        by_image.read_version(&same, &u("v26.06.9")),
+        by_image.read_version(&ka, &u("v26.06.9")),
         VersionMatch::Read("26.06.9")
     );
-    assert_eq!(
-        by_image.read_version(
-            &EndpointKey::for_image(&u("lightninglabs/lnd")),
-            &u("v26.06.9")
-        ),
-        VersionMatch::Unreadable(Unreadable::MissingEvidence)
+    // A second container of the same image (another tag) is not this proof's container.
+    assert!(
+        cln.identify_image(&kb, &u("elementsproject/lightningd:v26.06.8"))
+            .is_read()
     );
-    assert_eq!(
-        by_image.read_version(&a, &u("v26.06.9")),
-        VersionMatch::Unreadable(Unreadable::MissingEvidence)
-    );
+    for other in [
+        &kb,
+        &cont("podman", "aaaa1111"), // same id, other runtime
+        &a,                          // an endpoint key
+    ] {
+        assert_eq!(
+            by_image.read_version(other, &u("v26.06.9")),
+            VersionMatch::Unreadable(Unreadable::MissingEvidence)
+        );
+    }
+    // The wrong kind of key never identifies: image with an endpoint key, probes with a
+    // container key.
+    assert!(matches!(
+        cln.identify_image(&a, &u("elementsproject/lightningd:v26.06.9")),
+        ReplyMatch::Unreadable(Unreadable::MissingEvidence)
+    ));
+    assert!(matches!(
+        fry.identify_endpoint(&ka, &[u("git+https://github.com/hoytech/strfry.git")]),
+        ReplyMatch::Unreadable(Unreadable::MissingEvidence)
+    ));
+    // A container key needs a runtime slug and a well-formed id.
+    let hex64 = "ab".repeat(32);
+    assert!(EndpointKey::for_container("docker", &u(&hex64)).is_some());
+    for (runtime, id) in [
+        ("", "aaaa1111"),
+        ("Docker", "aaaa1111"),
+        ("docker", ""),
+        ("docker", "aa/bb"),
+        ("docker", &"a".repeat(129)),
+    ] {
+        assert!(
+            EndpointKey::for_container(runtime, &u(id)).is_none(),
+            "{runtime} {}",
+            id.len()
+        );
+    }
+    assert!(EndpointKey::for_container("docker", &u(&"a".repeat(128))).is_some());
 }
 
 #[test]
-fn image_references_are_checked_before_they_are_normalised() {
-    // Codex r3 MED 7 and Opus r3 NIT: a reference with a missing tag or digest, `..` or an
-    // odd path is not well formed, so it never identifies anything.
+fn image_references_follow_one_strict_grammar() {
+    // Codex r3 MED 7, Opus r3 NIT, Codex r4 MED 2: a reference that is not well formed under
+    // one grammar (name, tag, digest) never identifies anything.
     let cat = catalog::embedded().unwrap();
     let cln = cat.get("core-lightning").unwrap();
+    let hex64 = "0a".repeat(32);
+    let md5 = format!("elementsproject/lightningd@md5:{}", "0a".repeat(16));
+    let long_tag = format!("elementsproject/lightningd:{}", "a".repeat(129));
     for bad in [
         "elementsproject/lightningd@",
         "elementsproject/lightningd:",
@@ -3500,22 +3626,55 @@ fn image_references_are_checked_before_they_are_normalised() {
         "elementsproject/./lightningd",
         "docker.io/elementsproject/lightningd:a:b",
         ":v1",
+        "elementsproject/lightningd@/../x",
+        "elementsproject/lightningd@sha256:",
+        "elementsproject/lightningd@x",
+        "elementsproject/lightningd@sha256:0123abcd",
+        &md5,
+        "elementsproject/lightningd:..",
+        "elementsproject/lightningd:.v1",
+        &long_tag,
+        "ElementsProject/lightningd",
+        "elementsproject/lightningd_",
+        "elementsproject/-lightningd",
+        "bad_host.io/o/p",
     ] {
         assert!(
             matches!(
-                cln.identify_image(&u(bad)),
+                cln.identify_image(&ck(), &u(bad)),
                 ReplyMatch::Unreadable(Unreadable::BadToken)
             ),
             "{bad}"
         );
     }
+    // A digest in capitals is not well formed either.
+    let upper = format!("elementsproject/lightningd@sha256:{}", "0A".repeat(32));
+    assert!(matches!(
+        cln.identify_image(&ck(), &u(&upper)),
+        ReplyMatch::Unreadable(Unreadable::BadToken)
+    ));
+    let ok_digest = format!("elementsproject/lightningd@sha256:{hex64}");
+    let ok_both = format!("docker.io/elementsproject/lightningd:v26.06.9@sha256:{hex64}");
+    let ok_512 = format!("elementsproject/lightningd@sha512:{}", "0a".repeat(64));
     for ok in [
         "elementsproject/lightningd",
         "elementsproject/lightningd:v26.06.9",
-        "elementsproject/lightningd@sha256:0123abcd",
-        "docker.io/elementsproject/lightningd:v26.06.9@sha256:0123abcd",
+        "elementsproject/lightningd:v26.06.9-modded",
+        &ok_digest,
+        &ok_both,
+        &ok_512,
     ] {
-        assert!(cln.identify_image(&u(ok)).is_read(), "{ok}");
+        assert!(cln.identify_image(&ck(), &u(ok)).is_read(), "{ok}");
+    }
+    // Well formed, but not this product's.
+    for other in [
+        "localhost:5000/elementsproject/lightningd:v1",
+        "elementsproject/lightning__d",
+    ] {
+        assert!(
+            matches!(cln.identify_image(&ck(), &u(other)), ReplyMatch::NoMatch),
+            "{other}"
+        );
     }
     // A wildcard covers one more repo name, never a deeper path or `..`.
     let wild = catalog::load(
@@ -3527,21 +3686,16 @@ fn image_references_are_checked_before_they_are_normalised() {
         ),
     )
     .unwrap();
-    assert!(wild.identify_image(&u("o/one-svc-x:1")).is_read());
+    assert!(wild.identify_image(&ck(), &u("o/one-svc-x:1")).is_read());
     for deeper in ["o/one-svc-x/y", "docker.io/o/one-svc-x/y/z"] {
         assert!(
-            matches!(wild.identify_image(&u(deeper)), ReplyMatch::NoMatch),
+            matches!(wild.identify_image(&ck(), &u(deeper)), ReplyMatch::NoMatch),
             "{deeper}"
         );
     }
     assert!(matches!(
-        wild.identify_image(&u("o/one-svc-x/../y")),
+        wild.identify_image(&ck(), &u("o/one-svc-x/../y")),
         ReplyMatch::Unreadable(Unreadable::BadToken)
-    ));
-    // A registry port is fine.
-    assert!(matches!(
-        cln.identify_image(&u("localhost:5000/elementsproject/lightningd:v1")),
-        ReplyMatch::NoMatch
     ));
 }
 
@@ -3604,14 +3758,22 @@ fn embedded_files_pass_the_raw_secret_scan() {
 
 #[test]
 fn citations_resolve_only_against_the_trusted_inventory() {
-    // Codex r3 MED 6: an example or port `source` is looked up in the inventory of
-    // repo files (found without following symlinks); it is never joined to a path
-    // or shown in a failure.
+    // Codex r3 MED 6, Codex r4 MED 6: an example or port `source` is looked up in the
+    // inventory of repo files (found without following symlinks, and only the lab's
+    // compose file of `lab/`); it is never joined to a path or shown in a failure.
     let inv = inventory();
-    assert!(inv.contains("lab/compose.yml"));
-    assert!(inv.contains("fixtures/lab-recorded/manifest.toml"));
-    source_exists(&inv, "version.examples.source", 0, "lab/compose.yml").unwrap();
-    source_exists(&inv, "version.examples.source", 0, "https://github.com/o/p").unwrap();
+    assert!(inv.contains_key("lab/compose.yml"));
+    assert!(inv.contains_key("fixtures/lab-recorded/manifest.toml"));
+    assert_eq!(inv.keys().filter(|k| k.starts_with("lab/")).count(), 1);
+    assert!(
+        source_exists(&inv, "version.examples.source", 0, "lab/compose.yml")
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        source_exists(&inv, "version.examples.source", 0, "https://github.com/o/p").unwrap(),
+        None
+    );
     for bad in [
         "fixtures/QZXMARK",
         "../etc/passwd",
@@ -3619,6 +3781,7 @@ fn citations_resolve_only_against_the_trusted_inventory() {
         "fixtures/../Cargo.toml",
         "Cargo.toml",
         "fixtures",
+        "lab/README.md",
     ] {
         let e = source_exists(&inv, "version.examples.source", 3, bad).unwrap_err();
         assert!(e.starts_with("version.examples.source (item 3)"), "{e}");
@@ -3627,7 +3790,8 @@ fn citations_resolve_only_against_the_trusted_inventory() {
             "{e}"
         );
     }
-    // A symlink is not in the inventory, whatever it points at.
+    // A symlink is not in the inventory, whatever it points at, and a folder that is a
+    // symlink holds nothing.
     #[cfg(unix)]
     {
         let dir = std::env::temp_dir().join(format!("gd-inventory-{}", std::process::id()));
@@ -3636,9 +3800,510 @@ fn citations_resolve_only_against_the_trusted_inventory() {
         fs::write(dir.join("real.txt"), "x").unwrap();
         std::os::unix::fs::symlink(root().join("Cargo.toml"), dir.join("sub/link.txt")).unwrap();
         std::os::unix::fs::symlink(dir.join("sub"), dir.join("linkdir")).unwrap();
-        let mut found = BTreeSet::new();
+        let mut found = BTreeMap::new();
         walk_files(&dir, "x", &mut found);
+        assert_eq!(
+            found.keys().cloned().collect::<Vec<_>>(),
+            vec!["x/real.txt".to_string()]
+        );
         fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(found, BTreeSet::from(["x/real.txt".to_string()]));
+
+        // `fixtures` a symlink to a real folder holding a compose file: nothing under it.
+        let t1 = std::env::temp_dir().join(format!("gd-inventory-a-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&t1);
+        fs::create_dir_all(t1.join("elsewhere")).unwrap();
+        fs::write(t1.join("elsewhere/compose.yml"), "x").unwrap();
+        std::os::unix::fs::symlink(t1.join("elsewhere"), t1.join("fixtures")).unwrap();
+        let got = inventory_at(&t1);
+        fs::remove_dir_all(&t1).unwrap();
+        assert!(got.is_empty(), "{:?}", got.keys().collect::<Vec<_>>());
+
+        // A real `lab` with two files lists only the compose file.
+        let t2 = std::env::temp_dir().join(format!("gd-inventory-b-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&t2);
+        fs::create_dir_all(t2.join("lab")).unwrap();
+        fs::write(t2.join("lab/compose.yml"), "x").unwrap();
+        fs::write(t2.join("lab/other.yml"), "x").unwrap();
+        let got = inventory_at(&t2);
+        fs::remove_dir_all(&t2).unwrap();
+        assert_eq!(
+            got.keys().cloned().collect::<Vec<_>>(),
+            vec!["lab/compose.yml".to_string()]
+        );
+
+        // `lab` a symlink to a real folder: nothing from lab.
+        let t3 = std::env::temp_dir().join(format!("gd-inventory-c-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&t3);
+        fs::create_dir_all(t3.join("elsewhere")).unwrap();
+        fs::write(t3.join("elsewhere/compose.yml"), "x").unwrap();
+        std::os::unix::fs::symlink(t3.join("elsewhere"), t3.join("lab")).unwrap();
+        let got = inventory_at(&t3);
+        fs::remove_dir_all(&t3).unwrap();
+        assert!(got.is_empty(), "{:?}", got.keys().collect::<Vec<_>>());
     }
+}
+
+// ---------- round 5: compile-time guard, containers, grammars, redaction ----------
+
+/// Twelve seed-phrase-like words, for building samples (never a real phrase).
+const WORDS: [&str; 12] = [
+    "abandon", "ability", "able", "about", "above", "absent", "absorb", "abstract", "absurd",
+    "abuse", "access", "accident",
+];
+
+/// One synthetic sample per credential rule, built from pieces: (rule, sample line).
+fn credential_samples() -> Vec<(&'static str, String)> {
+    let words = WORDS.join(" ");
+    vec![
+        ("T0 control byte", "note = \"a\u{1}b\"".to_string()),
+        (
+            "T1 long hex",
+            format!("k = \"{}\"", "0123456789abcdef".repeat(4)),
+        ),
+        ("T2 hex in a comment", format!("# {}", "ab".repeat(20))),
+        ("T3 macaroon", format!("k = \"AgE{}\"", "a".repeat(30))),
+        ("T3 macaroon F", format!("k = \"AgF{}\"", "a".repeat(30))),
+        (
+            "T4 extended key",
+            format!("k = \"x{}{}\"", "pub", "A".repeat(20)),
+        ),
+        (
+            "T4 private extended key",
+            format!("k = \"Z{}{}\"", "prv", "B".repeat(20)),
+        ),
+        ("T5 nsec", format!("k = \"{}1{}\"", "nsec", "q".repeat(20))),
+        (
+            "T6 key block",
+            format!("{}BEGIN {}KEY", "-----", "OPENSSH PRIVATE "),
+        ),
+        (
+            "T7 cashu",
+            format!("k = \"{}A{}\"", "cashu", "b".repeat(10)),
+        ),
+        (
+            "T7 cashu B",
+            format!("k = \"{}B{}\"", "cashu", "b".repeat(10)),
+        ),
+        (
+            "T8 github",
+            format!("k = \"{}_{}\"", "ghp", "a1B2".repeat(8)),
+        ),
+        (
+            "T8 github pat",
+            format!("k = \"{}_{}\"", "github_pat", "a".repeat(20)),
+        ),
+        ("T9 aws", format!("k = \"{}{}\"", "AKIA", "A".repeat(16))),
+        ("T10 sk", format!("k = \"{}-{}\"", "sk", "a".repeat(20))),
+        ("T11 invoice", format!("k = \"{}{}\"", "lnbc", "1pabc")),
+        (
+            "T11 invoice regtest",
+            format!("k = \"{}{}\"", "lnbcrt", "1pabc"),
+        ),
+        ("T12 onion", format!("k = \"abc{}\"", ".onion")),
+        ("T12 onion upper", format!("k = \"abc{}\"", ".ONION")),
+        ("T13 rune", format!("k = \"{}\"", "xY7".repeat(14))),
+        ("W1 seed", format!("k = \"{words}\"")),
+        ("W2 seed in a comment", format!("# {}", WORDS.join(", "))),
+    ]
+}
+
+#[test]
+fn credential_line_finds_every_shape() {
+    // Codex r4 HIGH, Opus r4 L2: one const-evaluable scan, shared by the build and the loader.
+    let lnd = text_of("lnd");
+    for (rule, sample) in credential_samples() {
+        let text = format!("format = 1\nid = \"x\"\n{sample}\n");
+        assert_eq!(catalog::raw_credential_line(&text), 3, "{rule}");
+        let in_comment = format!("{lnd}\n# {sample}\n");
+        let e = catalog::load("lnd", &in_comment).unwrap_err().to_string();
+        assert!(e.contains("has a secret shape"), "{rule}: {e}");
+    }
+    // The 40-hex comment rule needs a comment, and a 40-hex value is not a hit.
+    assert_eq!(
+        catalog::raw_credential_line(&format!("a = \"{}\"\n", "ab".repeat(20))),
+        0
+    );
+
+    // A word grid split across three comment lines: the hit ends on line 3 of the block.
+    let grid = "# abandon ability able about\n# above absent absorb abstract\n# absurd abuse access accident\n";
+    assert_eq!(catalog::raw_credential_line(grid), 3);
+    // The same, with a value line and a blank line between the comment lines.
+    let spread = "# abandon ability able about\nid = \"x\"\n# above absent absorb abstract\n\n# absurd abuse access accident\n";
+    assert_eq!(catalog::raw_credential_line(spread), 5);
+    // A numbered list of twelve words.
+    let numbered: String = WORDS
+        .iter()
+        .enumerate()
+        .map(|(i, w)| format!("{}. {w}", i + 1))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        catalog::raw_credential_line(&format!("format = 1\nid = \"x\"\n# {numbered}\n")),
+        3
+    );
+    // A macaroon-shaped token split over two comment lines, and a rune split the same way.
+    let half = "a".repeat(15);
+    assert_eq!(
+        catalog::raw_credential_line(&format!("format = 1\nid = \"x\"\n# AgE{half}\n# {half}\n")),
+        4
+    );
+    let part = "xY7".repeat(7);
+    assert_eq!(
+        catalog::raw_credential_line(&format!("format = 1\nid = \"x\"\n# {part}\n# {part}\n")),
+        4
+    );
+    // The split cases are refused by the loader too.
+    for text in [grid, spread] {
+        let e = catalog::load("lnd", &format!("{lnd}{text}"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("has a secret shape"), "{e}");
+    }
+
+    // Clean text is clean: every embedded file, and plain comments.
+    for (id, text) in catalog::embedded_files() {
+        assert_eq!(catalog::raw_credential_line(text), 0, "{id}");
+    }
+    for clean in [
+        "# a plain note, version 2.4.1 at 12:30\n",
+        "# Bitcoin Core. Format: catalog/README.md. Checked by crates/gd-core/tests/catalog.rs.\n",
+    ] {
+        assert_eq!(catalog::raw_credential_line(clean), 0, "{clean}");
+    }
+}
+
+#[test]
+fn embedded_files_are_checked_at_compile_time() {
+    // The `include_str!` is inside the one macro that also asserts the scan at compile
+    // time, and every embedded file goes through that macro.
+    let src = read("crates/gd-core/src/catalog_files.rs");
+    assert_eq!(src.matches("include_str!(").count(), 1);
+    assert_eq!(src.matches("entry!(\"").count(), entry_files().len());
+    assert!(src.contains("credential_line(TEXT) == 0"));
+}
+
+#[test]
+fn a_seed_over_the_lines_of_a_string_is_refused() {
+    // Opus r4 L2: a multi-line string value holds a 12-word seed, words split over lines.
+    let lnd = text_of("lnd");
+    let multi = format!(
+        "licence = \"\"\"\n{}\n{}\n{}\"\"\"",
+        WORDS[..4].join(" "),
+        WORDS[4..8].join(" "),
+        WORDS[8..].join(" ")
+    );
+    let text = replaced(&lnd, "licence = \"MIT\"", &multi);
+    let e = load_error("lnd", &text);
+    assert!(e.contains("has a secret shape"), "{e}");
+    assert!(!e.contains("abandon"), "{e}");
+}
+
+#[test]
+fn a_bare_plain_reply_needs_a_permitted_major() {
+    // Codex r4 MED 3: a regex that reads a bare plain version no sweep sees still has an
+    // explicit, empty set of permitted majors, so a bare reply is refused.
+    let cln = text_of("core-lightning");
+    let shipped_regex = r"regex = '^v(?P<version>\d+\.\d+(?:\.\d+)?(?:rc\d+)?(?:-\d+-g[0-9a-f]{7,})?(?:-modded)?)$'";
+    let text = replaced(
+        &cln,
+        shipped_regex,
+        r"regex = '^v?(?P<version>26\.06\.9|[78]\.19\.0)$'",
+    );
+    let e = catalog::load("core-lightning", &text).unwrap();
+    let k = EndpointKey::for_container("docker", &u("c1")).unwrap();
+    let proof = match e.identify_image(&k, &u("elementsproject/lightningd:v26.06.9")) {
+        ReplyMatch::Read(i) => i,
+        other => panic!("{other:?}"),
+    };
+    for bare in ["7.19.0", "8.19.0", "26.06.9"] {
+        assert_eq!(
+            proof.read_version(&k, &u(bare)),
+            VersionMatch::Unreadable(Unreadable::NotAVersion),
+            "{bare}"
+        );
+    }
+    assert_eq!(
+        proof.read_version(&k, &u("v26.06.9")),
+        VersionMatch::Read("26.06.9")
+    );
+    // A prefixed reply is allowed by design: the entry's own regex decides.
+    assert_eq!(
+        proof.read_version(&k, &u("v7.19.0")),
+        VersionMatch::Read("7.19.0")
+    );
+    // The shipped entry reads its prefixed form and refuses the bare one.
+    let cat = catalog::embedded().unwrap();
+    let shipped = cat.get("core-lightning").unwrap();
+    let proof = match shipped.identify_image(&k, &u("elementsproject/lightningd:v26.06.9")) {
+        ReplyMatch::Read(i) => i,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        proof.read_version(&k, &u("v26.06.9")),
+        VersionMatch::Read("26.06.9")
+    );
+    assert_eq!(
+        proof.read_version(&k, &u("26.06.9")),
+        VersionMatch::Unreadable(Unreadable::NotAVersion)
+    );
+    // strfry is in PLAIN_VERSION_OK: its bare version is read.
+    let fry = identified(
+        cat.get("strfry").unwrap(),
+        "git+https://github.com/hoytech/strfry.git",
+    );
+    assert_eq!(
+        fry.read_version(&ep(), &u("1.1.2")),
+        VersionMatch::Read("1.1.2")
+    );
+}
+
+#[test]
+fn urls_follow_one_https_grammar() {
+    // Codex r4 MED 4 and Opus r4 L1: one path grammar for every URL, strict repo names, and
+    // a website on any subdomain of a code host must be exactly the repo.
+    let lnd = text_of("lnd");
+    let feed = "release_feed = \"https://github.com/lightningnetwork/lnd/releases.atom\"";
+    let backslash = r"https://github.com/lightningnetwork/lnd\issues\1";
+    let e = load_error(
+        "lnd",
+        &replaced(
+            &lnd,
+            feed,
+            &format!("{feed}\nrelated_repos = ['{backslash}']"),
+        ),
+    );
+    assert!(e.contains("upstream.related_repos"), "{e}");
+    assert!(!e.contains("issues"), "{e}");
+    let old_feeds =
+        "feeds = [{ kind = \"atom\", url = \"https://security.lightning.engineering/feed.xml\" }]";
+    let e = load_error(
+        "lnd",
+        &replaced(
+            &lnd,
+            old_feeds,
+            &format!("feeds = [{{ kind = \"markdown-repo\", url = '{backslash}' }}]"),
+        ),
+    );
+    assert!(e.contains("advisories.feeds.url"), "{e}");
+    assert!(!e.contains("issues"), "{e}");
+    for bad in [
+        "//releases.atom",
+        "/releases.atom;x",
+        "/a:b",
+        "/a//b",
+        "/a/%2e",
+    ] {
+        let text = replaced(
+            &lnd,
+            feed,
+            &format!("release_feed = \"https://github.com/lightningnetwork/lnd{bad}\""),
+        );
+        let e = load_error("lnd", &text);
+        assert!(e.contains("upstream.release_feed"), "{bad}: {e}");
+    }
+    let slash = replaced(
+        &lnd,
+        feed,
+        "release_feed = \"https://github.com/lightningnetwork/lnd//releases.atom\"",
+    );
+    refused("lnd", &slash, "URL path must be /-separated segments");
+    refused(
+        "lnd",
+        &replaced(
+            &lnd,
+            feed,
+            "release_feed = \"https://github.com/lightningnetwork/lnd/releases.atom;x\"",
+        ),
+        "URL path must be /-separated segments",
+    );
+    // Repo URLs: forge-style names.
+    let long_owner = "o".repeat(40);
+    for bad in [
+        "https://github.com/-o/p".to_string(),
+        "https://github.com/lightningnetwork/..".to_string(),
+        format!("https://github.com/{long_owner}/p"),
+        "https://github.com/lightningnetwork/lnd/".to_string(),
+        "https://github.com/a/b/c".to_string(),
+    ] {
+        let text = replaced(&lnd, feed, &format!("{feed}\nrelated_repos = [\"{bad}\"]"));
+        let e = load_error("lnd", &text);
+        assert!(
+            e.contains("repo URL must be https://host/owner/repo with forge-style names"),
+            "{bad}: {e}"
+        );
+    }
+    // A website on a subdomain of a code host is not the repo.
+    let base = synthetic("cb-svc").replace("github.com", "codeberg.org");
+    let repo = "repo = \"https://codeberg.org/o/cb-svc\"";
+    for site in [
+        "https://www.codeberg.org/o/cb-svc",
+        "https://www.codeberg.org",
+    ] {
+        refused(
+            "cb-svc",
+            &replaced(&base, repo, &format!("{repo}\nwebsite = \"{site}\"")),
+            "upstream.website",
+        );
+    }
+    validate(
+        "cb-svc",
+        &replaced(
+            &base,
+            repo,
+            &format!("{repo}\nwebsite = \"https://codeberg.org/o/cb-svc\""),
+        ),
+    )
+    .unwrap();
+    // Every shipped entry still loads.
+    catalog::embedded().unwrap();
+}
+
+/// Where a string sits in a TOML value: a key or an array index.
+#[derive(Clone)]
+enum Seg {
+    Key(String),
+    Idx(usize),
+}
+
+fn string_leaves(v: &Value, path: &mut Vec<Seg>, out: &mut Vec<Vec<Seg>>) {
+    match v {
+        Value::String(_) => out.push(path.clone()),
+        Value::Array(a) => {
+            for (i, x) in a.iter().enumerate() {
+                path.push(Seg::Idx(i));
+                string_leaves(x, path, out);
+                path.pop();
+            }
+        }
+        Value::Table(t) => {
+            for (k, x) in t {
+                path.push(Seg::Key(k.clone()));
+                string_leaves(x, path, out);
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
+fn leaf_mut<'a>(root: &'a mut Value, path: &[Seg]) -> &'a mut Value {
+    let mut cur = root;
+    for seg in path {
+        cur = match (seg, cur) {
+            (Seg::Key(k), Value::Table(t)) => t.get_mut(k).unwrap(),
+            (Seg::Idx(i), Value::Array(a)) => a.get_mut(*i).unwrap(),
+            _ => panic!("the path does not fit the value"),
+        };
+    }
+    cur
+}
+
+#[test]
+fn errors_carry_only_slug_field_and_index() {
+    // Codex r4 MED 7: one redaction rule. Every string of four entries is replaced by a
+    // marker, and extended by it; whatever loader error comes out, alone or across two
+    // entries, never carries the marker.
+    let other = "nutshell";
+    let other_text = text_of(other);
+    let marker = "qzxmark";
+    let mut checked = 0usize;
+    for stem in ["lnd", "core-lightning", "strfry", "bitcoin-core"] {
+        let table: Table = toml::from_str(&text_of(stem)).unwrap();
+        let mut leaves = Vec::new();
+        string_leaves(&Value::Table(table.clone()), &mut Vec::new(), &mut leaves);
+        assert!(!leaves.is_empty());
+        for path in &leaves {
+            for append in [false, true] {
+                let mut root = Value::Table(table.clone());
+                let leaf = leaf_mut(&mut root, path);
+                let old = leaf.as_str().unwrap().to_string();
+                *leaf = Value::String(if append {
+                    format!("{old}{marker}")
+                } else {
+                    marker.to_string()
+                });
+                let text = toml::to_string(&root).unwrap();
+                let errors = match catalog::load(stem, &text) {
+                    Err(e) => vec![e],
+                    Ok(_) => catalog::load_all(&[(stem, &text), (other, &other_text)])
+                        .err()
+                        .into_iter()
+                        .collect(),
+                };
+                for e in errors {
+                    checked += 1;
+                    for shown in [e.to_string(), format!("{e:?}")] {
+                        assert!(
+                            !shown.to_lowercase().contains(marker),
+                            "{stem}: a value leaked: {shown}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 100, "{checked}");
+
+    // Cross-entry cases: the message names the field and the item, never the value.
+    let lnd = text_of("lnd");
+    let nut = text_of(other);
+    let mutate = |text: &str, from: &str, to: &str| replaced(text, from, to);
+    let bundles = mutate(
+        &lnd,
+        "licence = \"MIT\"\n",
+        "licence = \"MIT\"\nbundles = [\"qzxmark\"]\n",
+    );
+    let fork = mutate(
+        &lnd,
+        "licence = \"MIT\"\n",
+        "licence = \"MIT\"\nfork_of = \"qzxmark\"\n",
+    );
+    let alias_lnd = mutate(&lnd, "aliases = []", "aliases = [\"qzxmark\"]");
+    let alias_nut = mutate(
+        &nut,
+        "aliases = [\"cashu-nutshell-mint\"]",
+        "aliases = [\"qzxmark\"]",
+    );
+    for (files, names) in [
+        (vec![("lnd", &bundles), (other, &nut)], "bundles item 0"),
+        (vec![("lnd", &fork), (other, &nut)], "fork_of"),
+        (
+            vec![("lnd", &alias_lnd), (other, &alias_nut)],
+            "aliases item 0",
+        ),
+    ] {
+        let pairs: Vec<(&str, &str)> = files.iter().map(|(n, t)| (*n, t.as_str())).collect();
+        let e = catalog::load_all(&pairs).unwrap_err();
+        for shown in [e.to_string(), format!("{e:?}")] {
+            assert!(!shown.to_lowercase().contains(marker), "{shown}");
+        }
+        assert!(e.to_string().contains(names), "{e}");
+    }
+}
+
+#[test]
+fn judge_messages_never_print_reply_text() {
+    // Codex r4 MED 8: the judge's own failures name entries and indexes, never reply text.
+    let mut lnd: Table = toml::from_str(&text_of("lnd")).unwrap();
+    lnd.get_mut("version")
+        .unwrap()
+        .as_table_mut()
+        .unwrap()
+        .insert(
+            "regex".into(),
+            Value::String("^(?P<version>[a-z0-9.-]{1,64})$".into()),
+        );
+    let entries = BTreeMap::from([("lnd".to_string(), lnd)]);
+    let rec = [Recorded {
+        service: "svc".into(),
+        id: "other".into(),
+        raw: "qzxmark.1".into(),
+        version: "x".into(),
+    }];
+    let e = check_negative(&entries, &rec).unwrap_err();
+    assert!(
+        e.contains("lnd") && e.contains("other") && e.contains("recording 0"),
+        "{e}"
+    );
+    assert!(!e.contains("qzxmark"), "{e}");
 }

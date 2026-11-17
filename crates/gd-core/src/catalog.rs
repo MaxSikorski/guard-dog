@@ -25,6 +25,12 @@ use toml::{Table, Value};
 
 use crate::Untrusted;
 use crate::catalog_files::FILES;
+use crate::catalog_scan::credential_line;
+
+/// The 1-based line of the first credential-shaped text in `text` (comments
+/// included, a secret split across comment lines too), or 0 when there is none.
+/// The same `const fn` runs at compile time on every embedded file.
+pub use crate::catalog_scan::credential_line as raw_credential_line;
 
 // ---------- reviewed lists ----------
 
@@ -167,6 +173,11 @@ pub const MAX_REPLY: usize = 256;
 // ---------- errors ----------
 
 /// Why an entry, or the catalog as a whole, was refused.
+///
+/// One redaction rule: the `Display` and `Debug` of every loader error carry
+/// only the file slug, entry ids taken from validated file names, field paths
+/// built from `KNOWN_KEYS`, item indexes, line numbers and fixed text; never a
+/// value from an entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogError {
     entry: Option<String>,
@@ -410,7 +421,9 @@ fn is_version_token(s: &str) -> bool {
 pub struct Pattern {
     re: Regex,
     /// The majors a plain version (`1.2`, `28.1.0`) may have when this pattern
-    /// reads one. `None` for a pattern with no such rule. Set by the loader.
+    /// reads one. `Some` for every loaded entry outside `PLAIN_VERSION_OK` (an
+    /// empty set means no bare plain reply is read), `None` only for those
+    /// exceptions and for patterns built outside the loader.
     majors: Option<BTreeSet<u64>>,
 }
 
@@ -500,8 +513,13 @@ impl Pattern {
             Some(v) if is_version_token(v) => {
                 // A plain version must have a major the entry permits, however the
                 // regex is spelled.
+                // A reply is bare when the version group is the whole reply: an
+                // empty set then refuses it, and leaves prefixed replies alone.
+                let bare = caps
+                    .name("version")
+                    .is_some_and(|m| m.start() == 0 && m.end() == text.len());
                 match (&self.majors, plain_major(v)) {
-                    (Some(set), Some(m)) if !set.contains(&m) => {
+                    (Some(set), Some(m)) if !set.contains(&m) && (bare || !set.is_empty()) => {
                         ReplyMatch::Unreadable(Unreadable::NotAVersion)
                     }
                     _ => ReplyMatch::Read(v),
@@ -607,26 +625,53 @@ pub enum IdentifiedBy {
 }
 
 /// Which observation a piece of evidence came from: one host and port, or one
-/// container image. The caller builds it where it takes the reply, and the same
-/// key must go to [`Entry::identify_endpoint`] and [`Identified::read_version`],
-/// so identity proved on one endpoint is never used to read another's reply.
+/// container as its runtime reports it. The caller builds it where it takes the
+/// reply, and the same key must go to [`Entry::identify_endpoint`] (or
+/// [`Entry::identify_image`]) and [`Identified::read_version`], so identity
+/// proved on one endpoint or container is never used to read another's reply.
+/// An image proof is bound to the container instance, never to the image name.
 /// Opaque: it can be compared, and nothing of its contents can be shown.
 #[derive(Clone, PartialEq, Eq)]
-pub struct EndpointKey(String);
+pub struct EndpointKey {
+    kind: KeyKind,
+    id: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeyKind {
+    Endpoint,
+    Container,
+}
 
 impl EndpointKey {
     /// The key of a network endpoint (host as the scanner dialled it, and port).
     #[must_use]
     pub fn new(host: &str, port: u16) -> Self {
-        Self(format!("ep:{}:{port}", host.to_ascii_lowercase()))
+        Self {
+            kind: KeyKind::Endpoint,
+            id: format!("ep:{}:{port}", host.to_ascii_lowercase()),
+        }
     }
 
-    /// The key of a container image (the reference the runtime reports,
-    /// normalised, so tag and digest do not matter).
+    /// The key of one container, as its runtime reports it. `runtime` names the runtime
+    /// (a slug, such as `docker` or `podman`); `container_id` is the runtime's id for the
+    /// container (the full id, the same spelling everywhere in one scan). `None` when either
+    /// is not well formed: then the caller has no container identity, so version unknown.
     #[must_use]
-    pub fn for_image(image: &Untrusted<String>) -> Self {
-        // expose_untrusted: normalised into an opaque key that is only compared.
-        Self(format!("img:{}", normalise_image(image.expose_untrusted())))
+    pub fn for_container(runtime: &str, container_id: &Untrusted<String>) -> Option<Self> {
+        // expose_untrusted: checked for length and characters, then only compared.
+        let id = container_id.expose_untrusted();
+        let id_ok = (1..=128).contains(&id.len())
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'));
+        if !is_slug(runtime) || !id_ok {
+            return None;
+        }
+        Some(Self {
+            kind: KeyKind::Container,
+            id: format!("{runtime}\u{0}{id}"),
+        })
     }
 }
 
@@ -638,7 +683,8 @@ impl fmt::Debug for EndpointKey {
 
 /// Proof that one endpoint or container was identified as one entry. Only
 /// [`Entry::identify_endpoint`] and [`Entry::identify_image`] make one. It
-/// remembers the [`EndpointKey`] of the observation it came from.
+/// remembers the [`EndpointKey`] of the observation it came from: an image
+/// proof is bound to that container instance, never to the image name.
 ///
 /// `Unreadable` from [`Identified::read_version`] is version unknown with the
 /// product kept: never not affected, never not installed.
@@ -1160,10 +1206,12 @@ impl Entry {
         key: &EndpointKey,
         replies: &[Untrusted<String>],
     ) -> ReplyMatch<Identified<'_>> {
-        if !matches!(
-            self.version.source,
-            Source::Rpc | Source::Grpc | Source::Http | Source::Nip11
-        ) {
+        if key.kind != KeyKind::Endpoint
+            || !matches!(
+                self.version.source,
+                Source::Rpc | Source::Grpc | Source::Http | Source::Nip11
+            )
+        {
             return ReplyMatch::Unreadable(Unreadable::MissingEvidence);
         }
         let probes = self.identity_probes();
@@ -1192,13 +1240,20 @@ impl Entry {
     }
 
     /// Does this container image (the reference the container runtime reports)
-    /// belong to this product? An entry with no images cannot be identified by
-    /// image, so it gives `Unreadable(MissingEvidence)` (cannot tell), never
-    /// `NoMatch`. A reference that is not well formed (an empty tag after `:`,
-    /// an empty digest after `@`, `..`, an empty or odd path segment) is
-    /// `Unreadable(BadToken)`. The proof carries the image's [`EndpointKey`].
-    pub fn identify_image(&self, image: &Untrusted<String>) -> ReplyMatch<Identified<'_>> {
-        if self.recognize.images.is_empty() {
+    /// belong to this product? `key` is the container's own key
+    /// ([`EndpointKey::for_container`]): the proof is bound to that container
+    /// instance, never to the image name, so a second container of the same
+    /// image has to be identified on its own. A key that is not a container key,
+    /// or an entry with no images, is `Unreadable(MissingEvidence)` (cannot
+    /// tell), never `NoMatch`. A reference that is not well formed under one
+    /// strict grammar (`[domain/]path[:tag][@digest]`; see `image_reference_ok`)
+    /// is `Unreadable(BadToken)`. The proof carries `key`.
+    pub fn identify_image(
+        &self,
+        key: &EndpointKey,
+        image: &Untrusted<String>,
+    ) -> ReplyMatch<Identified<'_>> {
+        if key.kind != KeyKind::Container || self.recognize.images.is_empty() {
             return ReplyMatch::Unreadable(Unreadable::MissingEvidence);
         }
         // expose_untrusted: checked for length, characters and shape, then normalised and
@@ -1210,11 +1265,7 @@ impl Entry {
         if !text.is_ascii() {
             return ReplyMatch::Unreadable(Unreadable::NonAscii);
         }
-        if !text
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | ':' | '@' | '-'))
-            || !image_reference_ok(text)
-        {
+        if !image_reference_ok(text) {
             return ReplyMatch::Unreadable(Unreadable::BadToken);
         }
         let n = normalise_image(text);
@@ -1235,7 +1286,7 @@ impl Entry {
             ReplyMatch::Read(Identified {
                 entry: self,
                 by: IdentifiedBy::Image,
-                key: EndpointKey::for_image(image),
+                key: key.clone(),
             })
         } else {
             ReplyMatch::NoMatch
@@ -1620,7 +1671,7 @@ fn fixed() -> R<&'static Fixed> {
 }
 
 fn build_fixed() -> Result<Fixed, regex::Error> {
-    let shapes: [(&'static str, &str); 14] = [
+    let shapes: [(&'static str, &str); 15] = [
         (
             "extended key (xpub/xprv family)",
             r"[xyztuvXYZTUV](?:pub|prv)[1-9A-HJ-NP-Za-km-z]{20,}",
@@ -1644,6 +1695,8 @@ fn build_fixed() -> Result<Fixed, regex::Error> {
         ("API key (sk-)", r"\bsk-[A-Za-z0-9_-]{20,}"),
         ("IPv4 address", r"\b\d{1,3}(?:\.\d{1,3}){3}\b"),
         ("IPv6 candidate", r"[0-9A-Fa-f:]{2,}"),
+        // A rune or other high-entropy token: only when it mixes cases and digits.
+        ("high-entropy token", r"[A-Za-z0-9+=_-]{40,}"),
     ];
     let mut compiled = Vec::new();
     for (name, pattern) in shapes {
@@ -1727,8 +1780,40 @@ fn internal_host(host: &str) -> bool {
         || host.chars().all(|c| c.is_ascii_digit() || c == '.')
 }
 
+/// The path of an https URL: empty, or `("/" segment)+` with one optional
+/// trailing `/`. A segment is `[A-Za-z0-9._~-]+`, never `.` or `..`, and never
+/// empty, so no backslash, `:`, `;`, `@`, `+`, `//` and the like.
+fn url_path_ok(path: &str) -> bool {
+    if path.is_empty() || path == "/" {
+        return true;
+    }
+    let body = path.strip_suffix('/').unwrap_or(path);
+    let Some(inner) = body.strip_prefix('/') else {
+        return false;
+    };
+    inner.split('/').all(|s| {
+        !s.is_empty()
+            && s != "."
+            && s != ".."
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'~' | b'-'))
+    })
+}
+
 /// Splits an https URL into (host, path). Refuses anything else, and internal names.
+/// The one URL grammar: the host rules of [`https_split`] and the path rule of
+/// [`url_path_ok`].
 fn https_parts(url: &str) -> R<(&str, &str)> {
+    let (host, path) = https_split(url)?;
+    if !url_path_ok(path) {
+        return Err("URL path must be /-separated segments of [A-Za-z0-9._~-]".into());
+    }
+    Ok((host, path))
+}
+
+/// The host rules of the URL grammar, with the path left as written (a repo URL
+/// has its own, stricter path rule in `check_repo_url`).
+fn https_split(url: &str) -> R<(&str, &str)> {
     // No error below quotes the URL: it may carry user info or a token.
     let rest = url.strip_prefix("https://").ok_or("URL must be https")?;
     if !url.is_ascii() {
@@ -1747,7 +1832,7 @@ fn https_parts(url: &str) -> R<(&str, &str)> {
         && host
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-');
-    if !host_ok || path.contains("..") {
+    if !host_ok {
         return Err("URL host must be a lower-case name, no port".into());
     }
     // A trailing dot (`example.com.`) or an empty label (`a..b`) is a different
@@ -1782,12 +1867,27 @@ fn under(url: &str, base: &str) -> bool {
 
 /// A repo URL is `https://host/owner/repo`, nothing more.
 fn check_repo_url(url: &str) -> R<()> {
-    let (_, path) = https_parts(url)?;
-    let segs: Vec<&str> = path.trim_matches('/').split('/').collect();
-    if segs.len() != 2 || segs.iter().any(|s| s.is_empty()) || path.ends_with('/') {
-        return Err("repo URL must be https://host/owner/repo".into());
+    // The host rules only: the owner/repo shape below is stricter than the path grammar.
+    let (_, path) = https_split(url)?;
+    let name_ok = |s: &str, max: usize| {
+        (1..=max).contains(&s.len())
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+    };
+    let segs: Vec<&str> = path.strip_prefix('/').unwrap_or("").split('/').collect();
+    match segs.as_slice() {
+        [owner, repo]
+            if !path.ends_with('/')
+                && name_ok(owner, 39)
+                && owner.starts_with(|c: char| c.is_ascii_alphanumeric())
+                && name_ok(repo, 100)
+                && *repo != "."
+                && *repo != ".." =>
+        {
+            Ok(())
+        }
+        _ => Err("repo URL must be https://host/owner/repo with forge-style names".into()),
     }
-    Ok(())
 }
 
 /// Is `host` the name `base` or a subdomain of it?
@@ -1805,7 +1905,7 @@ fn check_website(repo: &str, site: &str) -> R<()> {
     if SHARED_SITE_HOSTS.iter().any(|h| on_host(host, h)) {
         return Err("website must not be on a shared code host (or docs host)".into());
     }
-    if CODE_HOSTS.contains(&host) && site.trim_end_matches('/') != repo {
+    if CODE_HOSTS.iter().any(|h| on_host(host, h)) && site.trim_end_matches('/') != repo {
         return Err("website on a shared code host must be exactly upstream.repo".into());
     }
     let owner = repo
@@ -1839,6 +1939,9 @@ fn trust_segment(s: &str) -> bool {
 fn trust_ref(s: &str) -> bool {
     let all_hex = s.len() >= 4 && s.bytes().all(|b| b.is_ascii_hexdigit());
     s.len() <= 64
+        && !s.starts_with(['.', '-'])
+        && !s.ends_with('.')
+        && !s.to_ascii_lowercase().ends_with(".lock")
         && !all_hex
         && !["refs", "pull", "head"]
             .iter()
@@ -1917,7 +2020,7 @@ fn check_under_upstream(
         && !PAGES_SUFFIXES.iter().any(|s| on_host(wh, s))
     {
         // On a code host the website is the repo itself: it gets the repo's shape rules.
-        let on_forge = https_parts(w).is_ok_and(|(h, _)| FORGE_HOSTS.contains(&h));
+        let on_forge = https_parts(w).is_ok_and(|(h, _)| FORGE_HOSTS.iter().any(|f| on_host(h, f)));
         bases.push((w, on_forge));
     }
     bases.extend(
@@ -2199,6 +2302,13 @@ fn shape_hit(fx: &Fixed, s: &str) -> Option<&'static str> {
                 "IPv4 address" => !["192.0.2.", "198.51.100.", "203.0.113."]
                     .iter()
                     .any(|p| m.as_str().starts_with(p)),
+                // Same rule as the compile-time scan (T13).
+                "high-entropy token" => {
+                    let t = m.as_str();
+                    t.bytes().any(|b| b.is_ascii_uppercase())
+                        && t.bytes().any(|b| b.is_ascii_lowercase())
+                        && t.bytes().any(|b| b.is_ascii_digit())
+                }
                 _ => true,
             };
             if flagged {
@@ -2222,6 +2332,12 @@ fn no_secret_shapes(t: &Table) -> R<()> {
     for (path, s) in all {
         if let Some(name) = shape_hit(fx, &s) {
             return Err(format!("{path} has a secret shape: {name}"));
+        }
+        // A seed written over several lines of a string: every run of whitespace,
+        // newlines included, becomes one space, then the seed shape runs again.
+        let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        if flat != s && shape_hit(fx, &flat).is_some() {
+            return Err(format!("{path} has a secret shape: seed phrase over lines"));
         }
         if fx.forty_hex.is_match(&s) && !is_fingerprint_path(&path) {
             return Err(format!(
@@ -2250,14 +2366,22 @@ fn raw_secret_shapes(text: &str) -> R<()> {
             return Err(format!("line {n} has a secret shape"));
         }
     }
+    // One implementation of the comment stream, shared with the compile-time
+    // guard in `catalog_files.rs`.
+    let n = credential_line(text);
+    if n != 0 {
+        return Err(format!("line {n} has a secret shape"));
+    }
     Ok(())
 }
 
 /// Runs only the secret-shape scan on TOML text: no xpub or xprv, nsec,
-/// 12-word seed phrase, 64-hex or longer string, base64 macaroon, onion
-/// address, Lightning invoice, Cashu token, GitHub, AWS or `sk-` token,
-/// private key block, public IPv4 or IPv6 address, or a 40-hex string outside
-/// `signing.keys.fingerprint`. [`load`] already runs it.
+/// 12-word seed phrase (also over several lines of a string or of comments),
+/// 64-hex or longer string, base64 macaroon, high-entropy token of 40 or more
+/// characters mixing cases and digits, onion address, Lightning invoice, Cashu
+/// token, GitHub, AWS or `sk-` token, private key block, public IPv4 or IPv6
+/// address, or a 40-hex string outside `signing.keys.fingerprint`. [`load`]
+/// already runs it.
 ///
 /// # Errors
 /// The first value with a secret shape, or text that is not TOML.
@@ -2268,37 +2392,121 @@ pub fn scan_secret_shapes(text: &str) -> Result<(), CatalogError> {
 
 // ---------- images ----------
 
-/// Is this runtime-reported image reference well formed, before its tag and
-/// digest are stripped? `[registry[:port]/]path[:tag][@digest]`: at most one
-/// `@` with a digest after it, no empty tag after a `:` in the last segment, no
-/// empty, `.` or `..` path segment, and a `:` only as a registry port (first
-/// segment) or the tag (last segment).
+/// The one image-reference grammar (Docker's distribution grammar, narrowed).
+///
+/// `reference := name [":" tag] ["@" digest]`, at most [`MAX_REPLY`] bytes.
+/// `name := [domain "/"] component ("/" component)*`; the first segment is a
+/// domain only when there is more than one segment and it holds `.` or `:` or is
+/// `localhost`. `domain := label ("." label)* [":" port]` with
+/// `label := [A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?` and `port := [0-9]{1,5}`.
+/// `component := [a-z0-9]+ (sep [a-z0-9]+)*` with `sep := "." | "_" | "__" | "-"+`
+/// (no upper case in a path). `tag := [A-Za-z0-9_][A-Za-z0-9_.-]{0,127}`.
+/// `digest := "sha256:" [0-9a-f]{64} | "sha512:" [0-9a-f]{128}`.
 fn image_reference_ok(image: &str) -> bool {
-    let (name, digest) = match image.split_once('@') {
-        Some((n, d)) => (n, Some(d)),
+    if image.len() > MAX_REPLY {
+        return false;
+    }
+    let (rest, digest) = match image.split_once('@') {
+        Some((r, d)) => (r, Some(d)),
         None => (image, None),
     };
-    if digest.is_some_and(|d| d.is_empty() || d.contains('@')) {
+    if digest.is_some_and(|d| !image_digest_ok(d)) {
+        return false;
+    }
+    // A `:` after the last `/` starts the tag (`localhost:5000/a` has none).
+    let (name, tag) = match rest.rfind(':') {
+        Some(p) if rest.get(p..).is_some_and(|t| !t.contains('/')) => {
+            (rest.get(..p).unwrap_or(""), rest.get(p + 1..))
+        }
+        _ => (rest, None),
+    };
+    if tag.is_some_and(|t| !image_tag_ok(t)) {
         return false;
     }
     let segs: Vec<&str> = name.split('/').collect();
-    let last = segs.len().saturating_sub(1);
-    for (i, seg) in segs.iter().enumerate() {
-        if seg.is_empty() || *seg == "." || *seg == ".." {
-            return false;
-        }
-        let colons = seg.matches(':').count();
-        let allowed = i == last || (i == 0 && last > 0);
-        if colons > 1 || (colons == 1 && !allowed) {
-            return false;
-        }
-        if let Some((n, tag)) = seg.split_once(':')
-            && (n.is_empty() || tag.is_empty())
+    let (domain, components) = match segs.split_first() {
+        Some((first, rest))
+            if !rest.is_empty() && (first.contains(['.', ':']) || *first == "localhost") =>
         {
+            (Some(*first), rest)
+        }
+        _ => (None, segs.as_slice()),
+    };
+    domain.is_none_or(image_domain_ok)
+        && !components.is_empty()
+        && components.iter().all(|c| image_component_ok(c))
+}
+
+fn image_digest_ok(d: &str) -> bool {
+    let hex = |h: &str, n: usize| {
+        h.len() == n
+            && h.bytes()
+                .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+    };
+    match d.split_once(':') {
+        Some(("sha256", h)) => hex(h, 64),
+        Some(("sha512", h)) => hex(h, 128),
+        _ => false,
+    }
+}
+
+fn image_tag_ok(t: &str) -> bool {
+    let mut bytes = t.bytes();
+    t.len() <= 128
+        && bytes
+            .next()
+            .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+}
+
+fn image_domain_ok(d: &str) -> bool {
+    let (host, port) = match d.rsplit_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (d, None),
+    };
+    if port.is_some_and(|p| !(1..=5).contains(&p.len()) || !p.bytes().all(|b| b.is_ascii_digit())) {
+        return false;
+    }
+    host.split('.').all(|l| {
+        let b = l.as_bytes();
+        !b.is_empty()
+            && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'-')
+            && b.first().is_some_and(u8::is_ascii_alphanumeric)
+            && b.last().is_some_and(u8::is_ascii_alphanumeric)
+    })
+}
+
+fn image_component_ok(c: &str) -> bool {
+    let b = c.as_bytes();
+    let alnum = |x: u8| x.is_ascii_lowercase() || x.is_ascii_digit();
+    let mut i = 0;
+    loop {
+        let start = i;
+        while b.get(i).is_some_and(|x| alnum(*x)) {
+            i += 1;
+        }
+        if i == start {
             return false;
+        }
+        if i == b.len() {
+            return true;
+        }
+        match b.get(i) {
+            Some(b'.') => i += 1,
+            Some(b'_') => {
+                i += 1;
+                if b.get(i) == Some(&b'_') {
+                    i += 1;
+                }
+            }
+            Some(b'-') => {
+                while b.get(i) == Some(&b'-') {
+                    i += 1;
+                }
+            }
+            _ => return false,
         }
     }
-    true
 }
 
 /// The one image-name normaliser: lower case, no digest, no tag, `docker.io/`
@@ -2987,8 +3195,8 @@ fn parse_version(
     // At match time too: a plain version read must have one of these majors, so no
     // spelling of the regex can read a major the entry does not permit. A regex with
     // a prefix around the version (`/Satoshi:...`, `Nutshell/...`) reads no bare
-    // plain reply, so it has no majors to enforce here.
-    if !excepted && !plain_majors.is_empty() {
+    // plain reply, so its set may be empty: then no bare plain reply is read at all.
+    if !excepted {
         pattern.majors = Some(plain_majors.clone());
     }
     if reads_plain && !excepted {
@@ -3175,12 +3383,16 @@ fn check_unique(entries: &BTreeMap<String, Entry>) -> R<()> {
             ));
         }
     }
+    // Only ids (validated file names) and item indexes are ever shown, never an alias.
     let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
     for (id, e) in entries {
         let names = std::iter::once(id.as_str()).chain(e.aliases.iter().map(String::as_str));
-        for n in names {
+        for (pos, n) in names.enumerate() {
             if let Some(other) = seen.insert(n, id) {
-                return Err(format!("`{n}` is used by both `{other}` and `{id}`"));
+                return Err(match pos.checked_sub(1) {
+                    None => format!("`{id}` is already used as a name by `{other}`"),
+                    Some(i) => format!("`{id}` aliases item {i} is already used by `{other}`"),
+                });
             }
         }
     }
@@ -3254,21 +3466,27 @@ fn check_disjoint(entries: &BTreeMap<String, Entry>) -> R<()> {
 fn check_links(entries: &BTreeMap<String, Entry>) -> R<()> {
     let mut edges: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for (id, e) in entries {
-        let targets: Vec<&str> = e
+        // Fields and item indexes are shown, never the value.
+        let named: Vec<(String, &str)> = e
             .fork_of
             .iter()
-            .chain(e.bundles.iter())
-            .map(String::as_str)
+            .map(|f| ("fork_of".to_string(), f.as_str()))
+            .chain(
+                e.bundles
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| (format!("bundles item {i}"), b.as_str())),
+            )
             .collect();
-        for t in &targets {
+        let mut targets: Vec<&str> = Vec::new();
+        for (field, t) in named {
             if t == id {
-                return Err(format!("{id}: fork_of or bundles names itself"));
+                return Err(format!("{id}: {field} names itself"));
             }
-            if !entries.contains_key(*t) {
-                return Err(format!(
-                    "{id}: fork_of or bundles names `{t}`, which is not an entry"
-                ));
+            if !entries.contains_key(t) {
+                return Err(format!("{id}: {field} does not name an entry"));
             }
+            targets.push(t);
         }
         edges.insert(id, targets);
     }
@@ -3346,6 +3564,14 @@ mod tests {
         r.majors = Some(BTreeSet::from([1]));
         assert_eq!(r.version(&reply("1.19.0")), ReplyMatch::Read("1.19.0"));
         assert!(!r.version(&reply("2.19.0")).is_read());
+        // An empty set refuses every bare plain reply and leaves a prefixed one alone.
+        let mut s = Pattern::new_version(r"^v?(?P<version>\d+\.\d+\.\d+)$").unwrap();
+        s.majors = Some(BTreeSet::new());
+        assert_eq!(
+            s.version(&reply("26.6.9")),
+            ReplyMatch::Unreadable(Unreadable::NotAVersion)
+        );
+        assert_eq!(s.version(&reply("v26.6.9")), ReplyMatch::Read("26.6.9"));
         // Helper edge cases.
         assert_eq!(plain_major("28.1.0"), Some(28));
         assert_eq!(plain_major("99999999999999999999.1"), Some(u64::MAX));

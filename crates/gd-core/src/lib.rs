@@ -7,6 +7,7 @@
 
 pub mod catalog;
 mod catalog_files;
+mod catalog_scan;
 mod fact;
 mod json;
 pub mod privilege;

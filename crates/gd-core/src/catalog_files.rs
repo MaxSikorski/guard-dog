@@ -2,32 +2,42 @@
 //! run time and no `build.rs`. A test (`tests/catalog.rs`) checks this list is
 //! exactly the `catalog/` folder: no entry missing, none extra, same text.
 //! Add a line here, in sorted order, when an entry is added.
+//!
+//! Every embedded text is checked at compile time (`catalog_scan.rs`): a file
+//! with a credential-shaped line fails `cargo build` itself, before a binary
+//! exists, whether or not anyone runs the tests. The build error is a fixed
+//! message that never shows file text; the line number comes from
+//! `cargo test -p gd-core --test catalog`.
+
+/// One catalog file as (id, text), with the compile-time credential check.
+macro_rules! entry {
+    ($id:literal) => {{
+        const TEXT: &str = include_str!(concat!("../../../catalog/", $id, ".toml"));
+        const _: () = assert!(
+            crate::catalog_scan::credential_line(TEXT) == 0,
+            concat!(
+                "catalog/",
+                $id,
+                ".toml has a credential-shaped line; run `cargo test -p gd-core --test catalog` for the line number"
+            )
+        );
+        ($id, TEXT)
+    }};
+}
 
 /// (id, text) of every `catalog/<id>.toml`, sorted by id.
 pub const FILES: &[(&str, &str)] = &[
-    ("alby-hub", include_str!("../../../catalog/alby-hub.toml")),
-    (
-        "bitcoin-core",
-        include_str!("../../../catalog/bitcoin-core.toml"),
-    ),
-    (
-        "btcpay-server",
-        include_str!("../../../catalog/btcpay-server.toml"),
-    ),
-    (
-        "core-lightning",
-        include_str!("../../../catalog/core-lightning.toml"),
-    ),
-    ("fedimintd", include_str!("../../../catalog/fedimintd.toml")),
-    ("gatewayd", include_str!("../../../catalog/gatewayd.toml")),
-    (
-        "lightning-terminal",
-        include_str!("../../../catalog/lightning-terminal.toml"),
-    ),
-    ("lnd", include_str!("../../../catalog/lnd.toml")),
-    ("nutshell", include_str!("../../../catalog/nutshell.toml")),
-    ("rtl", include_str!("../../../catalog/rtl.toml")),
-    ("strfry", include_str!("../../../catalog/strfry.toml")),
-    ("tapd", include_str!("../../../catalog/tapd.toml")),
-    ("umbrelos", include_str!("../../../catalog/umbrelos.toml")),
+    entry!("alby-hub"),
+    entry!("bitcoin-core"),
+    entry!("btcpay-server"),
+    entry!("core-lightning"),
+    entry!("fedimintd"),
+    entry!("gatewayd"),
+    entry!("lightning-terminal"),
+    entry!("lnd"),
+    entry!("nutshell"),
+    entry!("rtl"),
+    entry!("strfry"),
+    entry!("tapd"),
+    entry!("umbrelos"),
 ];
