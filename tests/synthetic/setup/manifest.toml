@@ -1,0 +1,32 @@
+format = 1
+platform = "raspiblitz"
+source = "synthetic"
+recorded = "2026-11-16"
+recorder = "record-setup.sh format 2"
+reviewed_by = "test"
+description = "Synthetic setup for the scorer test. Not a real machine."
+
+[[service]]
+id = "bitcoin-core"
+version = "29.1"
+evidence = ["binaries-version.txt", "systemctl-list-units.txt"]
+
+[[service]]
+id = "lnd"
+version = "0.19.2-beta"
+evidence = ["binaries-version.txt", "systemctl-list-units.txt"]
+
+[[service]]
+id = "core-lightning"
+version = "25.05"
+evidence = ["binaries-version.txt"]
+
+[[service]]
+id = "tor"
+version = "0.4.8.16"
+evidence = ["binaries-version.txt", "systemctl-list-units.txt"]
+
+[[service]]
+id = "strfry"
+version = "unknown"
+evidence = ["replies/strfry/nip11.json"]

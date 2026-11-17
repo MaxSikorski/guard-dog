@@ -1,0 +1,8 @@
+== /usr/local/bin/bitcoind
+Bitcoin Core daemon version v29.1.0
+== /usr/local/bin/lightningd
+v25.05
+== /usr/local/bin/lnd
+lnd version 0.19.2-beta commit=v0.19.2-beta
+== /usr/bin/tor
+Tor version 0.4.8.16.
