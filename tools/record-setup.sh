@@ -2341,7 +2341,7 @@ else
     fi
     STAGE=$("$MKTEMP" -d "$STAGE_BASE/gd-record.XXXXXX")
 fi
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329  # cleanup runs from the traps below (SC2317 in older shellcheck, SC2329 in newer)
 cleanup() {
     "$RM" -rf "${STAGE:?}"
 }
