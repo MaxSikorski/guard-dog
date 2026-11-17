@@ -38,7 +38,7 @@ The property tests use a fixed seed by default, so the same commit gives the sam
 
 ## The regtest lab
 
-`lab/up.sh` starts five real services on an isolated regtest network (`lab/README.md`). These tests check the lab's compose file without starting Docker, so they run in every `cargo test`. The live lab is run by hand with `lab/up.sh`; the nightly job comes as a separate change.
+`lab/up.sh` starts five real services on an isolated regtest network (`lab/README.md`). These tests check the lab's compose file without starting Docker, so they run in every `cargo test`. The live lab is run by hand with `lab/up.sh`; the nightly CI runs it too.
 
 | Test | Where | What it proves |
 |---|---|---|
@@ -48,7 +48,7 @@ The property tests use a fixed seed by default, so the same commit gives the sam
 | `lab_scripts_stay_on_the_lab_project_and_regtest` | same | `up.sh` and `down.sh` only touch the `gd-lab` project, `up.sh` checks all three chains, `down.sh` removes volumes and `lab/.data`, and neither mentions another chain, `prune`, `sudo`, `eval`, the Docker socket or `docker run`. |
 | `no_generated_secret_is_committed` | same | No generated lab credential (`gdlabcanary-…`) is in any committed lab file, and `lab/.data/` is gitignored. |
 
-**Live check (`lab/up.sh`, by hand; the nightly job comes as a separate change):** cold start to a funded LND→Core Lightning channel; every node says `regtest` or the lab removes itself (exit 3); the least-privileged logins (bitcoind `gdwatch`, LND `info:read`, the CLN `getinfo` rune) each read the version and are each refused a wider call; every service's own version matches its image label; the whole start finishes in 5 minutes or it fails (exit 4). Measured 2026-11-16 on the Mac (arm64): cold start with all five images pulled fresh 86 s, warm (images cached) 68 s, peak 449 MiB for all five containers. Design run: 69–72 s, 422–447 MiB.
+**Live check (`lab/up.sh`, by hand; the nightly CI runs it too):** cold start to a funded LND→Core Lightning channel; every node says `regtest` or the lab removes itself (exit 3); the least-privileged logins (bitcoind `gdwatch`, LND `info:read`, the CLN `getinfo` rune) each read the version and are each refused a wider call; every service's own version matches its image label; the whole start finishes in 5 minutes or it fails (exit 4). Measured 2026-11-16 on the Mac (arm64): cold start with all five images pulled fresh 86 s, warm (images cached) 68 s, peak 449 MiB for all five containers. Design run: 69–72 s, 422–447 MiB.
 
 ## Judges
 
