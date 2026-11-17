@@ -151,6 +151,7 @@ services:
       - --bitcoin-rpcpassword=${GD_LAB_RPC_PASSWORD:?run lab/up.sh, not docker compose}
       - --clnrest-host=0.0.0.0
       - --clnrest-port=3010
+      - --clnrest-protocol=https
       - --disable-plugin=wss-proxy
     healthcheck:
       test: ["CMD", "lightning-cli", "--lightning-dir=/data", "--network=regtest", "getinfo"]
@@ -281,18 +282,20 @@ services:
 
   # The scanner: Guard Dog itself, built once from lab/scanner/Dockerfile (no
   # shell in the image). Lab only; never started by lab/up.sh. Its only writable
-  # place is a 1 MiB in-memory /state.
+  # places are a 1 MiB in-memory /state and a 1 MiB in-memory /tmp.
   scanner:
     build:
       context: ..
       dockerfile: lab/scanner/Dockerfile
     image: gd-lab-scanner:local
+    pull_policy: build
     labels:
       org.guard-dog.lab.service: scanner
     profiles: [scan]
     user: "65532:65532"
     tmpfs:
       - /state:uid=65532,gid=65532,mode=0700,size=1m
+      - /tmp:uid=65532,gid=65532,mode=0700,size=1m
     networks: [lab]
     read_only: true
     cap_drop: [ALL]

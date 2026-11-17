@@ -105,7 +105,7 @@ T0=$(date +%s)
 # 1. One lab at a time: an atomic lock (shared with down.sh), then the preconditions.
 lab_lock || fail "could not take the lab lock"
 LOCK_OWNED=1
-for tool in docker jq openssl; do command -v "$tool" >/dev/null || fail "$tool is not installed"; done
+for tool in docker jq openssl xxd; do command -v "$tool" >/dev/null || fail "$tool is not installed"; done
 docker compose version >/dev/null 2>&1 || fail "docker compose (v2) is not available"
 [ -z "$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT")" ] || fail "a gd-lab is already running; run lab/down.sh first"
 [ -z "$(docker ps -q --filter label=org.guard-dog.lab.service)" ] || fail "another Guard Dog lab container is running; only one lab at a time"
@@ -186,17 +186,29 @@ if bwatch getblockcount >/dev/null 2>&1; then fail "gdwatch was allowed getblock
 lncli bakemacaroon --save_to=/data/gd-info.macaroon info:read >/dev/null
 lncli --macaroonpath=/data/gd-info.macaroon getinfo >/dev/null || fail "the info:read macaroon could not read getinfo"
 if lncli --macaroonpath=/data/gd-info.macaroon walletbalance >/dev/null 2>&1; then fail "the info:read macaroon was allowed walletbalance"; fi
-dc exec -T lnd cat /data/gd-info.macaroon | od -An -tx1 | tr -d ' \n' > "$DATA/creds/lnd-info-read.macaroon.hex"
-RUNE="$(clncli createrune restrictions='[["method=getinfo"],["pnum=0"]]' | jq -er .rune)"
-[ "$(clncli checkrune rune="$RUNE" method=getinfo | jq -r .valid)" = true ] || fail "the getinfo rune was not valid for getinfo"
-if clncli checkrune rune="$RUNE" method=listfunds >/dev/null 2>&1; then fail "the getinfo rune was allowed listfunds"; fi
+# The macaroon is read into a variable first, so a failed read leaves no half-written file.
+MAC_HEX="$(dc exec -T lnd cat /data/gd-info.macaroon | od -An -tx1 | tr -d ' \n')" || fail "could not read the info:read macaroon from LND"
+re_hex='^[0-9a-f]{20,}$'
+[[ $MAC_HEX =~ $re_hex ]] || fail "the saved macaroon is not hex"
+printf '%s' "$MAC_HEX" > "$DATA/creds/lnd-info-read.macaroon.hex"
+RUNE="$(clncli createrune restrictions='[["method=getinfo"],["pnum=0"]]' | jq -er .rune)" || fail "could not make the getinfo rune"
+# The rune goes into Core Lightning's own tmpfs on stdin, and the container's shell
+# reads it from there; it is never on a command line of this script.
+printf '%s' "$RUNE" | dc exec -T cln sh -c 'umask 077; cat > /tmp/gd-rune' || fail "could not hand the rune to the cln container"
+# shellcheck disable=SC2016
+clnrune() { dc exec -T cln sh -c 'exec lightning-cli --lightning-dir=/data --network=regtest checkrune rune="$(cat /tmp/gd-rune)" method="$1"' sh "$1"; }
+valid="$(clnrune getinfo | jq -r .valid)" || fail "the getinfo rune could not be checked"
+[ "$valid" = true ] || fail "the getinfo rune was not valid for getinfo"
+if clnrune listfunds >/dev/null 2>&1; then fail "the getinfo rune was allowed listfunds"; fi
+dc exec -T cln rm -f /tmp/gd-rune || fail "could not remove the rune file from the cln container"
 printf '%s' "$RUNE" > "$DATA/creds/cln-getinfo.rune"
 step "least-privileged logins: bitcoind gdwatch, LND info:read, CLN getinfo rune (each refused a wider call)"
 
 # 8b. Identification over the lab network, with the probe tool (curl in the pinned
-# probe container). A credential never appears on a command line: headers go to
-# curl on stdin (`-H @-`), read from a pipe, and nothing here writes one to disk
-# except the two creds files above. TLS: the two REST servers use their own
+# probe container). No credential appears on a command line anywhere in this
+# script (lab_compose.rs checks the text): headers go to curl on stdin (`-H @-`),
+# read from a pipe, and the only credentials written to disk are the two files
+# in lab/.data/creds. TLS: the two REST servers use their own
 # self-signed certificates, so the certificate is pinned by its public key
 # (taken from the certificate copied below); a wrong pin must be refused.
 # call [curl arguments]: sets HTTP_STATUS, HTTP_BODY and HTTP_AUTH (the
@@ -232,35 +244,53 @@ fetch_cert() {
 # record <service> <call> <body>: keep a raw reply in lab/.data/replies/<service>/<call>.json.
 # Nothing is stripped: a reply holding a credential or a canary fails the run instead.
 REPLIES="$DATA/replies"
+# Every form of a credential a reply must not hold: the passwords, the mint key,
+# the macaroon (hex, base64, base64url), the rune, and the rpcauth salt$hash.
+MAC_B64="$(printf '%s' "$MAC_HEX" | xxd -r -p | openssl base64 -A)" || fail "could not encode the macaroon"
+MAC_B64URL="$(printf '%s' "$MAC_B64" | tr '+/' '-_' | tr -d '=')"
+REPLY_SECRETS=("$RPC_PASSWORD" "$WATCH_PASSWORD" "$MINT_KEY" "$MAC_HEX" "$MAC_B64" "$MAC_B64URL" "$RUNE" "${RPCAUTH_LINE#*:}" "${WATCH_RPCAUTH_LINE#*:}")
+for each in "${REPLY_SECRETS[@]}"; do [ -n "$each" ] || fail "an empty credential in the reply check"; done
 record() {
   local svc=$1 name=$2 body=$3 secret
   [[ $svc =~ ^[a-z]+$ ]] && [[ $name =~ ^[a-z0-9-]+$ ]] || fail "unexpected reply name"
-  for secret in "$RPC_PASSWORD" "$WATCH_PASSWORD" "$MINT_KEY" "$MAC_HEX" "$RUNE"; do
+  for secret in "${REPLY_SECRETS[@]}"; do
     [[ $body != *"$secret"* ]] || fail "the $svc $name reply holds a credential: not recording it"
   done
   [[ $body != *gdlabcanary-* ]] || fail "the $svc $name reply holds a canary: not recording it"
   printf '%s' "$body" | jq -e . >/dev/null || fail "the $svc $name reply is not JSON"
   mkdir -p "$REPLIES/$svc"
-  printf '%s\n' "$body" > "$REPLIES/$svc/$name.json"
+  printf '%s' "$body" > "$REPLIES/$svc/$name.json"
 }
-MAC_HEX="$(cat "$DATA/creds/lnd-info-read.macaroon.hex")"
-re_hex='^[0-9a-f]{20,}$'
-[[ $MAC_HEX =~ $re_hex ]] || fail "the saved macaroon is not hex"
 
 # bitcoind, no credential: only a 401 with Basic realm="jsonrpc" says "Bitcoin Core's RPC".
 call -H 'Content-Type: application/json' --data '{"jsonrpc":"1.0","id":"gd","method":"getnetworkinfo","params":[]}' http://bitcoind:18443/ </dev/null
 { [ "$HTTP_STATUS" = 401 ] && [ "$HTTP_AUTH" = 'Basic realm="jsonrpc"' ]; } || fail "bitcoind did not answer an unauthenticated call with 401 and WWW-Authenticate: Basic realm=\"jsonrpc\""
-record bitcoind getnetworkinfo "$(bwatch getnetworkinfo)"
-record bitcoind getblockchaininfo "$(bwatch getblockchaininfo)"
+# bitcoind, gdwatch: the real wire reply (the {"result", "error", "id"} envelope), through the
+# probe, with the Basic header built here and sent on stdin.
+btc_rpc() {
+  call -H 'Content-Type: application/json' --data "{\"jsonrpc\":\"1.0\",\"id\":\"gd\",\"method\":\"$1\",\"params\":[]}" -H @- http://bitcoind:18443/ < <(printf 'Authorization: Basic %s\n' "$(printf 'gdwatch:%s' "$WATCH_PASSWORD" | openssl base64 -A)")
+  [ "$HTTP_STATUS" = 200 ] || fail "bitcoind $1 as gdwatch over HTTP answered $HTTP_STATUS, not 200"
+  printf '%s' "$HTTP_BODY" | jq -e '.error == null and .result != null' >/dev/null || fail "bitcoind $1 over HTTP returned an error"
+}
+btc_rpc getnetworkinfo
+record bitcoind getnetworkinfo "$HTTP_BODY"
+btc_rpc getblockchaininfo
+record bitcoind getblockchaininfo "$HTTP_BODY"
 
 # The two REST certificates (certificates only), and the pins taken from them.
 fetch_cert lnd /data/tls.cert "$DATA/creds/lnd-tls.cert"
 fetch_cert cln /data/regtest/server.pem "$DATA/creds/clnrest-server.cert"
 LND_PIN="$(pin_of "$DATA/creds/lnd-tls.cert")"
 CLN_PIN="$(pin_of "$DATA/creds/clnrest-server.cert")"
-WRONG_PIN='sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
-if probe --insecure --pinnedpubkey "$WRONG_PIN" https://lnd:8080/v1/state </dev/null >/dev/null 2>&1; then fail "curl accepted LND's REST server under a wrong certificate pin"; fi
-if probe --insecure --pinnedpubkey "$WRONG_PIN" https://cln:3010/v1/getinfo </dev/null >/dev/null 2>&1; then fail "curl accepted clnrest under a wrong certificate pin"; fi
+# Each server is called with the other one's pin: curl must refuse with exactly
+# exit 90 (CURLE_SSL_PINNEDPUBKEYNOTMATCH); any other code means the pin was not tested.
+wrong_pin() { # service-name, then the probe arguments
+  local rc=0
+  probe "${@:2}" </dev/null >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 90 ] || fail "the pin was not tested for $1: curl exited $rc, expected 90 (pin mismatch)"
+}
+wrong_pin lnd --insecure --pinnedpubkey "$CLN_PIN" https://lnd:8080/v1/state
+wrong_pin clnrest --insecure --pinnedpubkey "$LND_PIN" https://cln:3010/v1/getinfo
 
 # LND, no macaroon: the pinned certificate plus a state reply identify it.
 call --insecure --pinnedpubkey "$LND_PIN" https://lnd:8080/v1/state </dev/null
@@ -270,8 +300,10 @@ record lnd state "$HTTP_BODY"
 # LND, info:read macaroon: the versioner reads, the balance is refused.
 call --insecure --pinnedpubkey "$LND_PIN" -H @- https://lnd:8080/v2/versioner/version < <(printf 'Grpc-Metadata-macaroon: %s\n' "$MAC_HEX")
 [ "$HTTP_STATUS" = 200 ] || fail "the info:read macaroon could not read LND's versioner over REST (HTTP $HTTP_STATUS)"
-LND_REST_VER="$(plain "$(printf '%s' "$HTTP_BODY" | jq -er .version)")"
-[ "$LND_REST_VER" = "$(label lnd expected-version)" ] || fail "LND's REST versioner says '$LND_REST_VER', not the pinned image's version"
+LND_REST_RAW="$(printf '%s' "$HTTP_BODY" | jq -er .version)" || fail "LND's REST versioner reply has no version"
+LND_REST_VER="$(plain "$LND_REST_RAW")"
+LND_WANT="$(label lnd expected-version)" || fail "could not read LND's expected version"
+[ "$LND_REST_VER" = "$LND_WANT" ] || fail "LND's REST versioner says '$LND_REST_VER', not the pinned image's version"
 record lnd versioner-version "$HTTP_BODY"
 call --insecure --pinnedpubkey "$LND_PIN" -H @- https://lnd:8080/v1/balance/blockchain < <(printf 'Grpc-Metadata-macaroon: %s\n' "$MAC_HEX")
 case $HTTP_STATUS in 403 | 500) ;; *) fail "the info:read macaroon was not refused the blockchain balance over REST (HTTP $HTTP_STATUS)" ;; esac
@@ -281,11 +313,14 @@ LND_REFUSED_STATUS=$HTTP_STATUS
 call -H 'Content-Type: application/json' --data '{}' --insecure --pinnedpubkey "$CLN_PIN" -H @- https://cln:3010/v1/getinfo < <(printf 'Rune: %s\n' "$RUNE")
 # clnrest answers a successful POST with 201 (Created), not 200.
 case $HTTP_STATUS in 200 | 201) ;; *) fail "the getinfo rune could not call clnrest getinfo (HTTP $HTTP_STATUS)" ;; esac
-CLN_REST_VER="$(plain "$(printf '%s' "$HTTP_BODY" | jq -er .version)")"
-[ "${CLN_REST_VER#v}" = "$(label cln expected-version)" ] || fail "clnrest says '$CLN_REST_VER', not the pinned image's version"
+CLN_REST_RAW="$(printf '%s' "$HTTP_BODY" | jq -er .version)" || fail "clnrest getinfo reply has no version"
+CLN_REST_VER="$(plain "$CLN_REST_RAW")"
+CLN_WANT="$(label cln expected-version)" || fail "could not read Core Lightning's expected version"
+[ "${CLN_REST_VER#v}" = "$CLN_WANT" ] || fail "clnrest says '$CLN_REST_VER', not the pinned image's version"
 record cln getinfo "$HTTP_BODY"
 call -H 'Content-Type: application/json' --data '{}' --insecure --pinnedpubkey "$CLN_PIN" -H @- https://cln:3010/v1/listfunds < <(printf 'Rune: %s\n' "$RUNE")
 case $HTTP_STATUS in 2*) fail "the getinfo rune was allowed clnrest listfunds" ;; esac
+printf '%s' "$HTTP_BODY" | grep -qi 'not permitted' || fail "clnrest refused listfunds, but with an unexpected error"
 CLN_REFUSED_STATUS=$HTTP_STATUS
 # Nutshell and strfry, no credential.
 call http://nutshell:3338/v1/info </dev/null

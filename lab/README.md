@@ -18,14 +18,14 @@ You need Docker with Compose v2, `jq` and `openssl`. Run one lab at a time; `up.
 5. Proves the least-privileged logins Guard Dog will use, and saves them (the LND macaroon and the Core Lightning rune go in `lab/.data/creds/`; the bitcoind `gdwatch` login stays in `lab/.data/lab.env`). Each must read the version, and each must be refused a wider call:
    - bitcoind: user `gdwatch`, limited to `getnetworkinfo` and `getblockchaininfo`
    - LND: a macaroon baked with only `info:read`
-   - Core Lightning: a rune limited to `getinfo`
+   - Core Lightning: a rune limited to `getinfo`. The rune is handed to the cln container on stdin and read there from its tmpfs, never put on a command line.
 6. Proves each service can be told apart over the lab network, and records what it says (the REST ports and the probe are explained below). Each of these is a hard failure with a plain message if it goes wrong:
-   - bitcoind, with no login: an unauthenticated JSON-RPC call must get `401` with `WWW-Authenticate: Basic realm="jsonrpc"`.
-   - LND and Core Lightning's `clnrest` certificates are copied (certificates only, never keys; mode 0600) into `lab/.data/creds/`. The probe pins each server by the public key of its certificate, and a wrong pin must be refused.
+   - bitcoind, with no login: an unauthenticated JSON-RPC call must get `401` with `WWW-Authenticate: Basic realm="jsonrpc"`. Then `gdwatch` makes the same calls through the probe (its `Authorization` header is built in the script and goes to curl on stdin), and the whole HTTP reply is recorded.
+   - LND and Core Lightning's `clnrest` certificates are copied (certificates only, never keys; mode 0600) into `lab/.data/creds/`. The probe pins each server by the public key of its certificate. Each server is also called with the other's pin, and curl must refuse it with exactly exit code 90 (pin mismatch); any other code fails the run, because then the pin was not tested.
    - LND with no macaroon: `GET /v1/state` returns a state.
    - LND with the `info:read` macaroon: `GET /v2/versioner/version` returns the manifest's version, and `GET /v1/balance/blockchain` is refused with a permission error.
    - `clnrest` with the rune: `POST /v1/getinfo` returns the manifest's version, and `POST /v1/listfunds` is refused.
-   - The raw replies to the version calls (bitcoind `getnetworkinfo` and `getblockchaininfo`, LND `/v1/state` and `/v2/versioner/version`, `clnrest` `getinfo`, Nutshell `GET /v1/info`, strfry's NIP-11 page) are saved unchanged in `lab/.data/replies/<service>/<call>.json`. If one holds a credential or a `gdlabcanary-` value, the run fails instead of saving it. `fixtures/lab-recorded/replies/` holds a recorded copy (`fixtures/README.md`).
+   - The raw replies to the version calls (bitcoind `getnetworkinfo` and `getblockchaininfo`, LND `/v1/state` and `/v2/versioner/version`, `clnrest` `getinfo`, Nutshell `GET /v1/info`, strfry's NIP-11 page) are saved byte for byte (no trailing newline added) in `lab/.data/replies/<service>/<call>.json`. If one holds a canary, a password, the mint key, the macaroon (hex, base64 or base64url), the rune or an rpcauth salt and hash, the run fails instead of saving it. `fixtures/lab-recorded/replies/` holds a recorded copy (`fixtures/README.md`).
 7. Reads each service's version from the service itself and checks it against the version its pinned image is labelled with.
 8. Writes `lab/.data/manifest.toml` in Judge A's format: the services and versions that are really there, plus the containers' arch, block storage and exposure, read-only from `docker inspect`.
 9. Prints a summary. If the whole start takes over 5 minutes, that counts as a failure (exit 4). If a step fails before all three chain checks pass, or you press Ctrl-C before all three chain checks pass, the lab removes itself. A later failure leaves the lab running so you can look; `lab/down.sh` cleans up. `lab/up.sh` and `lab/down.sh` share a lock (`lab/.lock`, which names the process holding it), so two can never run at once. A lock is never taken over automatically, even one left by a crash: once you have checked that no lab script is running, `lab/down.sh --unlock` removes it. Both scripts share `lab/lib.sh` for the lock and the teardown.
@@ -47,9 +47,9 @@ Two more services are tools, not part of the lab. `up.sh` never starts them on i
 | Service | What | Profile | Image |
 |---|---|---|---|
 | `probe` | curl, for talking to the services over the lab network. Image: `curlimages/curl` 8.23.0, released 2026-10-28 (curl project, official; curl licence, MIT-like) | `probe` | `curlimages/curl@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93` |
-| `scanner` | Guard Dog itself, built from `lab/scanner/Dockerfile`, with an in-memory 1 MiB `/state` | `scan` | built locally, tagged `gd-lab-scanner:local` |
+| `scanner` | Guard Dog itself, built from `lab/scanner/Dockerfile`, with an in-memory 1 MiB `/state` and 1 MiB `/tmp` | `scan` | built locally, tagged `gd-lab-scanner:local` (`pull_policy: build`: never pulled) |
 
-The probe never gets a credential on its command line: `up.sh` pipes headers to curl on stdin (`curl -H @-`), so nothing shows in `ps` or `docker logs`.
+No script in the lab puts a credential on a command line, and `lab_compose.rs` checks the text of `up.sh` for it. The probe never gets one on its command line: `up.sh` pipes headers to curl on stdin (`curl -H @-`), so nothing shows in `ps` or `docker logs`.
 
 LND's REST port (8080) and Core Lightning's `clnrest` (3010) are open on the lab network only. Both use their own self-signed certificates. No port is published.
 
@@ -60,11 +60,12 @@ The mint uses Nutshell's `FakeWallet` backend: it has no real Lightning connecti
 ## How it's locked down
 
 - **Isolated:** one internal Docker network (`172.29.208.0/24`) with no route out, not even to the internet, and in `isolated` bridge mode so the lab has no address on your machine to reach. No port is published on your machine; `up.sh` works through `docker compose exec`.
+- **Names:** Docker's embedded DNS resolver may still answer names for an internal network. That is a query-only channel, and nothing in the lab looks up outside names. Observed on this Docker (29.8.2, Compose 5.5.0), 2026-11-17: a lookup of an outside name (`example.com`) from the probe got no answer and curl gave up with `Resolving timed out` (exit 28), so nothing was resolved. That is one Docker version, so it stays a statement about what the lab does, not a guarantee about every Docker.
 - **Nothing on disk:** no host folders, no Docker socket, no volumes. All data lives in memory (tmpfs) and is gone when a container stops.
 - **Every container:** a read-only root filesystem, all Linux capabilities dropped, `no-new-privileges`, a non-root user, and limits on memory, swap, CPU and processes.
 - **Memory:** limits add up to 1,920 MiB for the five services and 192 MiB more for the two tools (2,112 MiB in all), under the 4 GiB budget for running the lab next to a Rust build. In practice the lab peaks at about 450 MiB.
 
-`crates/gd-core/tests/lab_compose.rs` checks all of this in every `cargo test`, and proves its checks catch 60 kinds of unsafe change.
+`crates/gd-core/tests/lab_compose.rs` checks all of this in every `cargo test`, and proves its checks catch 68 kinds of unsafe change in the compose file, and a further 8 in `up.sh`.
 
 ## The scanner image
 
@@ -77,6 +78,15 @@ docker build -f lab/scanner/Dockerfile -t gd-lab-scanner:local .
 # run it inside the lab network (the lab must be up)
 docker compose -p gd-lab -f lab/compose.yml --env-file lab/.data/lab.env --profile scan run --rm scanner --version
 ```
+
+The scanner's two build images, both checked on 2026-11-17 with `docker buildx imagetools inspect` to list linux/amd64 and linux/arm64, and pinned by index digest like the services:
+
+| Stage | Image | Platforms |
+|---|---|---|
+| build | `rust:1.99.1-slim-bookworm@sha256:f2c004e3d2d8b547e8cf7ffbc29205385f4e71d23e53e4e383065db5e9f822cd` (the version in `rust-toolchain.toml`) | amd64, arm64 |
+| runtime | `gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f` | amd64, arm64 |
+
+The build context is an allowlist (`.dockerignore`): only `Cargo.toml`, `Cargo.lock` and `crates/` get in, so nothing else in the checkout can reach the image. Because of `pull_policy: build`, `docker compose run` builds the scanner image if it is missing and never tries to pull it.
 
 ## Changing an image
 
