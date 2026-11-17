@@ -509,10 +509,14 @@ mod tests {
         Flood,
         /// An EOSE with a third field (not ours), then a flood of notices.
         BadEose,
-        /// Two valid lists with the same time, one naming this relay (first).
-        TieOwnFirst,
-        /// The same two lists, the other order.
-        TieOtherFirst,
+        /// Two valid lists with the same time, one naming this relay and one
+        /// naming another. The time is searched so that this relay's list has
+        /// the lower id (`own_lower`) or the higher one, and the lists arrive
+        /// in the given order, so every branch of the tie-break runs.
+        Tie { own_first: bool, own_lower: bool },
+        /// An older list naming this relay, a malformed EOSE, a newer list
+        /// that does not, then the real EOSE.
+        EoseMid,
     }
 
     const T0: u64 = 1_795_000_000;
@@ -557,8 +561,25 @@ mod tests {
                 make(&recipient, T0 + 10, &own),
                 make(&recipient, T0, &other),
             ],
-            Inbox::TieOwnFirst => vec![make(&recipient, T0, &own), make(&recipient, T0, &other)],
-            Inbox::TieOtherFirst => vec![make(&recipient, T0, &other), make(&recipient, T0, &own)],
+            Inbox::Tie {
+                own_first,
+                own_lower,
+            } => {
+                let (a, b) = (0u64..)
+                    .map(|d| {
+                        (
+                            make(&recipient, T0 + d, &own),
+                            make(&recipient, T0 + d, &other),
+                        )
+                    })
+                    .find(|(a, b)| (a.id < b.id) == own_lower)
+                    .unwrap();
+                if own_first { vec![a, b] } else { vec![b, a] }
+            }
+            Inbox::EoseMid => vec![
+                make(&recipient, T0, &own),
+                make(&recipient, T0 + 10, &other),
+            ],
             Inbox::Missing | Inbox::Closed | Inbox::Silent | Inbox::Flood | Inbox::BadEose => {
                 vec![]
             }
@@ -610,6 +631,22 @@ mod tests {
                                 for _ in 0..250 {
                                     let _ = ws.send(Message::text(r#"["NOTICE","x"]"#));
                                 }
+                            }
+                            Inbox::EoseMid => {
+                                let lists = inbox_events(inbox, port);
+                                let send_list = |ws: &mut tungstenite::WebSocket<_>, e: &Event| {
+                                    let obj: Value = serde_json::from_str(&e.to_json()).unwrap();
+                                    let frame = serde_json::json!(["EVENT", sub, obj]);
+                                    let _ = ws.send(Message::text(frame.to_string()));
+                                };
+                                send_list(&mut ws, &lists[0]);
+                                let _ = ws.send(Message::text(
+                                    serde_json::json!(["EOSE", sub, null]).to_string(),
+                                ));
+                                send_list(&mut ws, &lists[1]);
+                                let _ = ws.send(Message::text(
+                                    serde_json::json!(["EOSE", sub]).to_string(),
+                                ));
                             }
                             Inbox::Closed => {
                                 let _ = ws.send(Message::text(
@@ -1010,16 +1047,30 @@ mod tests {
     }
 
     #[test]
+    fn a_malformed_eose_between_two_lists_does_not_hide_the_newer_one() {
+        // Older list naming this relay, a bad EOSE, a newer list without it,
+        // the real EOSE: the newer list decides, and no EVENT frame goes out.
+        let (result, events) = run_with_inbox(Inbox::EoseMid);
+        assert!(matches!(result, Err(NotifyError::Refused(m)) if m == NOT_LISTED));
+        assert_eq!(events, 0);
+    }
+
+    #[test]
     fn lists_with_the_same_time_are_decided_by_the_lowest_id() {
-        for inbox in [Inbox::TieOwnFirst, Inbox::TieOtherFirst] {
+        let mut outcomes = Vec::new();
+        for (own_first, own_lower) in [(true, true), (false, true), (true, false), (false, false)] {
+            let inbox = Inbox::Tie {
+                own_first,
+                own_lower,
+            };
             let (_, events) = wraps(1);
             let (port, seen, handle) = fake_relay(Mode::Accept, inbox);
             let lists = inbox_events(inbox, port);
-            let own_wins = if matches!(inbox, Inbox::TieOwnFirst) {
-                lists[0].id < lists[1].id
-            } else {
-                lists[1].id < lists[0].id
-            };
+            let own = if own_first { &lists[0] } else { &lists[1] };
+            let other = if own_first { &lists[1] } else { &lists[0] };
+            assert_eq!(own.id < other.id, own_lower);
+            let own_wins = own_lower;
+            outcomes.push(own_wins);
             let result = publish(&RelayUrl::loopback_for_test(port), &rpk(), &events);
             handle.join().unwrap();
             if own_wins {
@@ -1030,6 +1081,8 @@ mod tests {
                 assert_eq!(event_frames(&seen).len(), 0);
             }
         }
+        // Both branches of the tie-break ran.
+        assert!(outcomes.contains(&true) && outcomes.contains(&false));
     }
 
     #[test]
@@ -1155,7 +1208,14 @@ mod tests {
         };
         let (recipient, _) = wraps(0);
         let sender = Keys::generate(&mut Seq(1)).unwrap();
-        for chain in [Chain::Mainnet, Chain::Testnet, Chain::Unknown] {
+        // Signet is allowed in general, but this node set is regtest only, so a
+        // signet finding is a chain the node did not report.
+        for chain in [
+            Chain::Mainnet,
+            Chain::Testnet,
+            Chain::Unknown,
+            Chain::Signet,
+        ] {
             let (port, seen, handle) = fake_relay(Mode::Accept, Inbox::Listed);
             // The node set is fine, but this one alert is on another chain: it is
             // never sent, the good one still is, and the summary counts it.
@@ -1184,6 +1244,10 @@ mod tests {
             assert!(!texts.iter().any(|t| t.contains("bad-chain")), "{chain:?}");
             assert!(
                 texts[1].contains("1 finding not sent because they are about a chain other than"),
+                "{chain:?}"
+            );
+            assert!(
+                texts[1].contains("or a chain the node did not report"),
                 "{chain:?}"
             );
         }

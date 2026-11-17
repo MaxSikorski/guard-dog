@@ -13,6 +13,13 @@
 //! or the running user and not be open to others unless it is sticky. On
 //! purpose, a state folder whose parents were made under umask 002 (mode
 //! 0775, group-writable) is refused: another group member could swap it.
+//!
+//! Extended access lists. On macOS the mode bits do not show an ACL entry such
+//! as `everyone allow search`, so the state folder and the key file are also
+//! listed with `/bin/ls -lde` and refused if either shows an ACL (a `+` after
+//! the permission bits, or an entry line). On Linux no such check is needed:
+//! POSIX ACL entries are bounded by the group-class mask shown in the mode
+//! bits, so the 0700 and 0600 checks already exclude extended grants.
 
 use crate::encoding::{hex_encode, hex32_secret};
 use crate::{Entropy, Keys, NotifyError};
@@ -79,6 +86,64 @@ fn check_state_dir(dir: &Path, euid: u32) -> Result<fs::Metadata, NotifyError> {
         ));
     }
     Ok(meta)
+}
+
+#[cfg(target_os = "macos")]
+const ACL_PRESENT: &str = "the state folder or the key file has an access control list";
+#[cfg(target_os = "macos")]
+const ACL_UNKNOWN: &str = "cannot check the state folder and key file for access control lists";
+
+/// Reads `ls -lde` output: `Some(true)` when any entry shows an ACL (a `+`
+/// right after the ten mode characters, or an entry line such as ` 0: ...`),
+/// `Some(false)` when entries were listed and none does, `None` when nothing
+/// was listed at all.
+#[cfg(any(target_os = "macos", test))]
+fn listing_shows_acl(listing: &str) -> Option<bool> {
+    let mut seen = 0usize;
+    for line in listing.lines() {
+        let trimmed = line.trim_start();
+        let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+        if line.starts_with(' ') && digits > 0 && trimmed.as_bytes().get(digits) == Some(&b':') {
+            return Some(true);
+        }
+        let mode = line.split_whitespace().next().unwrap_or("");
+        if mode.len() >= 10 && matches!(mode.as_bytes().first(), Some(b'-' | b'd' | b'l')) {
+            seen += 1;
+            if mode.as_bytes().get(10) == Some(&b'+') {
+                return Some(true);
+            }
+        }
+    }
+    if seen == 0 { None } else { Some(false) }
+}
+
+/// macOS only: refuses a state folder or key file that carries an ACL. Runs
+/// `/bin/ls -lde -- <paths>` by absolute path, with fixed flags and no shell;
+/// the paths are the operator's configured state folder, not outside text.
+#[cfg(target_os = "macos")]
+fn check_no_acl(paths: &[&Path]) -> Result<(), NotifyError> {
+    let out = std::process::Command::new("/bin/ls")
+        .args(["-lde", "--"])
+        .args(paths)
+        .env_clear()
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|_| refuse(ACL_UNKNOWN))?;
+    if !out.status.success() {
+        return Err(refuse(ACL_UNKNOWN));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    match listing_shows_acl(&text) {
+        Some(false) => Ok(()),
+        Some(true) => Err(refuse(ACL_PRESENT)),
+        None => Err(refuse(ACL_UNKNOWN)),
+    }
+}
+
+/// Linux and others: nothing to add (see the module doc).
+#[cfg(not(target_os = "macos"))]
+fn check_no_acl(_paths: &[&Path]) -> Result<(), NotifyError> {
+    Ok(())
 }
 
 const ABOVE_UNREADABLE: &str = "cannot look at a folder above the state folder";
@@ -312,12 +377,21 @@ fn load_or_create_as(
             "the state folder changed while it was being checked",
         ));
     }
-    remove_stale_temporaries(state_dir);
     let path = state_dir.join(KEY_FILE_NAME);
-    match fs::symlink_metadata(&path) {
-        Ok(_) => return read_existing(&path, euid, state_dir, dir_id),
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
+    let key_exists = match fs::symlink_metadata(&path) {
+        Ok(_) => true,
+        Err(e) if e.kind() == ErrorKind::NotFound => false,
         Err(_) => return Err(refuse("cannot look at the key file")),
+    };
+    // Before the key is read or written: no ACL on the folder or the key.
+    if key_exists {
+        check_no_acl(&[state_dir, &path])?;
+    } else {
+        check_no_acl(&[state_dir])?;
+    }
+    remove_stale_temporaries(state_dir);
+    if key_exists {
+        return read_existing(&path, euid, state_dir, dir_id);
     }
     let keys = Keys::generate(entropy)?;
     // 64 hex characters and a newline, in a buffer made 65 long up front, so
@@ -419,6 +493,8 @@ fn create_temporary(
     for _ in 0..4 {
         let path = dir.join(next_name()?);
         match write_new(&path, |file| {
+            // The new file is checked before the secret goes into it.
+            check_no_acl(&[dir, &path]).map_err(|_| std::io::Error::other("acl"))?;
             file.write_all(contents)?;
             file.sync_all()
         }) {
@@ -469,6 +545,70 @@ mod tests {
         fs::create_dir(&p).unwrap();
         fs::set_permissions(&p, fs::Permissions::from_mode(0o700)).unwrap();
         p
+    }
+
+    #[test]
+    fn an_ls_listing_with_an_acl_is_recognised() {
+        let plain = "drwx------  2 u  g  64 Nov 17 10:00 /x\n-rw-------  1 u  g  65 Nov 17 10:00 /x/notify.key\n";
+        assert_eq!(listing_shows_acl(plain), Some(false));
+        let plus = "drwx------+ 2 u  g  64 Nov 17 10:00 /x\n";
+        assert_eq!(listing_shows_acl(plus), Some(true));
+        let xattr = "drwx------@ 2 u  g  64 Nov 17 10:00 /x\n";
+        assert_eq!(listing_shows_acl(xattr), Some(false));
+        let entry = "drwx------  2 u  g  64 Nov 17 10:00 /x\n 0: group:everyone allow search\n";
+        assert_eq!(listing_shows_acl(entry), Some(true));
+        assert_eq!(listing_shows_acl(""), None);
+        assert_eq!(listing_shows_acl("ls: /x: No such file\n"), None);
+    }
+
+    /// Adds an ACL entry with `/bin/chmod +a`; false when that is not possible
+    /// here (no ACL support on the filesystem), so the test passes without it.
+    #[cfg(target_os = "macos")]
+    fn add_acl(path: &Path) -> bool {
+        std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone allow search", "--"])
+            .arg(path)
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_acl_on_the_state_folder_is_refused() {
+        let base = temp_dir("acl-dir");
+        if !add_acl(&base) {
+            fs::remove_dir_all(&base).unwrap();
+            return;
+        }
+        let err = load_or_create(&base, &mut crate::OsEntropy).unwrap_err();
+        assert!(
+            matches!(err, NotifyError::KeyFile(m) if m.contains("access control list")),
+            "{err}"
+        );
+        assert!(!base.join(KEY_FILE_NAME).exists());
+        let _ = std::process::Command::new("/bin/chmod")
+            .args(["-N", "--"])
+            .arg(&base)
+            .status();
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_acl_on_the_key_file_is_refused() {
+        let base = temp_dir("acl-key");
+        load_or_create(&base, &mut crate::OsEntropy).unwrap();
+        let key = base.join(KEY_FILE_NAME);
+        if !add_acl(&key) {
+            fs::remove_dir_all(&base).unwrap();
+            return;
+        }
+        let err = load_or_create(&base, &mut crate::OsEntropy).unwrap_err();
+        assert!(
+            matches!(err, NotifyError::KeyFile(m) if m.contains("access control list")),
+            "{err}"
+        );
+        fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
@@ -816,8 +956,9 @@ mod tests {
             matches!(err, NotifyError::KeyFile(m) if m.contains("too many symlinks")),
             "{err}"
         );
-        // Through the public entry point it is refused too (by us on Linux,
-        // by the kernel's own limit on macOS), and nothing is written.
+        // Through the public entry point it is refused too, and nothing is
+        // written. On Linux the kernel's own 40-link limit fails first, in the
+        // shape check (`symlink_metadata` on the whole path).
         assert!(load_or_create(&long, &mut crate::OsEntropy).is_err());
         assert_eq!(fs::read_dir(&state).unwrap().count(), 0);
         // A long chain under the limit is still followed (not 40: the temp

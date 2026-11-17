@@ -484,6 +484,24 @@ fn check(text: &str) -> Vec<Problem> {
         }
     }
 
+    // No two services share a fixed address.
+    let mut fixed_addresses: Vec<&str> = Vec::new();
+    let all_names = EXPECTED
+        .iter()
+        .map(|e| e.0)
+        .chain(TOOLS.iter().map(|t| t.0));
+    for name in all_names {
+        if let Some(a) = services[name]["networks"]["lab"]["ipv4_address"].as_str() {
+            if fixed_addresses.contains(&a) {
+                out.push(problem(
+                    "duplicate-address",
+                    format!("{name} shares its fixed lab address with another service"),
+                ));
+            }
+            fixed_addresses.push(a);
+        }
+    }
+
     // The network.
     let nets = &doc["networks"];
     let lab = &nets["lab"];
@@ -759,7 +777,9 @@ fn check_service(
                     && svc["networks"]["lab"]["ipv4_address"]
                         .as_str()
                         .is_some_and(|a| {
+                            // Digits only: `parse` alone would take "+5".
                             a.strip_prefix("172.29.208.")
+                                .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
                                 .and_then(|n| n.parse::<u8>().ok())
                                 .is_some_and(|n| (2..=254).contains(&n))
                         })
@@ -1078,7 +1098,7 @@ fn describe(problems: &[Problem]) -> String {
 
 /// Unsafe edits to the real file: (text to find, text to put there, the
 /// problem code that must catch it). An empty `from` appends `to` to the end.
-const MUTATIONS: [(&str, &str, &str); 69] = [
+const MUTATIONS: [(&str, &str, &str); 70] = [
     (
         "    user: \"101:101\"\n",
         "    user: \"101:101\"\n    platform: linux/386\n",
@@ -1309,6 +1329,11 @@ const MUTATIONS: [(&str, &str, &str); 69] = [
         "        ipv4_address: 172.29.208.10\n",
         "        ipv4_address: 10.0.0.10\n",
         "wrong-network",
+    ),
+    (
+        "        ipv4_address: 172.29.208.11\n",
+        "        ipv4_address: 172.29.208.10\n",
+        "duplicate-address",
     ),
     (
         "    cap_drop: [ALL]\n",
