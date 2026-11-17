@@ -23,6 +23,25 @@
 #               "affected"           the version is in range and every required condition is met
 #               "possibly-affected"  anything else; `question` says what would settle it
 # review = "max" marks a pair whose call was not clear-cut.
+#
+# [[setup.fact]]: the closed table of setup facts a matcher reads instead of
+# prose (format: fixtures/README.md). Each row has name, service, subject,
+# value and evidence.
+#
+# History:
+# - 2026-11-17 (setup facts, X1): lab-old-synthetic x the LND DNS bootstrap
+#   advisory stays not-affected / not-met, but for a stated reason: the
+#   advisory gained a required chain condition (main, testnet3, testnet4 or
+#   signet), and regtest has no DNS seeds, so it is not met. Before that, its
+#   only DNS condition, option_disabled nobootstrap, was met as written (the lab
+#   sets no --nobootstrap), so the oracle had no honest basis for not-affected.
+#   The same change makes the lab-regtest pair not-met too (its version was
+#   already out of range). The test refuses any pair whose condition differs
+#   from what its setup's facts say.
+# - 2026-11-17: lab-old-synthetic x CVE-2025-46598 and CVE-2026-117349 are
+#   marked review = "max" with a question; results unchanged. The node has no
+#   P2P peers at all, yet both advisories list the peer conditions as optional.
+#   The marked pairs are pinned in REVIEW_PAIRS in the test.
 
 format = 1
 
@@ -133,6 +152,31 @@ version = "0.18.4-beta"
 id = "nutshell"
 version = "0.17.0"
 
+[[setup.fact]]
+name = "p2p_inbound_or_outbound_peers"
+service = "bitcoin-core"
+value = "false"
+evidence = "description: SYNTHETIC setup built from the regtest lab's exact configuration, which has no P2P peers; like the lab, bitcoind runs with -listen=0, -dnsseed=0, -fixedseeds=0 and no addnode or connect"
+
+[[setup.fact]]
+name = "node_builds_block_templates"
+service = "bitcoin-core"
+value = "true"
+evidence = "description: SYNTHETIC setup, the lab's exact configuration, which mines its own blocks: lab/up.sh calls generatetoaddress, and lab/compose.yml sets no -blocksonly"
+
+[[setup.fact]]
+name = "option_disabled"
+service = "lnd"
+subject = "nobootstrap"
+value = "true"
+evidence = "description: SYNTHETIC setup, the lab's exact configuration; lab/compose.yml has no --nobootstrap on the lnd command line, so the option is not set"
+
+[[setup.fact]]
+name = "option_enabled"
+subject = "invoice HTLC interceptor (or any HtlcModifier RPC client)"
+value = "false"
+evidence = "description: SYNTHETIC setup built from the regtest lab's exact configuration, which has no tapd and no Lightning Terminal (the service tapd is not in this setup)"
+
 [[setup]]
 id = "lab-regtest"
 source = "lab"
@@ -195,6 +239,31 @@ product = "xz-utils"
 version = "none"
 evidence = "Alpine 3.18 image: no xz, no liblzma file, apk has neither xz nor xz-libs"
 
+[[setup.fact]]
+name = "p2p_inbound_or_outbound_peers"
+service = "bitcoin-core"
+value = "false"
+evidence = "lab/compose.yml: bitcoind runs with -listen=0, -dnsseed=0, -fixedseeds=0, no -connect or -addnode, and the lab network is internal with no published ports"
+
+[[setup.fact]]
+name = "node_builds_block_templates"
+service = "bitcoin-core"
+value = "true"
+evidence = "lab/up.sh mines blocks with generatetoaddress (three calls) and lab/compose.yml sets no -blocksonly"
+
+[[setup.fact]]
+name = "option_disabled"
+service = "lnd"
+subject = "nobootstrap"
+value = "true"
+evidence = "lab/compose.yml: the lnd command line has no --nobootstrap, so the option is not set"
+
+[[setup.fact]]
+name = "option_enabled"
+subject = "invoice HTLC interceptor (or any HtlcModifier RPC client)"
+value = "false"
+evidence = "lab/compose.yml: no tapd or Lightning Terminal service is defined (the service tapd is not in this setup)"
+
 # Expectations for lab-old-synthetic.
 
 [[expect]]
@@ -253,6 +322,8 @@ result = "affected"
 version = "in-range"
 condition = "met"
 reason = "Bitcoin Core 28.1 is below the fix 30.0 (range 0 to fixed 30.0); accepts_inbound_p2p is optional (required = false), so it does not clear the node."
+question = "This node has no P2P peers at all; should the advisory make inbound peers a required condition?"
+review = "max"
 
 [[expect]]
 setup = "lab-old-synthetic"
@@ -285,6 +356,8 @@ result = "affected"
 version = "in-range"
 condition = "met"
 reason = "Bitcoin Core 28.1 is below the fix 29.5 (range 0 to fixed 29.5); the inbound-peer and -blocksonly conditions are optional and only change how fast memory grows."
+question = "This node has no P2P peers at all; should the advisory make inbound peers a required condition?"
+review = "max"
 
 [[expect]]
 setup = "lab-old-synthetic"
@@ -366,7 +439,7 @@ advisory = "x_lightning-labs-2026-lnd-dns-bootstrap-type-assertion-panic"
 result = "not-affected"
 version = "in-range"
 condition = "not-met"
-reason = "LND 0.18.4-beta is below the fix 0.20.2-beta, but the required DNS bootstrapping never happens: regtest has no DNS seeds (nobootstrap is not set; it doesn't need to be)."
+reason = "LND 0.18.4-beta is below the fix 0.20.2-beta, but regtest has no DNS seeds, so the advisory's chain condition is not met."
 
 [[expect]]
 setup = "lab-old-synthetic"
@@ -553,7 +626,7 @@ advisory = "x_lightning-labs-2026-lnd-dns-bootstrap-type-assertion-panic"
 result = "not-affected"
 version = "out-of-range"
 condition = "not-met"
-reason = "LND 0.21.6-beta is in neither range 0 to fixed 0.20.2-beta nor 0.21.0-beta to fixed 0.21.1-beta; separately, the required DNS bootstrapping never happens because regtest has no DNS seeds (nobootstrap is not set)."
+reason = "LND 0.21.6-beta is in neither range 0 to fixed 0.20.2-beta nor 0.21.0-beta to fixed 0.21.1-beta, so the version is out of range; separately, regtest has no DNS seeds, so the advisory's chain condition is not met."
 
 [[expect]]
 setup = "lab-regtest"
