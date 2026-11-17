@@ -1,0 +1,6 @@
+manifestVersion: 1
+id: bitcoin
+name: Bitcoin Node
+version: "29.1"
+dependencies:
+  - tor

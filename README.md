@@ -80,12 +80,33 @@ If your money and identity live on your own infrastructure, you're your own secu
 
 "It seems to work" isn't good enough for something that watches your money, so I grade Guard Dog with **judges**. A judge is a test that checks Guard Dog from the outside against real-world truth: real setups, real advisories, real network traffic and hostile text. I write each judge before the feature it grades exists, record a baseline score, and run it in CI, so a score can't quietly go down.
 
-- **Judge A, recorded setups:** does it find every service and its version on a real setup? Coming next.
-- **Judge B, real advisories:** does it report every advisory that applies, and nothing that doesn't? So far there's a corpus of 23 advisories, checked against the OSV schema. The matching comes later.
-- **Judge C, egress:** does anything leave the box that shouldn't? The checker is in and passes 61 synthetic captures; running it on real captures from the lab comes next.
+- **Judge A, recorded setups:** does it find every service and its version on a real setup? The recorder and the judge are in; real recordings come next.
+- **Judge B, real advisories:** does it report every advisory that applies, and nothing that doesn't? So far there's a corpus of 23 advisories, checked against the OSV schema, and the expected answers for the lab's two setups. The matching comes later, so recall is 0 of 9 today.
+- **Judge C, egress:** does anything leave the box that shouldn't? The checker is in and passes 88 synthetic captures. It decodes gzip, deflate and brotli with hard limits and fails on any encoding it can't decode. Running it on real captures from the lab comes next.
 - **Judge D, injection:** can hostile text make it do or show something it shouldn't? 48 hostile payloads, and 48 of 48 pass both renderer checks (what Guard Dog shows on a terminal and in HTML). The checks that it takes no action and puts no untrusted text in a privileged prompt are counted but not yet applicable; they need code from later phases. A naive renderer fails 36 of them, so the judge has teeth.
 
 The details are in [tests/README.md](tests/README.md).
+
+## Watch it catch a leak
+
+**In a terminal, no setup:**
+
+```bash
+cargo run --locked --example watchdog
+```
+
+**In your browser, no install:** [`docs/demo/`](docs/demo/) is the same demo as a web page. It goes live on the site with the next release; until then, open `docs/demo/index.html` from a checkout served by any static file server.
+
+I plant attacks and you watch the real code catch each one:
+1. a fake changelog full of terminal escape codes and a right-to-left trick is shown safely;
+2. a relay description that tries to give an AI orders stays inert text;
+3. a Nostr secret key sent in an HTTP header is caught;
+4. the same key, base64-encoded inside a JSON body, is caught;
+5. a home IP address in a URL is caught.
+
+Everything is fake except the checks: the keys and addresses are generated test values, and there's no network. Add `--fast` to skip the pauses. If a check ever fails to catch its planted case, the demo says **MISSED** and exits with an error. I'd rather it tell on itself than look good.
+
+What's not in yet: a seed hidden in a gzip body and an xpub re-encoded as a zpub (both wait on the next Judge C change), and an affected version flagged (waits on the advisory matcher). The demo lists them as "not in yet", and they don't count in the score. The browser version is the same scenes compiled to WebAssembly (434 KB, no network); `docs/demo/build.sh` rebuilds it from source.
 
 ## For AI agents
 
@@ -101,6 +122,13 @@ Guard Dog is built to work well with AI agents, on both sides:
 ## Help build it
 
 I know I'm missing things. If you run your own node, relay or mint, you already know something Guard Dog needs to know. There's room for testers, people who know a service inside out, advisory curators, white-hat breakers, Rust and web developers, and writers. Start with [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Community
+
+- **[Discussions](https://github.com/MaxSikorski/guard-dog/discussions):** questions, ideas, your setup and node platform talk.
+- **[Issues](https://github.com/MaxSikorski/guard-dog/issues/new/choose):** bugs, false alarms, missed advisories and adding your project to the catalog.
+- **[Code of Conduct](CODE_OF_CONDUCT.md)** for everyone taking part, and **[how the project is run](GOVERNANCE.md)**.
+- **[Getting help](SUPPORT.md)** and **[reporting a vulnerability privately](SECURITY.md)**.
 
 ## Support
 

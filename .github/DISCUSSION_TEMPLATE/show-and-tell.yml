@@ -1,0 +1,42 @@
+title: "My setup: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Show us your setup and how Guard Dog sees it: what it found, what it missed, what surprised you. Real setups are how Guard Dog learns what to look for.
+
+        **Describe, don't expose.** Name the platform, the services and their versions. Leave out IP addresses, onion addresses, hostnames, node aliases and public keys, xpubs, npubs you'd rather keep private, and anything that ties the setup to you. Screenshots get the same treatment.
+  - type: checkboxes
+    id: redacted
+    attributes:
+      label: Before you post
+      options:
+        - label: I removed addresses, hostnames, keys and anything else that identifies my setup.
+          required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - umbrelOS
+        - StartOS
+        - RaspiBlitz
+        - myNode
+        - nix-bitcoin
+        - Plain Docker or Docker Compose
+        - Plain Linux
+        - A mix
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: What you run
+      description: Hardware, services and versions, for example "Pi 5, Bitcoin Core 28, LND 0.18, BTCPay, a strfry relay behind Tor".
+    validations:
+      required: true
+  - type: textarea
+    id: guard-dog
+    attributes:
+      label: What Guard Dog found, missed or got wrong
+      description: Optional until there's a release. Anything it got wrong about an advisory deserves its own issue too.

@@ -1,0 +1,8 @@
+# What the lab's scanner image build (lab/scanner/Dockerfile) can see: an
+# allowlist. Only the two Cargo files and the crates are copied in, so nothing
+# else (lab/.data, .claude, .git, fixtures, local notes) can reach the image.
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+**/target

@@ -1,5 +1,7 @@
 use std::fmt;
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
 /// A value that came from outside Guard Dog: a changelog, an issue, a relay's
 /// NIP-11 document, a container label, a service banner, a Nostr note,
 /// advisory text, a file name on the node.
@@ -8,14 +10,21 @@ use std::fmt;
 /// terminal, or HTML aimed at the status page. So this type has no `Display`,
 /// no `Deref`, no `AsRef`, no `Borrow`, no `==`, no conversion back and no
 /// public field: the compiler refuses to print it, compare it or hand it on as
-/// plain text. The only ways out:
+/// plain text. The only ways out (four, all greppable):
 ///
 /// - [`escape_for_terminal`](Untrusted::escape_for_terminal), to show it in a terminal;
 /// - [`escape_for_html`](Untrusted::escape_for_html), to show it in a web page;
 /// - [`expose_untrusted`](Untrusted::expose_untrusted), which hands back the raw
 ///   value. Each call is a place where outside text meets code, so each one
 ///   needs a reviewer's OK in the pull request. Search for `expose_untrusted`
-///   to find them all.
+///   to find them all;
+/// - the `Serialize` impl below, which writes it as `{"untrusted": "<raw>"}`
+///   for the store and JSON output. That is the raw text, unescaped, in a
+///   wrapper that marks it; a new caller of `serde_json::to_*` on facts outside
+///   `gd-store` and the JSON output needs a reviewer's OK too.
+///
+/// JSON meant for people or pages must go through [`crate::to_ascii_json`]: plain
+/// `serde_json` leaves C1 controls, bidi overrides and `</script>` raw.
 ///
 /// `Debug` never shows the content, so a struct holding untrusted text can
 /// still derive `Debug` without leaking that text into logs. `Clone` runs the
@@ -40,6 +49,11 @@ impl<T> Untrusted<T> {
 }
 
 impl<T: AsRef<str>> Untrusted<T> {
+    /// How many bytes the text has. A size check that never shows the text.
+    pub fn byte_len(&self) -> usize {
+        self.0.as_ref().len()
+    }
+
     /// The text in a form that is safe to print in a UTF-8 terminal.
     ///
     /// These are written out visibly, as `\n`, `\r`, `\t` or `\u{..}`:
@@ -89,6 +103,52 @@ impl<T: AsRef<str>> Untrusted<T> {
     /// right-to-left text can't reorder the page's own text around it.
     pub fn escape_for_html(&self) -> String {
         escape(self.0.as_ref(), Context::Html)
+    }
+}
+
+/// How untrusted text appears in JSON: always `{"untrusted": "<raw>"}`, never a
+/// bare string, so every JSON reader (the store, `--json`, a web API) can see
+/// it is untrusted. This is the second way out of the type after
+/// [`Untrusted::expose_untrusted`]: a new caller of `serde_json::to_*` on facts
+/// outside `gd-store` and the JSON output needs a reviewer's OK.
+#[derive(Serialize)]
+struct WireRef<'a, T> {
+    untrusted: &'a T,
+}
+
+impl<T: Serialize> Serialize for Untrusted<T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        WireRef { untrusted: &self.0 }.serialize(serializer)
+    }
+}
+
+/// Reads only a map with exactly one key, `untrusted` (not a list, not a bare value).
+struct WireVisitor<T>(std::marker::PhantomData<T>);
+
+impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for WireVisitor<T> {
+    type Value = Untrusted<T>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an object {\"untrusted\": ...}")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut found = None;
+        while let Some(key) = map.next_key::<String>()? {
+            if key != "untrusted" || found.is_some() {
+                return Err(serde::de::Error::custom("unexpected key"));
+            }
+            found = Some(map.next_value::<T>()?);
+        }
+        found
+            .map(Untrusted)
+            .ok_or_else(|| serde::de::Error::missing_field("untrusted"))
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Untrusted<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(WireVisitor(std::marker::PhantomData))
     }
 }
 

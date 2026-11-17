@@ -9,6 +9,10 @@
 #   all data lives in memory (tmpfs) and vanishes with the container
 # - every container: read-only root, all capabilities dropped, no-new-privileges,
 #   a non-root user, and memory, swap, CPU and process limits (under 4 GiB in total)
+# - the REST ports of LND (8080) and Core Lightning's clnrest (3010) are open on the
+#   lab network only, never published
+# - two tools run only on request, each under its own compose profile, so
+#   lab/up.sh never starts them: `probe` (curl) and `scanner` (Guard Dog itself)
 # - no password is written here: ${GD_LAB_*} values come from lab/.data/lab.env,
 #   generated fresh by lab/up.sh on every start
 name: gd-lab
@@ -98,7 +102,7 @@ services:
       - --alias=gd-lab-lnd
       - --listen=0.0.0.0:9735
       - --rpclisten=127.0.0.1:10009
-      - --norest
+      - --restlisten=0.0.0.0:8080
       - --tlsextradomain=lnd
     healthcheck:
       test: ["CMD", "lncli", "--lnddir=/data", "--network=regtest", "getinfo"]
@@ -145,7 +149,9 @@ services:
       - --bitcoin-rpcport=18443
       - --bitcoin-rpcuser=gdlab
       - --bitcoin-rpcpassword=${GD_LAB_RPC_PASSWORD:?run lab/up.sh, not docker compose}
-      - --disable-plugin=clnrest
+      - --clnrest-host=0.0.0.0
+      - --clnrest-port=3010
+      - --clnrest-protocol=https
       - --disable-plugin=wss-proxy
     healthcheck:
       test: ["CMD", "lightning-cli", "--lightning-dir=/data", "--network=regtest", "getinfo"]
@@ -250,6 +256,56 @@ services:
     memswap_limit: 256m
     cpus: 0.5
     pids_limit: 128
+
+  # The probe: curl, run by lab/up.sh to talk to the services over the lab
+  # network. Image: curlimages/curl 8.23.0 (curl project, official; released
+  # 2026-10-28), curl licence (MIT-like). Credentials never go on its command
+  # line: up.sh pipes headers in on stdin (`curl -H @-`). Started only through
+  # its profile.
+  probe:
+    image: curlimages/curl@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93
+    labels:
+      org.guard-dog.lab.service: probe
+    profiles: [probe]
+    user: "100:101"
+    entrypoint: ["curl"]
+    networks: [lab]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    restart: "no"
+    mem_limit: 64m
+    memswap_limit: 64m
+    cpus: 0.5
+    pids_limit: 64
+
+  # The scanner: Guard Dog itself, built once from lab/scanner/Dockerfile (no
+  # shell in the image). Lab only; never started by lab/up.sh. Its only writable
+  # places are a 1 MiB in-memory /state and a 1 MiB in-memory /tmp.
+  scanner:
+    build:
+      context: ..
+      dockerfile: lab/scanner/Dockerfile
+    image: gd-lab-scanner:local
+    pull_policy: build
+    labels:
+      org.guard-dog.lab.service: scanner
+    profiles: [scan]
+    user: "65532:65532"
+    tmpfs:
+      - /state:uid=65532,gid=65532,mode=0700,size=1m
+      - /tmp:uid=65532,gid=65532,mode=0700,size=1m
+    networks: [lab]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    restart: "no"
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 1.0
+    pids_limit: 64
 
 networks:
   lab:

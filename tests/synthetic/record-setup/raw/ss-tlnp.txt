@@ -1,0 +1,10 @@
+State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+LISTEN 0      128          0.0.0.0:8333       0.0.0.0:*     users:(("bitcoind",pid=612,fd=7))
+LISTEN 0      4096       127.0.0.1:10009      0.0.0.0:*     users:(("lnd",pid=701,fd=9))
+LISTEN 0      4096            [::]:9735          [::]:*     users:(("lnd",pid=701,fd=12))
+LISTEN 0      4096           [::1]:8080          [::]:*     users:(("rtl",pid=811,fd=3))
+LISTEN 0      4096 192.168.150.150:50002      0.0.0.0:*
+LISTEN 0      4096 45.151.151.151:9735       0.0.0.0:*
+LISTEN 0      4096 [2a01:0db8:ca11:ab1e:0000:0000:0000:0001]:9735 [::]:*
+LISTEN 0      4096 [fe80::ca11:ab1e:c0ff:ee01%eth0]:9735 [::]:*
+LISTEN 0      4096 [fd12:3456:789a::1]:9735 [::]:*
