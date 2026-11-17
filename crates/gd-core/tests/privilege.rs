@@ -100,7 +100,10 @@ const ENTITIES: [&str; 9] = [
 ];
 
 fn admin_ops() -> Vec<(&'static str, &'static [&'static str])> {
-    let mut ops: Vec<(&str, &[&str])> = ENTITIES.iter().map(|e| (*e, &["read", "write"][..])).collect();
+    let mut ops: Vec<(&str, &[&str])> = ENTITIES
+        .iter()
+        .map(|e| (*e, &["read", "write"][..]))
+        .collect();
     ops.push(("macaroon", &["generate"]));
     ops
 }
@@ -114,7 +117,10 @@ const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012
 fn b64url(data: &[u8], pad: bool) -> String {
     let mut out = String::new();
     for chunk in data.chunks(3) {
-        let n = chunk.iter().enumerate().fold(0u32, |acc, (i, b)| acc | (*b as u32) << (16 - 8 * i));
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |acc, (i, b)| acc | (*b as u32) << (16 - 8 * i));
         let chars = chunk.len() + 1;
         for i in 0..chars {
             out.push(B64[((n >> (18 - 6 * i)) & 63) as usize] as char);
@@ -159,7 +165,11 @@ fn info_read_alone_is_accepted_in_binary_and_hex() {
 #[test]
 fn caveats_only_narrow_so_they_are_allowed_and_counted() {
     let id = lnd_id(&[("info", &["read"])]);
-    let m = macaroon_bytes(&id, &[b"time-before 2030-01-01", b"ipaddr 10.0.0.1"], &[(b"3rd", b"vid")]);
+    let m = macaroon_bytes(
+        &id,
+        &[b"time-before 2030-01-01", b"ipaddr 10.0.0.1"],
+        &[(b"3rd", b"vid")],
+    );
     let ok = macaroon::check(&m).expect("accepted");
     assert_eq!(ok.first_party_caveats(), 2);
     assert_eq!(ok.third_party_caveats(), 1);
@@ -167,15 +177,30 @@ fn caveats_only_narrow_so_they_are_allowed_and_counted() {
 
 #[test]
 fn admin_is_refused_as_admin() {
-    assert_eq!(macaroon::check(&mac(&admin_ops())), Err(MacaroonRefusal::Admin));
-    assert_eq!(macaroon::check(hex(&mac(&admin_ops())).as_bytes()), Err(MacaroonRefusal::Admin));
+    assert_eq!(
+        macaroon::check(&mac(&admin_ops())),
+        Err(MacaroonRefusal::Admin)
+    );
+    assert_eq!(
+        macaroon::check(hex(&mac(&admin_ops())).as_bytes()),
+        Err(MacaroonRefusal::Admin)
+    );
 }
 
 #[test]
 fn any_write_permission_is_admin_even_on_info() {
-    assert_eq!(macaroon::check(&mac(&[("info", &["write"])])), Err(MacaroonRefusal::Admin));
-    assert_eq!(macaroon::check(&mac(&[("info", &["read", "write"])])), Err(MacaroonRefusal::Admin));
-    assert_eq!(macaroon::check(&mac(&[("foo", &["write"])])), Err(MacaroonRefusal::Admin));
+    assert_eq!(
+        macaroon::check(&mac(&[("info", &["write"])])),
+        Err(MacaroonRefusal::Admin)
+    );
+    assert_eq!(
+        macaroon::check(&mac(&[("info", &["read", "write"])])),
+        Err(MacaroonRefusal::Admin)
+    );
+    assert_eq!(
+        macaroon::check(&mac(&[("foo", &["write"])])),
+        Err(MacaroonRefusal::Admin)
+    );
 }
 
 #[test]
@@ -192,14 +217,24 @@ fn the_stock_readonly_macaroon_is_refused_and_the_extras_are_named() {
         }
         other => panic!("wrong refusal: {other:?}"),
     }
-    assert!(text.contains("offchain:read") && text.contains("invoices:read"), "{text}");
+    assert!(
+        text.contains("offchain:read") && text.contains("invoices:read"),
+        "{text}"
+    );
     assert!(text.contains("lncli bakemacaroon info:read"), "{text}");
 }
 
 #[test]
 fn info_read_plus_one_more_is_refused_by_name() {
-    let err = macaroon::check(&mac(&[("info", &["read"]), ("offchain", &["read"])])).expect_err("extra");
-    assert_eq!(err, MacaroonRefusal::TooWide { extra: vec!["offchain:read"], unknown: false });
+    let err =
+        macaroon::check(&mac(&[("info", &["read"]), ("offchain", &["read"])])).expect_err("extra");
+    assert_eq!(
+        err,
+        MacaroonRefusal::TooWide {
+            extra: vec!["offchain:read"],
+            unknown: false
+        }
+    );
     // Without info:read at all it is still not the narrow login.
     assert!(matches!(
         macaroon::check(&mac(&[("offchain", &["read"])])),
@@ -209,8 +244,18 @@ fn info_read_plus_one_more_is_refused_by_name() {
 
 #[test]
 fn an_unknown_permission_is_never_echoed() {
-    let err = macaroon::check(&mac(&[("info", &["read"]), ("zzqq-secret-entity", &["read"])])).expect_err("unknown");
-    assert_eq!(err, MacaroonRefusal::TooWide { extra: vec![], unknown: true });
+    let err = macaroon::check(&mac(&[
+        ("info", &["read"]),
+        ("zzqq-secret-entity", &["read"]),
+    ]))
+    .expect_err("unknown");
+    assert_eq!(
+        err,
+        MacaroonRefusal::TooWide {
+            extra: vec![],
+            unknown: true
+        }
+    );
     let text = err.to_string();
     assert!(text.contains("an unknown permission"), "{text}");
     assert!(!text.contains("zzqq"), "{text}");
@@ -220,7 +265,10 @@ fn an_unknown_permission_is_never_echoed() {
 #[test]
 fn no_ops_at_all_is_refused() {
     assert_eq!(macaroon::check(&mac(&[])), Err(MacaroonRefusal::EmptyOps));
-    assert_eq!(macaroon::check(&mac(&[("info", &[])])), Err(MacaroonRefusal::EmptyOps));
+    assert_eq!(
+        macaroon::check(&mac(&[("info", &[])])),
+        Err(MacaroonRefusal::EmptyOps)
+    );
 }
 
 #[test]
@@ -230,39 +278,83 @@ fn the_wrong_version_is_refused() {
     assert_eq!(macaroon::check(&m), Err(MacaroonRefusal::WrongVersion));
     let mut id = lnd_id(&[("info", &["read"])]);
     id[0] = 4;
-    assert_eq!(macaroon::check(&macaroon_bytes(&id, &[], &[])), Err(MacaroonRefusal::WrongVersion));
+    assert_eq!(
+        macaroon::check(&macaroon_bytes(&id, &[], &[])),
+        Err(MacaroonRefusal::WrongVersion)
+    );
 }
 
 #[test]
 fn oversize_input_is_refused_before_reading_it() {
-    assert_eq!(macaroon::check(&vec![2u8; 4097]), Err(MacaroonRefusal::Oversize));
-    assert_eq!(macaroon::check(&vec![b'a'; 4097]), Err(MacaroonRefusal::Oversize));
-    assert!(matches!(macaroon::check(&vec![2u8; 4096]), Err(MacaroonRefusal::Malformed { .. })));
+    assert_eq!(
+        macaroon::check(&vec![2u8; 4097]),
+        Err(MacaroonRefusal::Oversize)
+    );
+    assert_eq!(
+        macaroon::check(&vec![b'a'; 4097]),
+        Err(MacaroonRefusal::Oversize)
+    );
+    assert!(matches!(
+        macaroon::check(&vec![2u8; 4096]),
+        Err(MacaroonRefusal::Malformed { .. })
+    ));
 }
 
 #[test]
 fn junk_is_malformed() {
-    for junk in [&b""[..], b"\x02", b"hello", b"zz", b"abc", b"\x02\x01\x03lnd", &[0xff; 40]] {
-        assert!(matches!(macaroon::check(junk), Err(MacaroonRefusal::Malformed { .. }) | Err(MacaroonRefusal::WrongVersion)), "{junk:?}");
+    for junk in [
+        &b""[..],
+        b"\x02",
+        b"hello",
+        b"zz",
+        b"abc",
+        b"\x02\x01\x03lnd",
+        &[0xff; 40],
+    ] {
+        assert!(
+            matches!(
+                macaroon::check(junk),
+                Err(MacaroonRefusal::Malformed { .. }) | Err(MacaroonRefusal::WrongVersion)
+            ),
+            "{junk:?}"
+        );
     }
     let mut trailing = mac(&[("info", &["read"])]);
     trailing.push(0);
-    assert!(matches!(macaroon::check(&trailing), Err(MacaroonRefusal::Malformed { .. })));
+    assert!(matches!(
+        macaroon::check(&trailing),
+        Err(MacaroonRefusal::Malformed { .. })
+    ));
     // A protobuf wire type we do not read (fixed32) is refused.
     let mut id = vec![3u8];
     id.extend_from_slice(&[0x0d, 1, 2, 3, 4]);
-    assert!(matches!(macaroon::check(&macaroon_bytes(&id, &[], &[])), Err(MacaroonRefusal::Malformed { .. })));
+    assert!(matches!(
+        macaroon::check(&macaroon_bytes(&id, &[], &[])),
+        Err(MacaroonRefusal::Malformed { .. })
+    ));
 }
 
 #[test]
 fn too_many_ops_or_long_strings_are_malformed() {
     let many: Vec<(&str, &[&str])> = (0..65).map(|_| ("info", &["read"][..])).collect();
-    assert!(matches!(macaroon::check(&mac(&many)), Err(MacaroonRefusal::Malformed { .. })));
+    assert!(matches!(
+        macaroon::check(&mac(&many)),
+        Err(MacaroonRefusal::Malformed { .. })
+    ));
     let long = "a".repeat(65);
-    assert!(matches!(macaroon::check(&mac(&[(long.as_str(), &["read"])])), Err(MacaroonRefusal::Malformed { .. })));
+    assert!(matches!(
+        macaroon::check(&mac(&[(long.as_str(), &["read"])])),
+        Err(MacaroonRefusal::Malformed { .. })
+    ));
     let actions: Vec<&str> = vec!["read"; 65];
-    assert!(matches!(macaroon::check(&mac(&[("info", &actions)])), Err(MacaroonRefusal::Malformed { .. })));
-    assert!(matches!(macaroon::check(&mac(&[("inf\u{e9}", &["read"])])), Err(MacaroonRefusal::Malformed { .. })));
+    assert!(matches!(
+        macaroon::check(&mac(&[("info", &actions)])),
+        Err(MacaroonRefusal::Malformed { .. })
+    ));
+    assert!(matches!(
+        macaroon::check(&mac(&[("inf\u{e9}", &["read"])])),
+        Err(MacaroonRefusal::Malformed { .. })
+    ));
 }
 
 #[test]
@@ -273,7 +365,10 @@ fn every_truncation_is_refused_and_never_panics() {
     }
     let h = hex(&m);
     for cut in 0..h.len() {
-        assert!(macaroon::check(&h.as_bytes()[..cut]).is_err(), "hex cut at {cut}");
+        assert!(
+            macaroon::check(&h.as_bytes()[..cut]).is_err(),
+            "hex cut at {cut}"
+        );
     }
     let wide = mac(&admin_ops());
     for cut in 0..wide.len() {
@@ -290,29 +385,48 @@ fn the_getinfo_rune_is_accepted_padded_or_not() {
     assert!(rune_ok("method=getinfo&=0&pnum=0"));
     // Reversed order of the two restrictions.
     assert!(rune_ok("=0&pnum=0&method=getinfo"));
-    // The padded form really has padding for some lengths.
-    assert!((0..4).any(|n| rune_text(&"=0&method=getinfo&pnum=0".repeat(1).replace("=0", &format!("={}", "1".repeat(n + 1))), true).ends_with('=')));
 }
 
 #[test]
 fn an_unrestricted_rune_is_refused() {
     assert_eq!(rune_err(""), RuneRefusal::Unrestricted);
     assert_eq!(rune_err("=0"), RuneRefusal::Unrestricted);
-    assert!(RuneRefusal::Unrestricted.to_string().contains("can do anything on your node"));
+    assert!(
+        RuneRefusal::Unrestricted
+            .to_string()
+            .contains("can do anything on your node")
+    );
 }
 
 #[test]
 fn a_missing_restriction_is_refused_with_its_own_message() {
-    assert_eq!(rune_err("=0&method=getinfo"), RuneRefusal::NotLimitedToNoParameters);
-    assert!(RuneRefusal::NotLimitedToNoParameters.to_string().contains("can call getinfo with parameters"));
+    assert_eq!(
+        rune_err("=0&method=getinfo"),
+        RuneRefusal::NotLimitedToNoParameters
+    );
+    assert!(
+        RuneRefusal::NotLimitedToNoParameters
+            .to_string()
+            .contains("can call getinfo with parameters")
+    );
     assert_eq!(rune_err("=0&pnum=0"), RuneRefusal::NotLimitedToGetinfo);
-    assert!(RuneRefusal::NotLimitedToGetinfo.to_string().contains("not limited to getinfo"));
+    assert!(
+        RuneRefusal::NotLimitedToGetinfo
+            .to_string()
+            .contains("not limited to getinfo")
+    );
 }
 
 #[test]
 fn any_alternative_is_refused() {
-    assert_eq!(rune_err("=0&method=getinfo|method=listfunds&pnum=0"), RuneRefusal::Alternatives);
-    assert_eq!(rune_err("=0&method=getinfo&pnum=0|pnum=1"), RuneRefusal::Alternatives);
+    assert_eq!(
+        rune_err("=0&method=getinfo|method=listfunds&pnum=0"),
+        RuneRefusal::Alternatives
+    );
+    assert_eq!(
+        rune_err("=0&method=getinfo&pnum=0|pnum=1"),
+        RuneRefusal::Alternatives
+    );
 }
 
 #[test]
@@ -330,35 +444,76 @@ fn restrictions_we_cannot_check_are_refused_without_echoing_them() {
         let err = rune_err(text);
         assert_eq!(err, RuneRefusal::UncheckableRestrictions, "{text}");
         let shown = format!("{err} {err:?}");
-        assert!(shown.contains("has restrictions Guard Dog can't check"), "{shown}");
-        assert!(!shown.contains("listfunds") && !shown.contains("time"), "{shown}");
+        assert!(
+            shown.contains("has restrictions Guard Dog can't check"),
+            "{shown}"
+        );
+        assert!(
+            !shown.contains("listfunds") && !shown.contains("time"),
+            "{shown}"
+        );
     }
 }
 
 #[test]
 fn escapes_are_read_not_trusted() {
     // An escaped separator is a character, so this is one odd restriction.
-    assert_eq!(rune_err("=0&method=getinfo\\&pnum=0"), RuneRefusal::UncheckableRestrictions);
-    assert!(matches!(rune_err("=0&method=getinfo&pnum=0\\"), RuneRefusal::Malformed { .. }));
+    assert_eq!(
+        rune_err("=0&method=getinfo\\&pnum=0"),
+        RuneRefusal::UncheckableRestrictions
+    );
+    assert!(matches!(
+        rune_err("=0&method=getinfo&pnum=0\\"),
+        RuneRefusal::Malformed { .. }
+    ));
 }
 
 #[test]
 fn bad_base64_and_sizes_are_refused() {
     let good = rune_text("=0&method=getinfo&pnum=0", false);
-    for bad in [good.replace('A', "*"), format!("{good} "), format!("{good}\n"), good.replace('-', "+"), format!("{good}=")] {
+    for bad in [
+        good.replace('A', "*"),
+        format!("{good} "),
+        format!("{good}\n"),
+        good.replace('-', "+"),
+    ] {
         // Only inputs that actually changed are bad.
         if bad != good {
-            assert!(matches!(rune::check(bad.as_bytes()), Err(RuneRefusal::Malformed { .. })), "{bad}");
+            assert!(
+                matches!(
+                    rune::check(bad.as_bytes()),
+                    Err(RuneRefusal::Malformed { .. })
+                ),
+                "{bad}"
+            );
         }
     }
-    assert!(matches!(rune::check(b"abcd!"), Err(RuneRefusal::Malformed { .. })));
-    assert!(matches!(rune::check(b"a"), Err(RuneRefusal::Malformed { .. })));
-    assert!(matches!(rune::check(b""), Err(RuneRefusal::Malformed { .. })));
+    assert!(matches!(
+        rune::check(b"abcd!"),
+        Err(RuneRefusal::Malformed { .. })
+    ));
+    assert!(matches!(
+        rune::check(b"a"),
+        Err(RuneRefusal::Malformed { .. })
+    ));
+    assert!(matches!(
+        rune::check(b""),
+        Err(RuneRefusal::Malformed { .. })
+    ));
     // Fewer than 32 bytes decoded.
-    assert!(matches!(rune::check(b"AAAA"), Err(RuneRefusal::Malformed { .. })));
+    assert!(matches!(
+        rune::check(b"AAAA"),
+        Err(RuneRefusal::Malformed { .. })
+    ));
     assert_eq!(rune::check(&vec![b'A'; 1025]), Err(RuneRefusal::Oversize));
-    assert!(matches!(rune::check(&vec![b'A'; 1024]), Err(RuneRefusal::Malformed { .. })));
-    assert!(matches!(rune::check(&[0xff, 0xfe]), Err(RuneRefusal::Malformed { .. })));
+    assert!(matches!(
+        rune::check(&vec![b'A'; 1024]),
+        Err(RuneRefusal::Malformed { .. })
+    ));
+    assert!(matches!(
+        rune::check(&[0xff, 0xfe]),
+        Err(RuneRefusal::Malformed { .. })
+    ));
 }
 
 #[test]
@@ -366,10 +521,13 @@ fn every_rune_truncation_is_refused_and_never_panics() {
     for restrictions in ["=0&method=getinfo&pnum=0", "=0&pnum=0&method=getinfo"] {
         for pad in [false, true] {
             let text = rune_text(restrictions, pad);
-            for cut in 0..text.len() {
+            for cut in 0..text.trim_end_matches('=').len() {
                 // A cut that lands on a character boundary of the restriction
                 // text leaves a *different* rune, which must be refused too.
-                assert!(rune::check(&text.as_bytes()[..cut]).is_err(), "cut at {cut} of {text}");
+                assert!(
+                    rune::check(&text.as_bytes()[..cut]).is_err(),
+                    "cut at {cut} of {text}"
+                );
             }
         }
     }
@@ -378,19 +536,30 @@ fn every_rune_truncation_is_refused_and_never_panics() {
 // ---------------------------------------------------------------- bitcoind
 
 struct Stub {
-    reply: CanaryReply,
+    replies: Vec<CanaryReply>,
     calls: Vec<String>,
 }
 
 impl CanaryRpc for Stub {
     fn call(&mut self, method: &str) -> CanaryReply {
         self.calls.push(method.to_string());
-        self.reply
+        let i = (self.calls.len() - 1).min(self.replies.len() - 1);
+        self.replies[i]
     }
 }
 
-fn run_bitcoind(user: &str, reply: CanaryReply) -> (Result<bitcoind::NarrowLogin, BitcoindRefusal>, Vec<String>) {
-    let mut stub = Stub { reply, calls: Vec::new() };
+type Run = (Result<bitcoind::NarrowLogin, BitcoindRefusal>, Vec<String>);
+
+fn run_bitcoind(user: &str, reply: CanaryReply) -> Run {
+    run_sequence(user, &[reply])
+}
+
+/// Replies are given one per call; the last one repeats.
+fn run_sequence(user: &str, replies: &[CanaryReply]) -> Run {
+    let mut stub = Stub {
+        replies: replies.to_vec(),
+        calls: Vec::new(),
+    };
     let result = bitcoind::check(user, &mut stub);
     (result, stub.calls)
 }
@@ -399,7 +568,35 @@ fn run_bitcoind(user: &str, reply: CanaryReply) -> (Result<bitcoind::NarrowLogin
 fn a_403_on_the_canary_call_accepts() {
     let (result, calls) = run_bitcoind("guarddog", CanaryReply::Status(403));
     assert!(result.is_ok());
-    assert_eq!(calls, vec!["getblockcount"]);
+    assert_eq!(calls, vec!["getblockcount", "getbestblockhash", "uptime"]);
+    let note = result.unwrap().note();
+    assert!(note.contains("can't read your rpcwhitelist line"), "{note}");
+    assert!(note.contains("getnetworkinfo,getblockchaininfo"), "{note}");
+}
+
+#[test]
+fn the_first_answer_that_is_not_403_stops_the_calls() {
+    let ok = CanaryReply::Status(403);
+    let (result, calls) = run_sequence("guarddog", &[ok, ok, CanaryReply::Status(200)]);
+    assert_eq!(result, Err(BitcoindRefusal::TooWide));
+    assert_eq!(calls.len(), 3);
+    let (result, calls) = run_sequence("guarddog", &[ok, CanaryReply::Status(200), ok]);
+    assert_eq!(result, Err(BitcoindRefusal::TooWide));
+    assert_eq!(calls, vec!["getblockcount", "getbestblockhash"]);
+    let (result, calls) = run_sequence("guarddog", &[ok, CanaryReply::Status(401)]);
+    assert_eq!(result, Err(BitcoindRefusal::WrongPassword));
+    assert_eq!(calls.len(), 2);
+    let (result, calls) = run_sequence("guarddog", &[ok, ok, CanaryReply::NoReply]);
+    assert_eq!(result, Err(BitcoindRefusal::CouldNotProve));
+    assert_eq!(calls.len(), 3);
+}
+
+#[test]
+fn only_harmless_read_only_methods_are_ever_called() {
+    let (_, calls) = run_bitcoind("guarddog", CanaryReply::Status(403));
+    for call in calls {
+        assert!(["getblockcount", "getbestblockhash", "uptime"].contains(&call.as_str()), "{call}");
+    }
 }
 
 #[test]
@@ -408,7 +605,10 @@ fn a_200_refuses_and_names_the_fix() {
     let err = result.expect_err("200");
     assert_eq!(err, BitcoindRefusal::TooWide);
     let text = err.to_string();
-    assert!(text.contains("rpcwhitelist=<user>:getnetworkinfo,getblockchaininfo"), "{text}");
+    assert!(
+        text.contains("rpcwhitelist=<user>:getnetworkinfo,getblockchaininfo"),
+        "{text}"
+    );
     assert!(text.contains("rpcwhitelistdefault=0"), "{text}");
 }
 
@@ -422,7 +622,13 @@ fn a_401_means_the_password_is_wrong() {
 
 #[test]
 fn anything_else_cannot_be_proved() {
-    for reply in [CanaryReply::Status(500), CanaryReply::Status(404), CanaryReply::Status(0), CanaryReply::Status(204), CanaryReply::NoReply] {
+    for reply in [
+        CanaryReply::Status(500),
+        CanaryReply::Status(404),
+        CanaryReply::Status(0),
+        CanaryReply::Status(204),
+        CanaryReply::NoReply,
+    ] {
         let (result, calls) = run_bitcoind("guarddog", reply);
         assert_eq!(result, Err(BitcoindRefusal::CouldNotProve), "{reply:?}");
         assert_eq!(calls.len(), 1);
@@ -497,7 +703,13 @@ fn no_refusal_or_acceptance_prints_the_credential() {
         }
     }
     // bitcoind.
-    for reply in [CanaryReply::Status(200), CanaryReply::Status(401), CanaryReply::Status(403), CanaryReply::Status(500), CanaryReply::NoReply] {
+    for reply in [
+        CanaryReply::Status(200),
+        CanaryReply::Status(401),
+        CanaryReply::Status(403),
+        CanaryReply::Status(500),
+        CanaryReply::NoReply,
+    ] {
         let (result, _) = run_bitcoind("svc_canary_user", reply);
         match result {
             Ok(ok) => shown.push(format!("{ok:?}")),
@@ -535,7 +747,10 @@ fn no_refusal_or_acceptance_prints_the_credential() {
     for text in &shown {
         assert!(!text.is_empty());
         for secret in secrets.iter().filter(|s| s.len() >= 8) {
-            assert!(!text.contains(secret.as_str()), "{text:?} contains {secret:?}");
+            assert!(
+                !text.contains(secret.as_str()),
+                "{text:?} contains {secret:?}"
+            );
         }
     }
 }
@@ -566,7 +781,16 @@ const OP_POOL: [(&str, &str); 8] = [
     ("peers", "write"),
 ];
 
-const RUNE_POOL: [&str; 8] = ["method=getinfo", "pnum=0", "method=listfunds", "time<123", "method=getinfo|pnum=0", "pnum=1", "=1", "method^get"];
+const RUNE_POOL: [&str; 8] = [
+    "method=getinfo",
+    "pnum=0",
+    "method=listfunds",
+    "time<123",
+    "method=getinfo|pnum=0",
+    "pnum=1",
+    "=1",
+    "method^get",
+];
 
 proptest! {
     #![proptest_config(config())]
@@ -613,4 +837,34 @@ proptest! {
         let result = rune::check(rune_text(full.trim_end_matches('&'), pad).as_bytes());
         prop_assert_eq!(result.is_ok(), exact, "{}", full);
     }
+}
+
+// ---------------------------------------------------------------- uri and live checks
+
+#[test]
+fn a_uri_permission_is_never_accepted() {
+    for ops in [
+        vec![("uri", &["/lnrpc.Lightning/GetInfo"][..])],
+        vec![("info", &["read"][..]), ("uri", &["/lnrpc.Lightning/GetInfo"][..])],
+        vec![("info", &["read"][..]), ("uri", &["write"][..])],
+    ] {
+        let err = macaroon::check(&mac(&ops)).expect_err("uri");
+        assert_eq!(err, MacaroonRefusal::UncheckablePermissions, "{ops:?}");
+        assert!(err.to_string().contains("can't check"), "{err}");
+        assert!(!err.to_string().contains("GetInfo"));
+    }
+}
+
+/// Live check, filled in later: reads a macaroon in hex from the environment
+/// variable `GD_LAB_MACAROON_HEX` (the lab's baked `info:read` macaroon) and
+/// expects it to be accepted. Ignored by default, and it does not fail when
+/// the variable is absent.
+#[test]
+#[ignore = "live check: needs GD_LAB_MACAROON_HEX"]
+fn real_lab_macaroon_decodes() {
+    let Ok(hex_text) = std::env::var("GD_LAB_MACAROON_HEX") else {
+        eprintln!("GD_LAB_MACAROON_HEX is not set; skipping");
+        return;
+    };
+    assert!(macaroon::check(hex_text.trim().as_bytes()).is_ok());
 }

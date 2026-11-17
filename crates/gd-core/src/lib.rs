@@ -5,6 +5,7 @@
 //! printed, shown or passed on without an escape function or an explicit,
 //! greppable [`Untrusted::expose_untrusted`].
 
+pub mod privilege;
 mod untrusted;
 
 pub use untrusted::Untrusted;
