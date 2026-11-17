@@ -1115,10 +1115,13 @@ fn no_refusal_or_acceptance_prints_the_credential() {
     }
     for text in &shown {
         assert!(!text.is_empty());
-        for secret in secrets.iter().filter(|s| s.len() >= 8) {
+        for (index, secret) in secrets.iter().enumerate().filter(|(_, s)| s.len() >= 8) {
+            // Failure messages name the canary by index only, so a failing
+            // test never prints a credential-shaped value (CodeQL
+            // rust/cleartext-logging).
             assert!(
                 !text.contains(secret.as_str()),
-                "{text:?} contains {secret:?}"
+                "a shown message contains canary #{index}"
             );
         }
     }
@@ -1156,11 +1159,11 @@ fn no_refusal_or_acceptance_prints_the_credential() {
         .filter(|w| !contains(vocabulary.as_bytes(), w))
         .collect();
     assert!(needles.len() > 500);
-    for text in &shown {
-        for needle in &needles {
+    for (shown_index, text) in shown.iter().enumerate() {
+        for (needle_index, needle) in needles.iter().enumerate() {
             assert!(
                 !contains(text.as_bytes(), needle),
-                "{text:?} contains a window of a credential: {needle:?}"
+                "shown message #{shown_index} contains credential window #{needle_index}"
             );
         }
     }
