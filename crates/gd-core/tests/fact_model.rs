@@ -75,7 +75,8 @@ fn fact(subject: Subject, claim: Claim) -> Fact {
         source(SensorId::Fixture),
         Timestamp(1_700_000_000),
         vec![],
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 fn container(name: &str) -> RunsAs {
@@ -158,7 +159,8 @@ fn hostile_fact(text: &str) -> Fact {
             ),
             Evidence::new(CallId::parse("version").unwrap(), text),
         ],
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 fn hostile_other_claims(text: &str) -> Vec<Claim> {
@@ -858,7 +860,8 @@ fn too_much_evidence_is_dropped_and_oversized_evidence_is_refused_on_load() {
         source(SensorId::BitcoindRpc),
         Timestamp(0),
         five,
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(f.evidence().len(), MAX_EVIDENCE);
 
     let big = format!(
@@ -1090,7 +1093,8 @@ fn facts_from_fixture(setup: &Table) -> Vec<Fact> {
             },
             Timestamp(1),
             vec![],
-        ).unwrap()
+        )
+        .unwrap()
     };
     let node = Subject::Service(instance(NODE));
     let mut facts = vec![
@@ -1318,7 +1322,8 @@ fn every_lab_manifest_kind_is_a_fact_and_comes_back_equal() {
             },
             Timestamp(1),
             vec![],
-        ).unwrap()
+        )
+        .unwrap()
     };
     let mut facts = vec![
         mk(
@@ -1950,8 +1955,6 @@ fn a_conflict_is_reported_over_not_checked() {
 
 #[test]
 fn repeated_candidates_collapse_to_one() {
-    let many =
-        |n: usize| -> Vec<CatalogId> { (0..n).map(|i| cat(&format!("product-{i}"))).collect() };
     // Repeats collapse; the same id forty times is one candidate.
     let repeated = unrecognized_on(vec![cat("lnd"); 40]);
     let back: Fact = serde_json::from_str(&json(&repeated)).unwrap();
@@ -2010,12 +2013,18 @@ fn a_conflict_is_never_overruled_by_a_seen_value_in_either_order() {
     let lnd = instance("lnd");
     let conflict = || lnd_state_fact(unknown(UnknownReason::Conflict));
     for (seen, name) in [
-        (ServiceState::not_found(Coverage::Complete, witness()), "NotFound"),
+        (
+            ServiceState::not_found(Coverage::Complete, witness()),
+            "NotFound",
+        ),
         (Observed::Seen(ServiceState::Running), "Running"),
     ] {
         for facts in orders(lnd_state_fact(seen.clone()), conflict()) {
             let v = setup_view(&facts);
-            assert!(is_unknown(&v.state(&lnd), UnknownReason::Conflict), "{name}");
+            assert!(
+                is_unknown(&v.state(&lnd), UnknownReason::Conflict),
+                "{name}"
+            );
         }
     }
     // Package presence: Absent against Conflict.
@@ -2032,7 +2041,10 @@ fn a_conflict_is_never_overruled_by_a_seen_value_in_either_order() {
     }
     // Package version: Present with a version against Present with a Conflict.
     for facts in orders(
-        pkg_fact(Observed::Seen(Presence::Present), Observed::Seen(version("5.4"))),
+        pkg_fact(
+            Observed::Seen(Presence::Present),
+            Observed::Seen(version("5.4")),
+        ),
         pkg_fact(
             Observed::Seen(Presence::Present),
             unknown(UnknownReason::Conflict),
@@ -2066,10 +2078,13 @@ fn a_conflict_is_never_overruled_by_a_seen_value_in_either_order() {
     }
     let chain = |c| fact(Subject::Setup, Claim::Chain(c));
     for facts in orders(
-        chain(Observed::Seen(Chain::Mainnet)),
+        chain(Observed::Seen(Chain::Main)),
         chain(unknown(UnknownReason::Conflict)),
     ) {
-        assert!(is_unknown(&setup_view(&facts).chain, UnknownReason::Conflict));
+        assert!(is_unknown(
+            &setup_view(&facts).chain,
+            UnknownReason::Conflict
+        ));
     }
 }
 
@@ -2164,9 +2179,8 @@ fn products_known_only_from_candidates_are_listed() {
 
 #[test]
 fn a_fact_that_can_be_built_can_be_read_back_and_a_long_candidate_list_is_refused() {
-    let many = |n: usize| -> Vec<CatalogId> {
-        (0..n).map(|i| cat(&format!("product-{i}"))).collect()
-    };
+    let many =
+        |n: usize| -> Vec<CatalogId> { (0..n).map(|i| cat(&format!("product-{i}"))).collect() };
     let build = |c: Vec<CatalogId>| {
         Fact::new(
             Subject::Host,
@@ -2190,9 +2204,8 @@ fn a_fact_that_can_be_built_can_be_read_back_and_a_long_candidate_list_is_refuse
     let mut doc: Json = serde_json::from_str(&json(&same)).unwrap();
     doc["claim"]["Unrecognized"]["candidates"] = serde_json::json!(vec!["lnd"; 33]);
     assert!(serde_json::from_value::<Fact>(doc.clone()).is_ok());
-    doc["claim"]["Unrecognized"]["candidates"] = serde_json::json!(
-        (0..33).map(|i| format!("product-{i}")).collect::<Vec<_>>()
-    );
+    doc["claim"]["Unrecognized"]["candidates"] =
+        serde_json::json!((0..33).map(|i| format!("product-{i}")).collect::<Vec<_>>());
     assert!(serde_json::from_value::<Fact>(doc).is_err());
 }
 

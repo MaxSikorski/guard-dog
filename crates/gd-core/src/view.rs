@@ -51,17 +51,26 @@ fn not_checked<T>() -> Observed<T> {
 
 impl SetupView {
     /// True when some unrecognised endpoint lists `product` as what it might
-    /// be. A product can be `Running` through one fact and still have a second,
-    /// unidentified instance, so a matcher asks this too before saying
-    /// "not affected".
+    /// be. A product can be `Running`, `Stopped` or even absent through one fact
+    /// and still have another, unidentified instance, so a matcher asks this
+    /// before ANY "not affected", whatever the state says. A `Stopped` instance
+    /// stays `Stopped` here.
     pub fn may_be_unidentified(&self, product: &CatalogId) -> bool {
         self.unidentified.contains(product)
     }
 
+    /// Products that only some unrecognised endpoint's candidates mention, or
+    /// that a fact mentions too: every product that `may_be_unidentified`, in
+    /// order. `services()` and `states()` do not list a product known only from
+    /// candidates, so a matcher walking them must walk this as well.
+    pub fn unidentified(&self) -> impl Iterator<Item = &CatalogId> {
+        self.unidentified.iter()
+    }
+
     /// The answer for something no fact mentioned: `Unidentified` if an
     /// unrecognised endpoint might be it, else `NotChecked`.
-    fn missing<T>(&self, product: &CatalogId) -> Observed<T> {
-        if self.may_be_unidentified(product) {
+    fn missing<T>(&self, may_be: bool) -> Observed<T> {
+        if may_be {
             Observed::Unknown(Unknown::new(UnknownReason::Unidentified))
         } else {
             not_checked()
@@ -72,7 +81,7 @@ impl SetupView {
     pub fn service(&self, instance: &InstanceRef) -> Observed<PlainVersion> {
         match self.services.get(instance) {
             Some(found) => found.clone(),
-            None => self.missing(&instance.catalog),
+            None => self.missing(self.may_be_unidentified(&instance.catalog)),
         }
     }
 
@@ -81,15 +90,20 @@ impl SetupView {
     pub fn state(&self, instance: &InstanceRef) -> Observed<ServiceState> {
         match self.states.get(instance) {
             Some(found) => found.clone(),
-            None => self.missing(&instance.catalog),
+            None => self.missing(self.may_be_unidentified(&instance.catalog)),
         }
     }
 
     /// A package inside a service: absent, or installed.
     pub fn package(&self, inside: &InstanceRef, product: &CatalogId) -> Observed<PackageState> {
+        let guarded =
+            self.may_be_unidentified(product) || self.may_be_unidentified(&inside.catalog);
         match self.packages.get(&(inside.clone(), product.clone())) {
+            Some(Observed::Seen(PackageState::NotInstalled)) if guarded => {
+                Observed::Unknown(Unknown::new(UnknownReason::Unidentified))
+            }
             Some(found) => found.clone(),
-            None => self.missing(product),
+            None => self.missing(guarded),
         }
     }
 
@@ -104,12 +118,14 @@ impl SetupView {
         self.settings.iter()
     }
 
-    /// Every service some fact mentioned, in order.
+    /// Every service some fact mentioned, in order. Does not list products
+    /// known only from candidates: see [`SetupView::unidentified`].
     pub fn services(&self) -> impl Iterator<Item = (&InstanceRef, &Observed<PlainVersion>)> {
         self.services.iter()
     }
 
-    /// Every service whose state some fact mentioned, in order.
+    /// Every service whose state some fact mentioned, in order. Does not list
+    /// products known only from candidates: see [`SetupView::unidentified`].
     pub fn states(&self) -> impl Iterator<Item = (&InstanceRef, &Observed<ServiceState>)> {
         self.states.iter()
     }
@@ -241,7 +257,12 @@ pub fn setup_view(facts: &[Fact]) -> SetupView {
         states: states
             .into_iter()
             .map(|(instance, found)| {
-                let folded = fold(&found, |a, b| a == b);
+                let mut folded = fold(&found, |a, b| a == b);
+                if matches!(folded, Observed::Seen(ServiceState::NotFound(_)))
+                    && has_unidentified(&found)
+                {
+                    folded = unidentified_unknown();
+                }
                 (
                     instance.clone(),
                     unless_candidate(folded, unidentified.contains(&instance.catalog)),
@@ -264,11 +285,28 @@ pub fn setup_view(facts: &[Fact]) -> SetupView {
             .into_iter()
             .map(|(key, found)| {
                 let folded = fold_package(&found);
-                let maybe = unidentified.contains(&key.1);
-                (key, unless_candidate_package(folded, maybe))
+                (key, folded)
             })
             .collect(),
     }
+}
+
+fn unidentified_unknown<T>() -> Observed<T> {
+    Observed::Unknown(Unknown::new(UnknownReason::Unidentified))
+}
+
+/// True if some input says "something answered that might be this": an
+/// absence must not win against it.
+fn has_unidentified<T>(items: &[Observed<T>]) -> bool {
+    items.iter().any(|item| {
+        matches!(
+            item,
+            Observed::Unknown(Unknown {
+                reason: UnknownReason::Unidentified,
+                ..
+            })
+        )
+    })
 }
 
 /// Something unrecognised might be this product, so its absence can't be
@@ -276,19 +314,6 @@ pub fn setup_view(facts: &[Fact]) -> SetupView {
 fn unless_candidate(state: Observed<ServiceState>, maybe_it: bool) -> Observed<ServiceState> {
     match state {
         Observed::Seen(ServiceState::NotFound(_)) if maybe_it => {
-            Observed::Unknown(Unknown::new(UnknownReason::Unidentified))
-        }
-        other => other,
-    }
-}
-
-/// The same for a package: not-installed becomes `Unknown(Unidentified)`.
-fn unless_candidate_package(
-    state: Observed<PackageState>,
-    maybe_it: bool,
-) -> Observed<PackageState> {
-    match state {
-        Observed::Seen(PackageState::NotInstalled) if maybe_it => {
             Observed::Unknown(Unknown::new(UnknownReason::Unidentified))
         }
         other => other,
@@ -339,6 +364,10 @@ fn fold<T: Clone>(items: &[Observed<T>], agree: impl Fn(&T, &T) -> bool) -> Obse
             Observed::Seen(value) => seen.push(value),
             Observed::Unknown(unknown) => unknowns.push(unknown.reason),
         }
+    }
+    // A sensor that saw contradictory evidence is never overruled by another's value.
+    if unknowns.contains(&UnknownReason::Conflict) {
+        return no_value(&unknowns);
     }
     match seen.split_first() {
         Some((first, rest)) => {
@@ -431,10 +460,18 @@ fn fold_package(found: &[(Observed<Presence>, Observed<PlainVersion>)]) -> Obser
     match fold(&presences, |a, b| a == b) {
         Observed::Unknown(unknown) => Observed::Unknown(Unknown::new(unknown.reason)),
         Observed::Seen(Presence::Absent(_)) => {
-            if found
-                .iter()
-                .any(|(_, version)| matches!(version, Observed::Seen(_)))
-            {
+            if has_unidentified(&presences) {
+                unidentified_unknown()
+            } else if found.iter().any(|(_, version)| {
+                matches!(
+                    version,
+                    Observed::Seen(_)
+                        | Observed::Unknown(Unknown {
+                            reason: UnknownReason::Conflict,
+                            ..
+                        })
+                )
+            }) {
                 Observed::Unknown(Unknown::new(UnknownReason::Conflict))
             } else {
                 Observed::Seen(PackageState::NotInstalled)

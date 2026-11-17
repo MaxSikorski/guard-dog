@@ -72,7 +72,13 @@ Phase 1.1 PR 1 (`crates/gd-core/src/fact.rs`, `view.rs`). Property tests use the
 | `a_running_product_can_still_have_an_unidentified_second_instance` | same | A product that is Running stays Running, and `may_be_unidentified` still says an unrecognised endpoint might be another instance of it. |
 | `no_service_fact_plus_an_unidentified_endpoint_is_unknown_not_absent`, `without_an_unidentified_endpoint_nothing_is_flagged` | same | With no service fact, an endpoint naming the product makes its state and package `Unknown(Unidentified)`; with none, it stays `NotChecked` and `may_be_unidentified` is false. |
 | `a_conflict_is_reported_over_not_checked` | same | A conflict and a gap fold to `Unknown(Conflict)` in either order. |
-| `candidates_are_deduplicated_and_a_long_list_is_refused_on_load` | same | Repeated candidate ids collapse; 32 load and 33 are refused. |
+| `repeated_candidates_collapse_to_one`, `a_fact_that_can_be_built_can_be_read_back_and_a_long_candidate_list_is_refused` | same | Repeated candidate ids collapse (before the cap check); 32 build and load back, 33 distinct are refused by `Fact::new` and on load. |
+| `a_conflict_is_never_overruled_by_a_seen_value_in_either_order` | same | NotFound, Running, Absent, a package version, a setting and the chain each fold to `Unknown(Conflict)` against a Conflict, in both orders. |
+| `an_absence_never_beats_an_unidentified_unknown_but_presence_does` | same | Absent, NotFound plus `Unknown(Unidentified)` give `Unidentified`; Present keeps its presence. |
+| `package_absence_is_also_guarded_by_the_containing_service` | same | An unidentified endpoint that might be the containing service turns a package's not-installed (or missing) answer into `Unknown(Unidentified)`. |
+| `a_stopped_instance_stays_stopped_and_the_product_is_still_flagged` | same | Stopped stays Stopped while `may_be_unidentified` is true. |
+| `products_known_only_from_candidates_are_listed` | same | `unidentified()` lists candidate products, sorted and without repeats; `services()` does not. |
+| `claim_source_and_run_shapes_refuse_unknown_keys` | same | An extra key in a claim, a run description, a source or a subject is refused on load. |
 | `wire_structs_refuse_unknown_keys` | same | An extra key in a fact, an Unknown, evidence or a complete search is refused on load. |
 | `settings_are_read_from_facts_and_gaps_are_unknown` | same | Setting facts reach the view; disagreement is a conflict, a gap is Unknown, a never-asked key is `Unknown(NotChecked)`. |
 | `versions_cannot_look_like_options_or_paths` | same | A version must start with a letter or digit (also after `!`): `.`, `..`, `-x`, `0!-x` are refused. |

@@ -314,6 +314,7 @@ pub enum UnknownReason {
 /// What a service, host or setup is, and how sure the sensor was.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[non_exhaustive]
+#[serde(deny_unknown_fields)]
 pub enum Claim {
     Host {
         os: OutsideText,
@@ -598,6 +599,7 @@ pub enum BlindSpotKind {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum RunsAs {
     Container {
         name: OutsideText,
@@ -652,6 +654,7 @@ pub enum SensorId {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum Backend {
     Live,
     Recorded { setup: SetupId },
@@ -660,6 +663,7 @@ pub enum Backend {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Source {
     pub sensor: SensorId,
     pub backend: Backend,
@@ -674,6 +678,7 @@ pub enum Subject {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InstanceRef {
     pub catalog: CatalogId,
     pub instance: InstanceName,
@@ -729,7 +734,8 @@ impl Evidence {
 }
 
 /// One thing a sensor saw. Build it with [`Fact::new`], which keeps at most
-/// [`MAX_EVIDENCE`] pieces of evidence.
+/// [`MAX_EVIDENCE`] pieces of evidence, dedupes candidates, and refuses more than
+/// [`MAX_CANDIDATES`] of them, so a fact that can be built can be read back.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(try_from = "FactWire")]
 pub struct Fact {
@@ -753,20 +759,13 @@ struct FactWire {
 impl TryFrom<FactWire> for Fact {
     type Error = FactError;
     fn try_from(wire: FactWire) -> Result<Self, FactError> {
-        if let Claim::Unrecognized { candidates, .. } = &wire.claim
-            && candidates.len() > MAX_CANDIDATES
-        {
-            return Err(FactError {
-                what: "candidates list (over 32 products)",
-            });
-        }
-        Ok(Fact::new(
+        Fact::new(
             wire.subject,
             wire.claim,
             wire.source,
             wire.observed_at,
             wire.evidence,
-        ))
+        )
     }
 }
 
@@ -777,19 +776,24 @@ impl Fact {
         source: Source,
         observed_at: Timestamp,
         mut evidence: Vec<Evidence>,
-    ) -> Self {
+    ) -> Result<Self, FactError> {
         evidence.truncate(MAX_EVIDENCE);
         if let Claim::Unrecognized { candidates, .. } = &mut claim {
             candidates.sort();
             candidates.dedup();
+            if candidates.len() > MAX_CANDIDATES {
+                return Err(FactError {
+                    what: "candidates list (over 32 products)",
+                });
+            }
         }
-        Self {
+        Ok(Self {
             subject,
             claim,
             source,
             observed_at,
             evidence,
-        }
+        })
     }
 
     pub fn evidence(&self) -> &[Evidence] {
