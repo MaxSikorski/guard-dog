@@ -2,7 +2,8 @@
 # Start Guard Dog's regtest lab from cold, mine 101 blocks, fund LND and Core
 # Lightning, open one channel between them, prove the least-privileged logins
 # work (and are refused for anything else), and write lab/.data/manifest.toml
-# with each service's version as the service itself reports it.
+# with each service's version as the service itself reports it, plus the
+# containers' arch, block storage and exposure as docker inspect shows them.
 #
 # Regtest only. One lab at a time (lab/.lock, shared with lab/down.sh).
 # Remove everything with lab/down.sh. If anything goes wrong before all three
@@ -211,6 +212,73 @@ for pair in "bitcoind:$BTC_VER" "lnd:$LND_VER" "cln:$CLN_VER" "strfry:$STRFRY_VE
 done
 step "versions match the pinned images"
 
+# Facts about the containers themselves, read-only from `docker inspect` of the
+# running containers: CPU width, where data lives, and whether anything is
+# published on the host. Each lands in a global (no subshell, so fail works).
+LAB_ARCH="" LAB_STORAGE="" LAB_EXPOSURE=""
+# How many of these say the container is reachable from outside: all ports
+# published (-P), any host port binding (configured or live), host networking,
+# or a shared network namespace with another container.
+EXPOSED_JQ='[.[0]
+  | (.HostConfig.PublishAllPorts == true),
+    ((.HostConfig.PortBindings // {}) | to_entries[] | select((.value // []) | length > 0) | true),
+    ((.NetworkSettings.Ports // {}) | to_entries[] | select((.value // []) | length > 0) | true),
+    ((.HostConfig.NetworkMode // "") | (. == "host" or startswith("container:")))
+  ] | map(select(.)) | length'
+# tmpfs needs a read-only root, at least one tmpfs (as a configured tmpfs or as
+# a mount of type tmpfs) and no other kind of mount.
+STORAGE_JQ='.[0] | if (.HostConfig.ReadonlyRootfs == true)
+  and (((.HostConfig.Tmpfs // {}) | length > 0) or any((.Mounts // [])[]; .Type == "tmpfs"))
+  and all((.Mounts // [])[]; .Type == "tmpfs") then "tmpfs" else "disk" end'
+# The image's architecture (input: `docker image inspect`) against the
+# architecture of the manifest the container's image was actually pulled as
+# (--arg c: that one architecture word, read from the container's `docker
+# inspect` through stdin; the inspect JSON holds the lab's generated passwords
+# in the container environment, so it never goes into a command's arguments;
+# the descriptor exists from Docker 28.1 / API 1.48 with the containerd image
+# store, and c is empty without it). If both
+# are there and differ, the answer is "mixed", never the host's guess; on an
+# older Docker the container has no descriptor and the image value is used.
+# shellcheck disable=SC2016
+ARCH_JQ='.[0].Architecture as $a
+  | (if $c == "" then $a else $c end) as $b
+  | if $a == $b then $a else "mixed" end'
+inspect_lab() {
+  local cids cid img a kind seen_arch="" storage=tmpfs exposure=none want c ci imgj st n carch
+  cids="$(dc ps -aq)" || fail "could not list the lab's containers"
+  want="$(dc config --services | grep -c .)" || fail "could not list the compose services"
+  c="$(printf '%s\n' "$cids" | grep -c .)" || c=0
+  [ "$c" -eq "$want" ] && [ "$want" -gt 0 ] || fail "expected $want lab containers, found $c"
+  while IFS= read -r cid; do
+    [[ $cid =~ ^[0-9a-f]{12,64}$ ]] || fail "unexpected container id"
+    # Each docker answer is captured first: a failed inspection fails the run
+    # and is never read as "disk" or "mixed".
+    ci="$(docker inspect "$cid")" || fail "docker inspect failed"
+    img="$(printf '%s' "$ci" | jq -er '.[0].Image')" || fail "docker inspect gave no image"
+    imgj="$(docker image inspect "$img")" || fail "docker image inspect failed"
+    carch="$(printf '%s' "$ci" | jq -r '.[0].ImageManifestDescriptor.platform.architecture // empty')" || fail "docker inspect gave no platform"
+    [ -z "$carch" ] || carch="$(plain "$carch")"
+    a="$(printf '%s' "$imgj" | jq -er --arg c "$carch" "$ARCH_JQ")" || fail "docker image inspect gave no architecture"
+    a="$(plain "$a")"
+    case $a in
+      amd64 | arm64 | ppc64le | s390x | riscv64 | loong64 | mips64 | mips64le) kind=64-bit ;;
+      386 | arm | mips | mipsle) kind=32-bit ;;
+      mixed) kind=mixed ;;
+      *) fail "unknown image architecture" ;;
+    esac
+    if [ -z "$seen_arch" ]; then seen_arch=$kind; elif [ "$seen_arch" != "$kind" ]; then seen_arch=mixed; fi
+    [ "$kind" != mixed ] || seen_arch=mixed
+    st="$(printf '%s' "$ci" | jq -er "$STORAGE_JQ")" || fail "docker inspect gave no storage facts"
+    [ "$st" = tmpfs ] || storage=disk
+    n="$(printf '%s' "$ci" | jq -er "$EXPOSED_JQ")" || fail "docker inspect gave no network facts"
+    [ "$n" = 0 ] || exposure=published
+    ci="" imgj=""
+  done <<< "$cids"
+  LAB_ARCH=$seen_arch LAB_STORAGE=$storage LAB_EXPOSURE=$exposure
+}
+inspect_lab
+step "containers: $LAB_ARCH, storage $LAB_STORAGE, exposure $LAB_EXPOSURE"
+
 # 10. The manifest, in Judge A's format (design 0.4, section 2.2): the live lab's truth.
 # Sorted by id, no timestamps, no node ids, no secrets. Step 3 of design 0.4 copies
 # this into fixtures/setups/ and fills in recorded, reviewed_by and evidence there.
@@ -226,6 +294,7 @@ entry() { # compose-service reported-text how-it-was-read version
   printf '# never from an image tag.\n'
   printf 'format = 1\nplatform = "docker"\nsource = "lab"\nrecorder = "lab/up.sh format 1"\n'
   printf 'chain = "%s"\n' "$BTC_CHAIN"
+  printf 'arch = "%s"\nblock_storage = "%s"\nexposure = "%s"\n' "$LAB_ARCH" "$LAB_STORAGE" "$LAB_EXPOSURE"
   printf 'description = "Guard Dog regtest lab (lab/compose.yml): bitcoind, LND, Core Lightning, strfry and a Nutshell mint."\n'
   entry bitcoind "$BTC_RAW" "bitcoin-cli getnetworkinfo .subversion" "$BTC_VER"
   entry cln "$CLN_RAW" "lightning-cli getinfo .version" "$CLN_VER"

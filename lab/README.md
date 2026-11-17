@@ -20,7 +20,7 @@ You need Docker with Compose v2, `jq` and `openssl`. Run one lab at a time; `up.
    - LND: a macaroon baked with only `info:read`
    - Core Lightning: a rune limited to `getinfo`
 6. Reads each service's version from the service itself and checks it against the version its pinned image is labelled with.
-7. Writes `lab/.data/manifest.toml` in Judge A's format: the services and versions that are really there.
+7. Writes `lab/.data/manifest.toml` in Judge A's format: the services and versions that are really there, plus the containers' arch, block storage and exposure, read-only from `docker inspect`.
 8. Prints a summary. If the whole start takes over 5 minutes, that counts as a failure (exit 4). If a step fails before all three chain checks pass, or you press Ctrl-C before all three chain checks pass, the lab removes itself. A later failure leaves the lab running so you can look; `lab/down.sh` cleans up. `lab/up.sh` and `lab/down.sh` share a lock (`lab/.lock`, which names the process holding it), so two can never run at once. A lock is never taken over automatically, even one left by a crash: once you have checked that no lab script is running, `lab/down.sh --unlock` removes it. Both scripts share `lab/lib.sh` for the lock and the teardown.
 
 ## The services

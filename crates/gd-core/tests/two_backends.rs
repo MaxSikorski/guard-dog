@@ -21,9 +21,10 @@
 //! Each back end says which fact families it records. A judge reads some
 //! families; one that a back end doesn't record is listed as "not compared",
 //! and that list is pinned (`LAB_NOT_COMPARED`), so a gap is never silent.
-//! Today the lab manifest records chain, platform, source and service
-//! versions; Judge B also reads arch, block storage, exposure and packages,
-//! which only the fixture has.
+//! Today the lab manifest records chain, platform, source, arch, block
+//! storage, exposure and service versions (`lab/up.sh` reads the last three
+//! kinds from `docker inspect` of the running containers); Judge B also reads
+//! the packages inside the images, which only the fixture has.
 //!
 //! The manifest carries text the services reported, so it is read strictly:
 //! at most 16 KiB, exact keys, the exact format line, ids from `[a-z0-9-]`,
@@ -59,9 +60,12 @@ const LIVE_FILE: &str = "lab/.data/manifest.toml";
 const COMPOSE_FILE: &str = "lab/compose.yml";
 const UP_SH: &str = "lab/up.sh";
 
-const MANIFEST_KEYS: [&str; 7] = [
+const MANIFEST_KEYS: [&str; 10] = [
+    "arch",
+    "block_storage",
     "chain",
     "description",
+    "exposure",
     "format",
     "platform",
     "recorder",
@@ -95,7 +99,24 @@ const FIXTURE_RECORDS: &[&str] = &[
     "service",
     "source",
 ];
-const MANIFEST_RECORDS: &[&str] = &["chain", "platform", "service", "source"];
+const MANIFEST_RECORDS: &[&str] = &[
+    "arch",
+    "block_storage",
+    "chain",
+    "exposure",
+    "platform",
+    "service",
+    "source",
+];
+/// The one-word facts a manifest records, each `[a-z0-9-]`.
+const MANIFEST_WORDS: [&str; 6] = [
+    "arch",
+    "block_storage",
+    "chain",
+    "exposure",
+    "platform",
+    "source",
+];
 
 /// One judge: its name and the fact families it reads. Judge B's matcher
 /// reads the products and versions, the packages inside them, the chain, and
@@ -144,20 +165,71 @@ fn read(rel: &str) -> String {
     fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
 }
 
+/// Open for reading without following a symlink and without waiting on a FIFO.
+fn open_no_follow(path: &Path) -> std::io::Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::File::open(path)
+    }
+}
+
+/// Which file a `Metadata` is: (device, inode) on Unix.
+fn identity(m: &fs::Metadata) -> (u64, u64) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        (m.dev(), m.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = m;
+        (0, 0)
+    }
+}
+
 /// Read at most `MAX_MANIFEST_BYTES` + 1 bytes, so an oversized file is never
 /// loaded whole. `NotFound` is `Ok(None)`; every other error, and a symlink,
-/// is an error (never a skip).
+/// folder, FIFO or other odd file, is an error (never a skip).
+///
+/// The path is looked at first (`symlink_metadata`, so a FIFO is refused
+/// before an open that would wait for a writer, and a symlink is refused),
+/// then opened with `O_NOFOLLOW | O_NONBLOCK` (a FIFO or symlink swapped in
+/// after the look neither blocks nor is followed), then the opened file must
+/// be the very file that was looked at: same device and inode, still a
+/// regular file.
 fn read_manifest_file(path: &Path) -> Result<Option<String>, String> {
     let rel = path.display();
-    match fs::symlink_metadata(path) {
+    let looked = match fs::symlink_metadata(path) {
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("cannot look at {rel}: {e}")),
-        Ok(m) if !m.file_type().is_file() => {
-            return Err(format!("{rel} is not a plain file (a symlink or a folder)"));
-        }
-        Ok(_) => {}
+        Ok(m) => m,
+    };
+    if !looked.file_type().is_file() {
+        return Err(format!(
+            "{rel} is not a plain file (a symlink, folder or pipe)"
+        ));
     }
-    let file = fs::File::open(path).map_err(|e| format!("cannot open {rel}: {e}"))?;
+    let file = match open_no_follow(path) {
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot open {rel}: {e}")),
+        Ok(f) => f,
+    };
+    let opened = file
+        .metadata()
+        .map_err(|e| format!("cannot look at {rel}: {e}"))?;
+    if !opened.is_file() || identity(&opened) != identity(&looked) {
+        return Err(format!(
+            "{rel} is not a plain file, or changed while it was being opened"
+        ));
+    }
     let mut bytes = Vec::new();
     file.take(MAX_MANIFEST_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
@@ -282,7 +354,7 @@ fn parse_manifest(text: &str) -> Result<View, String> {
         return Err("recorder is not lab/up.sh format 1".to_owned());
     }
     let mut facts = BTreeMap::new();
-    for key in ["chain", "platform", "source"] {
+    for key in MANIFEST_WORDS {
         let value = field(key)?;
         if !is_id(value) {
             return Err(format!(
@@ -408,12 +480,7 @@ fn compare(a_name: &str, a: &View, b_name: &str, b: &View) -> Comparison {
 
 /// What the lab manifest can't show Judge B yet, pinned so that recording
 /// more (or a judge reading more) has to update it on purpose.
-const LAB_NOT_COMPARED: [&str; 4] = [
-    "Judge B: arch (not recorded by {lab})",
-    "Judge B: block_storage (not recorded by {lab})",
-    "Judge B: exposure (not recorded by {lab})",
-    "Judge B: package (not recorded by {lab})",
-];
+const LAB_NOT_COMPARED: [&str; 1] = ["Judge B: package (not recorded by {lab})"];
 
 /// Assert the fixture and a lab back end agree, and that exactly the known
 /// gaps were left out. Returns how many facts were actually compared.
@@ -451,14 +518,15 @@ fn compose_images() -> BTreeMap<String, String> {
 
 /// The `# image <ref>` comment `lab/up.sh` writes above each `[[service]]`,
 /// paired with the id that follows it. Errors never echo the line: it may
-/// hold anything.
+/// hold anything. An image line with no id after it (a dangling last line) is
+/// an error too.
 fn manifest_images(text: &str) -> Result<BTreeMap<String, String>, String> {
     let mut out = BTreeMap::new();
-    let mut image: Option<&str> = None;
+    let mut image: Option<(usize, &str)> = None;
     for (n, line) in text.lines().enumerate() {
         let n = n + 1;
         if let Some(rest) = line.strip_prefix("# image ") {
-            if image.replace(rest).is_some() {
+            if image.replace((n, rest)).is_some() {
                 return Err(format!("line {n}: a second # image line before an id"));
             }
         } else if let Some(rest) = line.strip_prefix("id = \"") {
@@ -466,7 +534,7 @@ fn manifest_images(text: &str) -> Result<BTreeMap<String, String>, String> {
                 .strip_suffix('"')
                 .filter(|id| is_id(id))
                 .ok_or_else(|| format!("line {n}: an id line not in up.sh's shape"))?;
-            let img = image
+            let (_, img) = image
                 .take()
                 .ok_or_else(|| format!("line {n}: no # image line above service {id}"))?;
             if out.insert(id.to_owned(), img.to_owned()).is_some() {
@@ -474,7 +542,117 @@ fn manifest_images(text: &str) -> Result<BTreeMap<String, String>, String> {
             }
         }
     }
+    if let Some((n, _)) = image {
+        return Err(format!("line {n}: a # image line with no service after it"));
+    }
     Ok(out)
+}
+
+/// The `# <name> reported "<text>" (<how>)` comment `lab/up.sh` writes above
+/// each `[[service]]`: what the service itself said, paired with the id that
+/// follows. The text must be `plain()` characters. Errors never echo a line.
+fn manifest_reported(text: &str) -> Result<BTreeMap<String, String>, String> {
+    let mut out = BTreeMap::new();
+    let mut pending: Option<(usize, &str, &str)> = None;
+    for (n, line) in text.lines().enumerate() {
+        let n = n + 1;
+        if let Some((name, rest)) = line
+            .strip_prefix("# ")
+            .and_then(|l| l.split_once(" reported \""))
+        {
+            let reported = rest
+                .split_once("\" (")
+                .map(|(r, _)| r)
+                .filter(|r| is_id(name) && is_plain(r))
+                .ok_or_else(|| format!("line {n}: a reported line not in up.sh's shape"))?;
+            if pending.replace((n, name, reported)).is_some() {
+                return Err(format!("line {n}: a second reported line before an id"));
+            }
+        } else if let Some(rest) = line.strip_prefix("id = \"") {
+            let id = rest
+                .strip_suffix('"')
+                .filter(|id| is_id(id))
+                .ok_or_else(|| format!("line {n}: an id line not in up.sh's shape"))?;
+            if let Some((at, name, reported)) = pending.take() {
+                if !compose_name_matches(name, id) {
+                    return Err(format!(
+                        "line {at}: a reported line for {name} above service {id}"
+                    ));
+                }
+                out.insert(id.to_owned(), reported.to_owned());
+            }
+        }
+    }
+    if let Some((n, _, _)) = pending {
+        return Err(format!(
+            "line {n}: a reported line with no service after it"
+        ));
+    }
+    Ok(out)
+}
+
+/// `lab/up.sh` writes the compose service name in the reported line and the
+/// label id on the `id` line; they must be the same service.
+fn compose_name_matches(name: &str, id: &str) -> bool {
+    match id {
+        "bitcoin-core" => name == "bitcoind",
+        "core-lightning" => name == "cln",
+        _ => name == id,
+    }
+}
+
+/// The version `lab/up.sh` derives from a service's reported text, by the
+/// same rules (`# 9.` in `lab/up.sh`):
+/// - Bitcoin Core's `/Satoshi:32.1.0/` is `32.1`.
+/// - Core Lightning drops a leading `v`.
+/// - Nutshell drops `Nutshell/` (a bare version is accepted too).
+/// - LND and strfry are used as they are.
+///
+/// `None` for an id with no rule.
+fn version_from_reported(id: &str, reported: &str) -> Option<String> {
+    match id {
+        "bitcoin-core" => {
+            let v = reported.strip_prefix("/Satoshi:")?.strip_suffix('/')?;
+            let parts: Vec<&str> = v.split('.').collect();
+            match parts.as_slice() {
+                [a, b, "0"] => Some(format!("{a}.{b}")),
+                [_, _, _] => Some(v.to_owned()),
+                _ => None,
+            }
+        }
+        "core-lightning" => Some(reported.strip_prefix('v').unwrap_or(reported).to_owned()),
+        "nutshell" => Some(
+            reported
+                .strip_prefix("Nutshell/")
+                .unwrap_or(reported)
+                .to_owned(),
+        ),
+        "lnd" | "strfry" => Some(reported.to_owned()),
+        _ => None,
+    }
+}
+
+/// Every service in `view` has a reported text in `text`, and the text and the
+/// version agree.
+fn check_reported(text: &str, view: &View) -> Result<(), String> {
+    let reported = manifest_reported(text)?;
+    for (key, version) in &view.facts {
+        let Some(id) = key.strip_prefix("service ") else {
+            continue;
+        };
+        let said = reported
+            .get(id)
+            .ok_or_else(|| format!("service {id}: no reported text above it"))?;
+        let derived = version_from_reported(id, said).ok_or_else(|| {
+            format!("service {id}: reported text {said} is not in its usual shape")
+        })?;
+        if &derived != version {
+            return Err(format!(
+                "service {id}: reported {said} means version {derived}, but the manifest says {version}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The images a manifest names must be exactly the ones `lab/compose.yml`
@@ -520,6 +698,9 @@ platform = "docker"
 source = "lab"
 recorder = "lab/up.sh format 1"
 chain = "regtest"
+arch = "64-bit"
+block_storage = "tmpfs"
+exposure = "none"
 description = "Guard Dog regtest lab."
 
 # bitcoind reported "/Satoshi:32.1.0/" (bitcoin-cli getnetworkinfo .subversion)
@@ -528,6 +709,7 @@ description = "Guard Dog regtest lab."
 id = "bitcoin-core"
 version = "32.1"
 
+# lnd reported "0.21.6-beta" (lncli version .lnd.version)
 # image lightninglabs/lnd@sha256:11
 [[service]]
 id = "lnd"
@@ -549,11 +731,12 @@ fn the_recorded_lab_agrees_with_the_fixtures() {
     // The recording is of today's lab: every pinned service, each under the
     // image `lab/compose.yml` pins now. Re-record after changing an image.
     assert_images_match(&text, RECORDED_FILE);
+    check_reported(&text, &recorded).unwrap_or_else(|e| panic!("{RECORDED_FILE}: {e}"));
     let compared = assert_agree(&fixture, "lab-recorded", &recorded);
     assert_eq!(
         compared,
-        2 + compose_images().len(),
-        "chain, platform and every service"
+        5 + compose_images().len(),
+        "chain, platform, arch, block storage, exposure and every service"
     );
 }
 
@@ -572,6 +755,7 @@ fn the_live_lab_agrees_with_the_fixtures() {
         });
     let live = parse_manifest(&text).unwrap_or_else(|e| panic!("{LIVE_FILE} is refused: {e}"));
     assert_images_match(&text, LIVE_FILE);
+    check_reported(&text, &live).unwrap_or_else(|e| panic!("{LIVE_FILE}: {e}"));
     let fixture = fixture_view(&read(FIXTURE_FILE), FIXTURE_SETUP);
     let compared = assert_agree(&fixture, "lab-live", &live);
     notice(&format!(
@@ -717,7 +901,10 @@ fn a_good_manifest_is_read_exactly() {
         Ok(view(
             MANIFEST_RECORDS,
             &[
+                ("arch", "64-bit"),
+                ("block_storage", "tmpfs"),
                 ("chain", "regtest"),
+                ("exposure", "none"),
                 ("platform", "docker"),
                 ("service bitcoin-core", "32.1"),
                 ("service lnd", "0.21.6-beta"),
@@ -743,17 +930,17 @@ fn a_good_manifest_is_read_exactly() {
         (
             "a second image line",
             GOOD_MANIFEST.replace("# image lightninglabs", "# image x\n# image lightninglabs"),
-            "line 16: a second # image line before an id",
+            "line 20: a second # image line before an id",
         ),
         (
             "no image line",
             GOOD_MANIFEST.replace("# image lightninglabs/lnd@sha256:11\n", ""),
-            "line 16: no # image line above service lnd",
+            "line 20: no # image line above service lnd",
         ),
         (
             "an id line with a trailing comment holding a bidi override",
             bidi,
-            "line 16: an id line not in up.sh's shape",
+            "line 20: an id line not in up.sh's shape",
         ),
     ] {
         let err = manifest_images(&text).unwrap_err();
@@ -801,7 +988,7 @@ fn an_oversized_or_odd_file_is_never_read_whole() {
 #[test]
 fn every_broken_manifest_is_refused() {
     let lnd = "[[service]]\nid = \"lnd\"\nversion = \"0.21.6-beta\"\n";
-    let cases: [(&str, String, &str); 26] = [
+    let cases: [(&str, String, &str); 31] = [
         ("not TOML", "format = = 1".to_owned(), "not valid TOML"),
         (
             "an unknown top-level key",
@@ -852,6 +1039,31 @@ fn every_broken_manifest_is_refused() {
             "a recording, not the lab",
             GOOD_MANIFEST.replace("source = \"lab\"", "source = \"recording\""),
             "source is not lab",
+        ),
+        (
+            "no arch",
+            GOOD_MANIFEST.replace("arch = \"64-bit\"\n", ""),
+            "missing arch",
+        ),
+        (
+            "no block storage",
+            GOOD_MANIFEST.replace("block_storage = \"tmpfs\"\n", ""),
+            "missing block_storage",
+        ),
+        (
+            "no exposure",
+            GOOD_MANIFEST.replace("exposure = \"none\"\n", ""),
+            "missing exposure",
+        ),
+        (
+            "an arch with odd characters",
+            GOOD_MANIFEST.replace("arch = \"64-bit\"", "arch = \"64 bit\""),
+            "arch has characters outside [a-z0-9-] or the wrong length",
+        ),
+        (
+            "an exposure as a number",
+            GOOD_MANIFEST.replace("exposure = \"none\"", "exposure = 0"),
+            "exposure is not text",
         ),
         (
             "no description",
@@ -989,4 +1201,521 @@ fn up_sh_still_writes_this_format() {
             .any(|l| l.trim() == "lab/.data/" || l.trim() == "/lab/.data/"),
         "lab/.data/ (the live manifest and the lab's credentials) stays ignored"
     );
+}
+
+#[test]
+fn up_sh_writes_the_container_facts() {
+    let up = read(UP_SH);
+    for line in [
+        r#"printf 'arch = "%s"\nblock_storage = "%s"\nexposure = "%s"\n' "$LAB_ARCH" "$LAB_STORAGE" "$LAB_EXPOSURE""#,
+        "docker image inspect \"$img\"",
+        ".ImageManifestDescriptor.platform.architecture",
+        ".HostConfig.PublishAllPorts == true",
+        ".NetworkSettings.Ports",
+        "startswith(\"container:\")",
+        ".HostConfig.ReadonlyRootfs == true",
+        "(.HostConfig.Tmpfs // {}) | length > 0",
+        ".Type == \"tmpfs\"",
+        "dc config --services",
+    ] {
+        assert!(up.contains(line), "lab/up.sh no longer has: {line}");
+    }
+}
+
+/// Does `text` use the shell variable `name` (`$name` or `${name}`, not
+/// `$name2`)?
+fn uses_var(text: &str, name: &str) -> bool {
+    [format!("${{{name}}}"), format!("${name}")]
+        .iter()
+        .any(|pat| {
+            text.match_indices(pat.as_str()).any(|(i, _)| {
+                !text[i + pat.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+        })
+}
+
+/// `docker inspect` output holds the lab's generated passwords (container
+/// environment), and anything in a command's arguments is readable by every
+/// process on the host. So no lab script passes inspect output, or a variable
+/// holding it, to a command as an argument, and nothing uses `--argjson`.
+#[test]
+fn lab_scripts_never_put_inspect_output_in_arguments() {
+    let mut checked = 0;
+    for name in ["lab/up.sh", "lab/down.sh", "lab/lib.sh"] {
+        for (n, line) in read(name).lines().enumerate() {
+            let at = n + 1;
+            let code = line.split('#').next().unwrap_or("");
+            checked += 1;
+            assert!(
+                !code.contains("--argjson") && !code.contains("--jsonargs"),
+                "{name}:{at}: jq gets JSON through stdin, never as an argument"
+            );
+            // `--arg name "$ci"` (or an inspect command substitution) would put it in argv.
+            for flag in ["--arg", "--rawfile", "--slurpfile"] {
+                for rest in code.split(flag).skip(1) {
+                    let value = rest.split_whitespace().nth(1).unwrap_or("");
+                    assert!(
+                        !uses_var(value, "ci")
+                            && !uses_var(value, "imgj")
+                            && !value.contains("docker inspect")
+                            && !value.contains("docker image inspect"),
+                        "{name}:{at}: jq {flag} is fed from inspect output"
+                    );
+                }
+            }
+            // Any use of the inspect variables must be a printf into a pipe.
+            for var in ["ci", "imgj"] {
+                if uses_var(code, var) {
+                    assert!(
+                        code.contains(&format!("printf '%s' \"${var}\" | jq")),
+                        "{name}:{at}: ${var} used somewhere other than `printf '%s' \"${var}\" | jq`"
+                    );
+                }
+            }
+        }
+    }
+    assert!(checked > 100, "the scripts were read");
+}
+
+#[test]
+fn reported_text_and_version_must_agree() {
+    let good = parse_manifest(GOOD_MANIFEST).unwrap();
+    // GOOD_MANIFEST has a reported line for bitcoind (above bitcoin-core) and lnd.
+    assert_eq!(check_reported(GOOD_MANIFEST, &good), Ok(()));
+    assert_eq!(
+        manifest_reported(GOOD_MANIFEST),
+        Ok(BTreeMap::from([
+            ("bitcoin-core".to_owned(), "/Satoshi:32.1.0/".to_owned()),
+            ("lnd".to_owned(), "0.21.6-beta".to_owned()),
+        ]))
+    );
+    for (what, text, reason) in [
+        (
+            "a Satoshi string that says another version",
+            GOOD_MANIFEST.replace("/Satoshi:32.1.0/", "/Satoshi:32.2.0/"),
+            "service bitcoin-core: reported /Satoshi:32.2.0/ means version 32.2, but the manifest says 32.1",
+        ),
+        (
+            "a reported text that is not Satoshi-shaped",
+            GOOD_MANIFEST.replace("/Satoshi:32.1.0/", "32.1.0"),
+            "service bitcoin-core: reported text 32.1.0 is not in its usual shape",
+        ),
+        (
+            "an lnd that says another version",
+            GOOD_MANIFEST.replace(
+                "lnd reported \"0.21.6-beta\"",
+                "lnd reported \"0.21.5-beta\"",
+            ),
+            "service lnd: reported 0.21.5-beta means version 0.21.5-beta, but the manifest says 0.21.6-beta",
+        ),
+        (
+            "no reported text for a service",
+            GOOD_MANIFEST.replace(
+                "# lnd reported \"0.21.6-beta\" (lncli version .lnd.version)\n",
+                "",
+            ),
+            "service lnd: no reported text above it",
+        ),
+        (
+            "a reported text with an escape in it",
+            GOOD_MANIFEST.replace("0.21.6-beta\" (lncli", "0.21.6\u{1b}[2J\" (lncli"),
+            "line 18: a reported line not in up.sh's shape",
+        ),
+        (
+            "a reported line for another service",
+            GOOD_MANIFEST.replace("# bitcoind reported", "# cln reported"),
+            "line 12: a reported line for cln above service bitcoin-core",
+        ),
+        (
+            "two reported lines before one id",
+            GOOD_MANIFEST.replace("# lnd reported", "# x reported \"1\" (y)\n# lnd reported"),
+            "line 19: a second reported line before an id",
+        ),
+    ] {
+        let err = check_reported(&text, &good).unwrap_err();
+        assert_eq!(err, reason, "{what}");
+        assert!(err.is_ascii() && !err.contains('\u{1b}'), "{what}");
+    }
+    // The rules match `lab/up.sh` step 9 for every service the lab runs.
+    for (id, said, version) in [
+        ("bitcoin-core", "/Satoshi:32.1.0/", "32.1"),
+        ("bitcoin-core", "/Satoshi:32.1.1/", "32.1.1"),
+        ("core-lightning", "v26.06.9", "26.06.9"),
+        ("nutshell", "0.21.0", "0.21.0"),
+        ("lnd", "0.21.6-beta", "0.21.6-beta"),
+        ("nutshell", "Nutshell/0.21.0", "0.21.0"),
+        ("strfry", "1.1.2-148-g4cd3cf6", "1.1.2-148-g4cd3cf6"),
+    ] {
+        assert_eq!(version_from_reported(id, said).as_deref(), Some(version));
+    }
+    assert_eq!(version_from_reported("mystery", "1"), None);
+}
+
+#[test]
+fn a_dangling_last_line_is_refused() {
+    for tail in ["# image x@sha256:22\n", "# image x@sha256:22"] {
+        let text = format!("{GOOD_MANIFEST}{tail}");
+        assert_eq!(
+            manifest_images(&text),
+            Err("line 23: a # image line with no service after it".to_owned())
+        );
+    }
+    let text = format!("{GOOD_MANIFEST}# x reported \"1\" (y)\n");
+    assert_eq!(
+        manifest_reported(&text),
+        Err("line 23: a reported line with no service after it".to_owned())
+    );
+    assert_eq!(manifest_images(GOOD_MANIFEST).map(|m| m.len()), Ok(2));
+}
+
+/// A small fixed-seed generator (splitmix64), so the property tests below
+/// draw the same cases on every machine.
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+    fn below(&mut self, n: usize) -> usize {
+        usize::try_from(self.next() % n as u64).unwrap()
+    }
+    fn pick<'a>(&mut self, items: &[&'a str]) -> &'a str {
+        items[self.below(items.len())]
+    }
+    fn string(&mut self, alphabet: &[u8], min: usize, max: usize) -> String {
+        let len = min + self.below(max - min + 1);
+        (0..len)
+            .map(|_| char::from(alphabet[self.below(alphabet.len())]))
+            .collect()
+    }
+}
+
+const WORD_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+const VERSION_ALPHABET: &[u8] = b"0123456789.-+_:abcdef";
+const KNOWN_IDS: [&str; 5] = [
+    "bitcoin-core",
+    "core-lightning",
+    "lnd",
+    "nutshell",
+    "strfry",
+];
+
+/// A random well-formed manifest in `lab/up.sh`'s shape, with the view and
+/// the images and reported texts it should read back as.
+struct Generated {
+    text: String,
+    view: View,
+    images: BTreeMap<String, String>,
+    reported: BTreeMap<String, String>,
+}
+
+fn word(rng: &mut Rng) -> String {
+    let mut w = rng.string(WORD_ALPHABET, 1, 12);
+    if rng.below(3) == 0 {
+        w.push('-');
+        w.push_str(&rng.string(WORD_ALPHABET, 1, 6));
+    }
+    w
+}
+
+fn generate_manifest(rng: &mut Rng) -> Generated {
+    let mut words = BTreeMap::new();
+    for key in MANIFEST_WORDS {
+        let value = if key == "source" {
+            "lab".to_owned()
+        } else {
+            word(rng)
+        };
+        words.insert(key, value);
+    }
+    // Sorted, unique ids: a random subset of the known ones plus random others.
+    let mut ids = BTreeSet::new();
+    for id in KNOWN_IDS {
+        if rng.below(2) == 0 {
+            ids.insert(id.to_owned());
+        }
+    }
+    for _ in 0..rng.below(6) {
+        ids.insert(format!("x{}", word(rng)));
+    }
+    if ids.is_empty() {
+        ids.insert("lnd".to_owned());
+    }
+    let mut text = String::from("# Written by lab/up.sh.\nformat = 1\n");
+    text.push_str("recorder = \"lab/up.sh format 1\"\n");
+    for key in MANIFEST_WORDS {
+        text.push_str(&format!("{key} = \"{}\"\n", words[key]));
+    }
+    text.push_str("description = \"Random lab.\"\n");
+    let mut facts: BTreeMap<String, String> = words
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), v.clone()))
+        .collect();
+    let (mut images, mut reported) = (BTreeMap::new(), BTreeMap::new());
+    for id in ids {
+        // Bitcoin Core sometimes reports a `.0` patch, which means "a.b".
+        let zero_patch = id == "bitcoin-core" && rng.below(3) == 0;
+        let (a, b, c) = (rng.below(100), rng.below(100), 1 + rng.below(9));
+        let version = if zero_patch {
+            format!("{a}.{b}")
+        } else {
+            format!("{a}.{b}.{c}")
+        };
+        let version = if id.starts_with('x') {
+            rng.string(VERSION_ALPHABET, 1, 64)
+        } else {
+            version
+        };
+        let image = format!("img/{id}@sha256:{}", rng.string(b"0123456789abcdef", 8, 8));
+        text.push('\n');
+        if let Some(said) = match id.as_str() {
+            "bitcoin-core" if zero_patch => Some(format!("/Satoshi:{version}.0/")),
+            "bitcoin-core" => Some(format!("/Satoshi:{version}/")),
+            "core-lightning" => Some(format!("v{version}")),
+            "nutshell" => Some(format!("Nutshell/{version}")),
+            "lnd" | "strfry" => Some(version.clone()),
+            _ => None,
+        } {
+            let name = match id.as_str() {
+                "bitcoin-core" => "bitcoind",
+                "core-lightning" => "cln",
+                other => other,
+            };
+            text.push_str(&format!("# {name} reported \"{said}\" (some call)\n"));
+            reported.insert(id.clone(), said);
+        }
+        text.push_str(&format!("# image {image}\n[[service]]\nid = \"{id}\"\n"));
+        text.push_str(&format!("version = \"{version}\"\n"));
+        facts.insert(format!("service {id}"), version);
+        images.insert(id, image);
+    }
+    Generated {
+        text,
+        view: View {
+            records: MANIFEST_RECORDS,
+            facts,
+        },
+        images,
+        reported,
+    }
+}
+
+const SEED: u64 = 0x6764_5f74_776f_6265;
+
+#[test]
+fn random_well_formed_manifests_round_trip() {
+    let mut rng = Rng(SEED);
+    for case in 0..300 {
+        let g = generate_manifest(&mut rng);
+        assert_eq!(
+            parse_manifest(&g.text).as_ref(),
+            Ok(&g.view),
+            "case {case}:\n{}",
+            g.text
+        );
+        assert_eq!(manifest_images(&g.text), Ok(g.images), "case {case}");
+        assert_eq!(manifest_reported(&g.text), Ok(g.reported), "case {case}");
+        // Where the rules know the service, the reported text agrees by construction.
+        let known = View {
+            records: MANIFEST_RECORDS,
+            facts: g
+                .view
+                .facts
+                .iter()
+                .filter(|(k, _)| {
+                    k.strip_prefix("service ")
+                        .is_some_and(|id| KNOWN_IDS.contains(&id))
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        };
+        assert_eq!(check_reported(&g.text, &known), Ok(()), "case {case}");
+    }
+}
+
+/// Lines with a key from `MANIFEST_WORDS` etc. removed, one at a time.
+fn without_line(text: &str, prefix: &str) -> String {
+    text.lines()
+        .filter(|l| !l.starts_with(prefix))
+        .map(|l| format!("{l}\n"))
+        .collect()
+}
+
+#[test]
+fn random_malformed_manifests_are_refused_by_name_and_never_panic() {
+    let mut rng = Rng(SEED ^ 0xFFFF);
+    let bad_chars = [" ", "!", "$", "*", "(", "A", "é"];
+    for case in 0..300 {
+        let g = generate_manifest(&mut rng);
+        let any_id = g.images.keys().next().unwrap().clone();
+        let (what, text, reason): (&str, String, String) = match rng.below(6) {
+            0 => {
+                let key = rng.pick(&[
+                    "recorder",
+                    "chain",
+                    "platform",
+                    "source",
+                    "arch",
+                    "block_storage",
+                    "exposure",
+                    "description",
+                ]);
+                (
+                    "a required line deleted",
+                    without_line(&g.text, &format!("{key} = ")),
+                    format!("missing {key}"),
+                )
+            }
+            1 => {
+                let junk = format!("zz{}", rng.string(WORD_ALPHABET, 1, 8));
+                (
+                    "an unknown key",
+                    g.text
+                        .replacen("description", &format!("{junk} = 1\ndescription"), 1),
+                    format!("unknown key {junk:?}"),
+                )
+            }
+            2 => {
+                let key = rng.pick(&MANIFEST_WORDS);
+                let bad = format!("a{}", rng.pick(&bad_chars));
+                let old = format!("{key} = \"{}\"", g.view.facts[key]);
+                (
+                    "a bad word",
+                    g.text.replacen(&old, &format!("{key} = \"{bad}\""), 1),
+                    format!("{key} has characters outside [a-z0-9-] or the wrong length"),
+                )
+            }
+            3 => {
+                let old = format!(
+                    "version = \"{}\"",
+                    g.view.facts[&format!("service {any_id}")]
+                );
+                let bad = format!("1{}", rng.pick(&bad_chars[..5]));
+                (
+                    "a bad version",
+                    g.text.replacen(&old, &format!("version = \"{bad}\""), 1),
+                    format!(
+                        "service {any_id}: version has characters outside [0-9A-Za-z.+_:/-] or the wrong length"
+                    ),
+                )
+            }
+            4 => {
+                let block = format!("[[service]]\nid = \"{any_id}\"\nversion = \"1\"\n");
+                (
+                    "a service listed twice",
+                    format!("{}\n{block}", g.text),
+                    format!("service {any_id}: services are not sorted by id, or listed twice"),
+                )
+            }
+            _ => {
+                let mut line = format!("zz{}", rng.string(b"[]=\"'\\.,{}#a-z0-9 \t", 0, 12));
+                line.push('\n');
+                (
+                    "a line of junk at the end",
+                    format!("{}{line}", g.text),
+                    String::new(),
+                )
+            }
+        };
+        let err = parse_manifest(&text)
+            .map(|_| ())
+            .expect_err(&format!("case {case}: {what} was accepted:\n{text}"));
+        assert!(
+            err.is_ascii() && !err.is_empty() && !err.chars().any(char::is_control),
+            "case {case}: {what}: the error is not plain text"
+        );
+        if !reason.is_empty() {
+            assert_eq!(err, reason, "case {case}: {what}");
+        }
+    }
+}
+
+#[test]
+fn random_bytes_and_cut_manifests_never_panic() {
+    let mut rng = Rng(SEED ^ 0xABCD);
+    for case in 0..500 {
+        // Pure noise, including quotes, brackets, escapes and non-ASCII.
+        let len = rng.below(400);
+        let noise: String = (0..len)
+            .map(|_| match rng.below(4) {
+                0 => char::from(u8::try_from(rng.below(128)).unwrap()),
+                1 => char::from_u32(0x80 + u32::try_from(rng.below(0x700)).unwrap()).unwrap(),
+                _ => char::from(b"[]=\"'\\.,{}#\n abc019-"[rng.below(20)]),
+            })
+            .collect();
+        let err = parse_manifest(&noise)
+            .map(|_| ())
+            .expect_err(&format!("case {case}: noise was accepted"));
+        assert!(
+            err.is_ascii() && !err.is_empty() && !err.chars().any(char::is_control),
+            "case {case}: the error is not plain text"
+        );
+        let _ = manifest_images(&noise);
+        let _ = manifest_reported(&noise);
+
+        // A good manifest cut at a random place: Ok or a plain named error.
+        let g = generate_manifest(&mut rng);
+        let mut cut = rng.below(g.text.len() + 1);
+        while !g.text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        if let Err(e) = parse_manifest(&g.text[..cut]) {
+            assert!(
+                e.is_ascii() && !e.is_empty() && !e.chars().any(char::is_control),
+                "case {case}: the error is not plain text"
+            );
+        }
+        let _ = manifest_images(&g.text[..cut]);
+        let _ = manifest_reported(&g.text[..cut]);
+    }
+}
+
+#[test]
+fn a_pipe_a_symlink_and_a_swapped_file_are_refused() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("two-backends-odd");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    // The identity helper tells two files apart and recognises one file.
+    let (a, b) = (dir.join("a.toml"), dir.join("b.toml"));
+    fs::write(&a, "x").unwrap();
+    fs::write(&b, "x").unwrap();
+    let (ma, mb) = (fs::metadata(&a).unwrap(), fs::metadata(&b).unwrap());
+    assert_eq!(identity(&ma), identity(&fs::symlink_metadata(&a).unwrap()));
+    #[cfg(unix)]
+    {
+        assert_ne!(
+            identity(&ma),
+            identity(&mb),
+            "a swapped file is another file"
+        );
+        // A FIFO is refused at once; opening it would wait for a writer.
+        let fifo = dir.join("pipe.toml");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success(), "mkfifo");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = fifo.clone();
+        std::thread::spawn(move || tx.send(read_manifest_file(&path)).unwrap());
+        let got = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a FIFO at the path hung the reader");
+        assert!(got.unwrap_err().contains("not a plain file"));
+        // A symlink to a good file is refused.
+        let link = dir.join("link.toml");
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        assert!(
+            read_manifest_file(&link)
+                .unwrap_err()
+                .contains("not a plain file")
+        );
+    }
+    assert_eq!(read_manifest_file(&a), Ok(Some("x".to_owned())));
 }
