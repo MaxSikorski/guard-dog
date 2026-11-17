@@ -4,34 +4,51 @@
 
 LOCK="$LAB_DIR/.lock"
 
-# One lab operation at a time. The lock is a symlink named lab/.lock whose
-# target is the owner's process id: making a symlink is atomic, and a lock left
-# behind by a crash (SIGKILL, power loss) is recognised as stale, because its
-# owner is gone or is no longer one of our scripts, and is then taken over.
+# One lab operation at a time. The lock is a directory, lab/.lock, with the
+# owner's process id inside. `mkdir` is atomic and fails if anything at all
+# already exists at that path. A lock is never taken over automatically, not even
+# one left by a crash: the person checks, then runs `lab/down.sh --unlock`.
 lab_lock() {
-  local pid seen moved
-  if ln -s "$$" "$LOCK" 2>/dev/null; then return 0; fi
-  seen="$(readlink "$LOCK" 2>/dev/null || true)"
-  if [[ $seen =~ ^[0-9]+$ ]] && kill -0 "$seen" 2>/dev/null; then
-    pid="$seen"
-    if ps -p "$pid" -o command= 2>/dev/null | grep -Eq '(up|down)[.]sh'; then return 1; fi
-  fi
-  # Stale. Move it aside (only one racing process can), check it was the stale
-  # one we looked at, then take the lock.
-  moved="$LOCK.stale.$$"
-  mv "$LOCK" "$moved" 2>/dev/null || return 1
-  if [ "$(readlink "$moved" 2>/dev/null || true)" != "$seen" ]; then
-    ln -s "$(readlink "$moved")" "$LOCK" 2>/dev/null || true
-    rm -f "$moved"
+  local holder state=""
+  if mkdir "$LOCK" 2>/dev/null; then
+    if printf '%s\n' "$$" > "$LOCK/pid"; then return 0; fi
+    rm -f "$LOCK/pid"
+    rmdir "$LOCK" 2>/dev/null || true
+    echo "lab: could not write the lock's owner file" >&2
     return 1
   fi
-  rm -f "$moved"
-  ln -s "$$" "$LOCK" 2>/dev/null
+  holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
+  if [[ $holder =~ ^[0-9]+$ ]]; then
+    if kill -0 "$holder" 2>/dev/null; then state="running"; else state="not running"; fi
+    echo "lab: lab/.lock exists, left by process $holder ($state)." >&2
+  else
+    echo "lab: lab/.lock exists, and names no process." >&2
+  fi
+  echo "lab: once you have checked that no lab/up.sh or lab/down.sh is running, run: lab/down.sh --unlock" >&2
+  return 1
 }
 
 # Release the lock, but only if this process owns it.
 lab_unlock() {
-  if [ "$(readlink "$LOCK" 2>/dev/null || true)" = "$$" ]; then rm -f "$LOCK"; fi
+  if [ -d "$LOCK" ] && [ ! -L "$LOCK" ] && [ "$(cat "$LOCK/pid" 2>/dev/null || true)" = "$$" ]; then
+    rm -f "$LOCK/pid"
+    rmdir "$LOCK"
+  fi
+}
+
+# `lab/down.sh --unlock`: remove the lock directory and nothing else.
+lab_force_unlock() {
+  if [ ! -e "$LOCK" ] && [ ! -L "$LOCK" ]; then
+    echo "lab: no lock to remove"
+    return 0
+  fi
+  if [ -L "$LOCK" ] || [ ! -d "$LOCK" ]; then
+    echo "lab: lab/.lock is not a lock directory; leaving it for you to look at" >&2
+    return 1
+  fi
+  rm -f "$LOCK/pid" || return 1
+  rmdir "$LOCK" || { echo "lab: lab/.lock holds something besides its owner file; leaving it" >&2; return 1; }
+  echo "lab: lock removed"
 }
 
 # Remove the lab completely. By project name only, so it works even if
@@ -39,10 +56,10 @@ lab_unlock() {
 lab_teardown() {
   local left_c left_n left_v
   docker compose -p "$PROJECT" down --volumes --remove-orphans --timeout 10 || return 1
-  rm -rf "$LAB_DIR/.data"
-  left_c="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" | wc -l | tr -d ' ')"
-  left_n="$(docker network ls -q --filter "label=com.docker.compose.project=$PROJECT" | wc -l | tr -d ' ')"
-  left_v="$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT" | wc -l | tr -d ' ')"
+  rm -rf "$LAB_DIR/.data" || return 1
+  left_c="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" | wc -l | tr -d ' ')" || return 1
+  left_n="$(docker network ls -q --filter "label=com.docker.compose.project=$PROJECT" | wc -l | tr -d ' ')" || return 1
+  left_v="$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT" | wc -l | tr -d ' ')" || return 1
   if [ "$left_c$left_n$left_v" != "000" ]; then
     echo "lab: FAILED: left behind $left_c containers, $left_n networks, $left_v volumes" >&2
     return 1

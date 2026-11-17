@@ -98,7 +98,7 @@ rpcauth() {
 T0=$(date +%s)
 
 # 1. One lab at a time: an atomic lock (shared with down.sh), then the preconditions.
-lab_lock || fail "another lab/up.sh or lab/down.sh is running"
+lab_lock || fail "could not take the lab lock"
 LOCK_OWNED=1
 for tool in docker jq openssl; do command -v "$tool" >/dev/null || fail "$tool is not installed"; done
 docker compose version >/dev/null 2>&1 || fail "docker compose (v2) is not available"

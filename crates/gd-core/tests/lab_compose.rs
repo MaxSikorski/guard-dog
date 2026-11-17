@@ -4,7 +4,7 @@
 //! Deterministic by design: no Docker, no network, no clock, nothing random.
 //! `check()` reads `lab/compose.yml` the way Docker does (the file uses no YAML
 //! anchors) and returns every problem it finds, in a stable order. The checker
-//! is itself tested: `every_unsafe_change_is_caught` makes 48 named unsafe
+//! is itself tested: `every_unsafe_change_is_caught` makes 53 named unsafe
 //! edits and requires each one to be refused with its own problem code.
 
 // Test-only crate: its helper functions (not just `#[test]` ones) read files and
@@ -345,6 +345,19 @@ fn is_pinned(image: &str) -> bool {
 /// order is stable: top level, then services in `EXPECTED` order, then totals.
 fn check(text: &str) -> Vec<Problem> {
     let mut out = Vec::new();
+    // A YAML tag (`!reset`, `!override`, any `!`) can make Compose read something
+    // other than what this checker reads, so none is allowed on any line that is
+    // not a whole-line comment.
+    if let Some(line) = text
+        .lines()
+        .find(|l| !l.trim_start().starts_with('#') && l.contains('!'))
+    {
+        out.push(problem(
+            "yaml-tag",
+            format!("a YAML tag (!) is not allowed: {line:?}"),
+        ));
+        return out;
+    }
     let docs = match YamlLoader::load_from_str(text) {
         Ok(d) => d,
         Err(e) => {
@@ -648,10 +661,23 @@ fn check_service(
     let tmpfs_ok = strings(&svc["tmpfs"]).is_some_and(|v| {
         v.iter().all(|t| {
             t.starts_with('/')
-                && t.split_once(':')
-                    .and_then(|(_, opts)| opts.split(',').find_map(|o| o.strip_prefix("size=")))
-                    .and_then(size_mib)
-                    .is_some_and(|m| m >= 1 && m <= mem_cap)
+                && t.split_once(':').is_some_and(|(_, opts)| {
+                    let opts: Vec<&str> = opts.split(',').collect();
+                    let sizes: Vec<&str> = opts
+                        .iter()
+                        .filter_map(|o| o.strip_prefix("size="))
+                        .collect();
+                    // Only these options, and exactly one size (Docker keeps the last
+                    // of several, and nr_blocks / nr_inodes can lift the bound).
+                    let allowed = opts.iter().all(|o| {
+                        ["uid=", "gid=", "mode=", "size="]
+                            .iter()
+                            .any(|p| o.starts_with(p))
+                    });
+                    allowed
+                        && sizes.len() == 1
+                        && size_mib(sizes[0]).is_some_and(|m| m >= 1 && m <= mem_cap)
+                })
         })
     });
     if !tmpfs_ok {
@@ -867,7 +893,7 @@ fn describe(problems: &[Problem]) -> String {
 
 /// Unsafe edits to the real file: (text to find, text to put there, the
 /// problem code that must catch it). An empty `from` appends `to` to the end.
-const MUTATIONS: [(&str, &str, &str); 48] = [
+const MUTATIONS: [(&str, &str, &str); 53] = [
     (
         "bitcoin/bitcoin@sha256:d2454aaf2ff4ce1ebbc49f4aa05ed044c907b849a80a3f4c0ad23e488e50bbe0",
         "bitcoin/bitcoin:32.1",
@@ -1084,6 +1110,31 @@ const MUTATIONS: [(&str, &str, &str); 48] = [
         "      - /data:uid=1000,gid=1000,mode=0700,size=4096m\n",
         "tmpfs-unbounded",
     ),
+    (
+        "    networks: [lab]\n",
+        "    networks: !reset [lab]\n",
+        "yaml-tag",
+    ),
+    (
+        "    cap_drop: [ALL]\n",
+        "    cap_drop: !override [ALL]\n",
+        "yaml-tag",
+    ),
+    (
+        "    read_only: true",
+        "    read_only: !!bool true",
+        "yaml-tag",
+    ),
+    (
+        "      - /root/.lnd:size=1m\n",
+        "      - /root/.lnd:size=1m,size=0\n",
+        "tmpfs-unbounded",
+    ),
+    (
+        "      - /tmp:size=16m\n",
+        "      - /tmp:size=16m,nr_inodes=0\n",
+        "tmpfs-unbounded",
+    ),
 ];
 
 /// The real compose file passes every check.
@@ -1215,7 +1266,7 @@ fn lab_scripts_stay_on_the_lab_project_and_regtest() {
     for needle in [
         "down --volumes --remove-orphans",
         "rm -rf \"$LAB_DIR/.data\"",
-        "ln -s",
+        "mkdir \"$LOCK\"",
     ] {
         if !lib.contains(needle) {
             problems.push(format!("lib.sh lacks {needle:?}"));
@@ -1276,8 +1327,13 @@ impl Scratch {
 
     /// Run `lab/<script>` with only the fake commands and the system tools.
     fn run(&self, script: &str) -> std::process::Output {
+        self.run_with(script, &[])
+    }
+
+    fn run_with(&self, script: &str, args: &[&str]) -> std::process::Output {
         std::process::Command::new("/bin/bash")
             .arg(self.dir.join("lab").join(script))
+            .args(args)
             .env_clear()
             .env(
                 "PATH",
@@ -1329,54 +1385,59 @@ fn a_failing_openssl_stops_up_sh_before_anything_starts() {
     }
 }
 
-/// A lock left by a crashed run (dead owner, or a recycled process id that is
-/// not one of our scripts) is taken over; a lock held by a live lab script
-/// is respected and left untouched.
+/// An existing lock is never taken over: live and dead owners are both refused
+/// with a hint, `--unlock` removes only the lock directory, and anything else
+/// at that path is left alone.
 #[cfg(unix)]
 #[test]
-fn a_stale_lock_is_taken_over_and_a_live_one_is_respected() {
+fn an_existing_lock_is_refused_until_unlock() {
     use std::os::unix::fs::symlink;
-    use std::process::Command;
     let s = Scratch::new("lock", "exit 1");
+    let lock = s.lock();
+    let refused = |s: &Scratch, want: &str| {
+        let out = s.run("down.sh");
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(1), "{err}");
+        assert!(err.contains(want) && err.contains("--unlock"), "{err}");
+        let out = s.run("up.sh");
+        assert_eq!(out.status.code(), Some(1));
+    };
 
-    // Dead owner.
-    symlink("99999999", s.lock()).unwrap();
+    // A dead owner, and a live one: both refused, lock untouched.
+    fs::create_dir(&lock).unwrap();
+    fs::write(lock.join("pid"), "99999999\n").unwrap();
+    refused(&s, "(not running)");
+    assert!(lock.join("pid").exists());
+    fs::write(lock.join("pid"), format!("{}\n", std::process::id())).unwrap();
+    refused(&s, "(running)");
+    assert!(lock.join("pid").exists());
+
+    // --unlock removes just the lock directory.
+    let out = s.run_with("down.sh", &["--unlock"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(lock.symlink_metadata().is_err(), "lock not removed");
+
+    // With no lock, down.sh works and leaves none behind.
     let out = s.run("down.sh");
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(s.lock().symlink_metadata().is_err(), "lock not released");
+    assert!(lock.symlink_metadata().is_err());
 
-    // A live process that is not a lab script (a recycled id).
-    let mut other = Command::new("/bin/sleep").arg("30").spawn().unwrap();
-    symlink(other.id().to_string(), s.lock()).unwrap();
-    let out = s.run("down.sh");
-    let _ = other.kill();
-    let _ = other.wait();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(s.lock().symlink_metadata().is_err(), "lock not released");
-
-    // A live lab script holds it: refused, lock untouched.
-    fs::create_dir_all(s.dir.join("holder")).unwrap();
-    fs::write(s.dir.join("holder/up.sh"), "#!/bin/sh\nsleep 30\n").unwrap();
-    let mut holder = Command::new("/bin/sh")
-        .arg(s.dir.join("holder/up.sh"))
-        .spawn()
-        .unwrap();
-    symlink(holder.id().to_string(), s.lock()).unwrap();
-    let out = s.run("down.sh");
-    let still = fs::read_link(s.lock()).ok();
-    let _ = holder.kill();
-    let _ = holder.wait();
+    // A symlink or a file at the lock path is refused, and --unlock leaves it.
+    fs::write(s.dir.join("precious"), "keep").unwrap();
+    symlink(s.dir.join("precious"), &lock).unwrap();
+    refused(&s, "names no process");
+    let out = s.run_with("down.sh", &["--unlock"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("running"));
-    assert_eq!(still, Some(PathBuf::from(holder.id().to_string())));
+    assert_eq!(fs::read_to_string(s.dir.join("precious")).unwrap(), "keep");
+    assert!(lock.symlink_metadata().is_ok(), "the symlink must stay");
 }
 
 fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
