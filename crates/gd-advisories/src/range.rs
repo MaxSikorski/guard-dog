@@ -84,6 +84,10 @@ pub enum UnknownReason {
     CandidateIsAnInterval,
     /// The entry has no usable range and no listed version.
     NoUsableRangeOrVersions,
+    /// A channel product's two orders (its own and literal SemVer) disagree, or
+    /// only one of them could answer. Declared last on purpose: order is
+    /// load-bearing, and this is the least fundamental reason.
+    SchemeConflict,
 }
 
 /// What the advisory says about one installed version.
@@ -158,10 +162,13 @@ fn question(reason: UnknownReason) -> &'static str {
         UnknownReason::NoUsableRangeOrVersions => {
             "This advisory lists no usable range or version for this package. Which versions does the advisory's source say are affected?"
         }
+        UnknownReason::SchemeConflict => {
+            "Is this product a release candidate? Updating to the final release settles it."
+        }
     }
 }
 
-fn unknown(entry: usize, place: Place, reason: UnknownReason) -> VersionEvidence {
+pub(crate) fn unknown(entry: usize, place: Place, reason: UnknownReason) -> VersionEvidence {
     VersionEvidence::Unknown {
         reason,
         question: question(reason).to_string(),

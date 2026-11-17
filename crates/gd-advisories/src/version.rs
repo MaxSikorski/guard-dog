@@ -7,6 +7,14 @@
 
 use std::fmt;
 
+mod bitcoin;
+mod channel;
+mod semver;
+
+pub use bitcoin::{BitcoinCore, CoreVersion, RcEvidence};
+pub use channel::{Channel, ChannelScheme, ChannelVersion, dual_check};
+pub use semver::{GoTag, SemVer, SemVerVersion};
+
 /// Why a scheme could not read a version string.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]

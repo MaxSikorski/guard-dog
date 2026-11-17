@@ -19,4 +19,7 @@ pub use osv::{
 };
 pub use package::{Ecosystem, MAX_PACKAGE_NAME, PackageError, PackageKey, canonical_package};
 pub use range::{Location, Place, UnknownReason, VersionEvidence, evaluate_entry};
-pub use version::{Candidate, VersionError, VersionScheme};
+pub use version::{
+    BitcoinCore, Candidate, Channel, ChannelScheme, ChannelVersion, CoreVersion, GoTag, RcEvidence,
+    SemVer, SemVerVersion, VersionError, VersionScheme, dual_check,
+};

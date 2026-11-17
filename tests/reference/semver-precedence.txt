@@ -1,0 +1,13 @@
+# SemVer 2.0.0 precedence, in ascending order, one version per line.
+# Every version is strictly lower than the one below it.
+# Source: the example chain in item 11 of the SemVer 2.0.0 specification,
+# https://semver.org/#spec-item-11 (read 2026-11-17).
+# Read by crates/gd-advisories/tests/version_order.rs.
+1.0.0-alpha
+1.0.0-alpha.1
+1.0.0-alpha.beta
+1.0.0-beta
+1.0.0-beta.2
+1.0.0-beta.11
+1.0.0-rc.1
+1.0.0
