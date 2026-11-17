@@ -50,6 +50,21 @@ The property tests use a fixed seed by default, so the same commit gives the sam
 
 **Live check (`lab/up.sh`, by hand; the nightly CI runs it too):** cold start to a funded LND→Core Lightning channel; every node says `regtest` or the lab removes itself (exit 3); the least-privileged logins (bitcoind `gdwatch`, LND `info:read`, the CLN `getinfo` rune) each read the version and are each refused a wider call; every service's own version matches its image label; the whole start finishes in 5 minutes or it fails (exit 4). Measured 2026-11-16 on the Mac (arm64): cold start with all five images pulled fresh 86 s, warm (images cached) 68 s, peak 449 MiB for all five containers. Design run: 69–72 s, 422–447 MiB.
 
+## Two back ends, views must agree
+
+After Super Testnet's `hedgehog_v3`, which runs one test both offline and on regtest and compares what each side thinks. A judge sees a setup through a back end; the same judge on two back ends that describe the same setup must see the same thing, or the test fails and prints every field that differs. Three back ends describe the lab: `fixture` (the `lab-regtest` setup in `fixtures/expected-matches.toml`), `lab-recorded` (`fixtures/lab-recorded/manifest.toml`, written by a real `lab/up.sh` run) and `lab-live` (`lab/.data/manifest.toml`, there only while a lab is up). Judge B (service ids and versions, on its chain) is the only judge that reads a setup today; Judge A and Judge C add a row to `JUDGES` when they land. Judge D reads its corpus, not a setup. In `crates/gd-core/tests/two_backends.rs`:
+
+| Test | What it proves |
+|---|---|
+| `the_recorded_lab_agrees_with_the_fixtures` | On every `cargo test`: Judge B sees the same five services and versions, on regtest, through the fixture and through the recorded lab. |
+| `the_live_lab_agrees_with_the_fixtures` | With a lab up: the same, against the running lab's manifest. With no lab it prints `SKIPPED` and passes, unless `GD_LAB_REQUIRED=1` is set, when it fails. |
+| `disagreements_are_named_field_by_field` | A changed version, a missing service, an extra service and another chain each give exactly the expected sorted message. |
+| `a_good_manifest_is_read_exactly` | A manifest in `up.sh`'s shape reads back as exactly its services. |
+| `every_broken_manifest_is_refused` | 23 broken manifests are each refused for their own reason: not TOML, unknown keys (one with a terminal escape, never printed), wrong format, recorder, source or platform, a control character in the description, no services, too many, a missing or non-text version, ids outside `[a-z0-9-]`, versions outside `up.sh`'s `plain()` characters or over 64 long (space, escape, newline), duplicates and unsorted ids. |
+| `up_sh_still_writes_this_format` | `lab/up.sh` still writes the manifest lines this test reads, still checks reported text with `plain()`, and `lab/.data/` is still gitignored. |
+
+**Live check, 2026-11-16 (Mac, arm64):** with `lab/up.sh` up (cold start to funded channel in 71 s), the fixture and the live lab agree on 5 of 5 services for 1 judge. Changing one recorded version (Core Lightning 26.06.9 to 26.06.8) fails with that one field named.
+
 ## Judges
 
 The judges measure outcomes from outside the code. They arrive next, each with a recorded baseline:

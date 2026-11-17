@@ -53,7 +53,7 @@ The mint uses Nutshell's `FakeWallet` backend: it has no real Lightning connecti
 1. Pick the newest release that's at least 14 days old.
 2. Read its index digest with `docker buildx imagetools inspect <image>:<tag>`. Make sure it lists both linux/amd64 and linux/arm64.
 3. Update the digest and the `org.guard-dog.lab.expected-version` label in `compose.yml`, the table above, and the expected list in `crates/gd-core/tests/lab_compose.rs`.
-4. Run `cargo test --locked`, then `lab/up.sh` and `lab/down.sh`.
+4. Run `lab/up.sh`, copy `lab/.data/manifest.toml` over `fixtures/lab-recorded/manifest.toml` as it is (it holds versions only, no credentials), and update the `lab-regtest` versions in `fixtures/expected-matches.toml`. Run `cargo test --locked` while the lab is up, so both the recorded and the live manifest are compared, then `lab/down.sh`.
 
 ## Growing the lab later
 

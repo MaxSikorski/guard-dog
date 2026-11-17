@@ -1,0 +1,37 @@
+# Written by lab/up.sh. Every version was read from the running service itself,
+# never from an image tag.
+format = 1
+platform = "docker"
+source = "lab"
+recorder = "lab/up.sh format 1"
+description = "Guard Dog regtest lab (lab/compose.yml): bitcoind, LND, Core Lightning, strfry and a Nutshell mint."
+
+# bitcoind reported "/Satoshi:32.1.0/" (bitcoin-cli getnetworkinfo .subversion)
+# image bitcoin/bitcoin@sha256:d2454aaf2ff4ce1ebbc49f4aa05ed044c907b849a80a3f4c0ad23e488e50bbe0
+[[service]]
+id = "bitcoin-core"
+version = "32.1"
+
+# cln reported "v26.06.9" (lightning-cli getinfo .version)
+# image elementsproject/lightningd@sha256:de74289ddcccb68cd60543b08b2b8594002d819125d200492e17a95166d56577
+[[service]]
+id = "core-lightning"
+version = "26.06.9"
+
+# lnd reported "0.21.6-beta" (lncli version .lnd.version)
+# image lightninglabs/lnd@sha256:54b3c87ad0bc3fea3fab8af23ace6421147ea97e6b56bf3911592d7853c185b8
+[[service]]
+id = "lnd"
+version = "0.21.6-beta"
+
+# nutshell reported "Nutshell/0.21.0" (NUT-06 GET /v1/info .version)
+# image cashubtc/nutshell@sha256:beed25e291357368e35e1698bf2e4645d97ed435232a8f8ff6501c77d67c0b90
+[[service]]
+id = "nutshell"
+version = "0.21.0"
+
+# strfry reported "1.1.2-148-g4cd3cf6" (NIP-11 GET / .version)
+# image ghcr.io/hoytech/strfry@sha256:36f1886d185a88ca57c66ebe52e6e9e8428dac2486eea0a5d50ff934f18b60c3
+[[service]]
+id = "strfry"
+version = "1.1.2-148-g4cd3cf6"
